@@ -1,0 +1,10 @@
+{
+  "name": "fluid-music",
+  "label": "FluidMusic",
+  "description": "Spotify Connect, internet radio, and local-library controls.",
+  "version": "0.4.1",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}
