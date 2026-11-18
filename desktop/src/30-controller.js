@@ -3,12 +3,19 @@
 function createController(ctx) {
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
-  const storedPlaylists = normalizePlaylistState(ctx.storage.get('playlistState', { version: 2, playlists: [] }))
+  const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
+  const storedPlaylists = normalizePlaylistState(rawStoredPlaylistState)
+  const rawPlaylistRoot = rawStoredPlaylistState && typeof rawStoredPlaylistState === 'object' ? rawStoredPlaylistState : { version: 2, playlists: [] }
+  const rawPlaylistEntries = Array.isArray(rawPlaylistRoot.playlists) ? rawPlaylistRoot.playlists : []
+  const rawLegacyPlaylists = new Map()
+  storedPlaylists.playlists.forEach((entry, at) => {
+    if (entry.legacy && rawPlaylistEntries[at] && typeof rawPlaylistEntries[at] === 'object') rawLegacyPlaylists.set(entry.id, rawPlaylistEntries[at])
+  })
   const queue = atom(storedSelection.items)
   const index = atom(storedSelection.index)
   const favorites = atom(normalizeQueue(ctx.storage.get('favorites', [])))
   const volume = atom(clampVolume(ctx.storage.get('volume', .5)))
-  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'home')))
+  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'browse')))
   const selectedPlaylist = atom(safeText(ctx.storage.get('selectedPlaylist', '')))
   const undoState = atom(null)
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
@@ -22,32 +29,27 @@ function createController(ctx) {
   const spotify = atom({ connected: false, title: '', subtitle: '', playing: false })
   const spotifyAuth = atom({ state: 'loading', authenticated: false, needsClientId: false, detail: '' })
   const spotifyDevices = atom([])
-  const radioMeter = atom('idle')
-  const statusVisualizer = atom(ctx.storage.get('statusVisualizer', true) !== false)
-  const miniVisualizer = atom(ctx.storage.get('miniVisualizer', true) !== false)
-  const visualizerStyle = atom(['bars', 'wave', 'mirror'].includes(ctx.storage.get('visualizerStyle', 'bars')) ? ctx.storage.get('visualizerStyle', 'bars') : 'bars')
-  const visualConsumers = new Set()
-  let visualBuffer = null
-  let visualReads = 0
+  const titlebarOpen = atom(false)
+  const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
+  let youtubeHandle = null
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
   const sessionTracks = atom([])
   const localRoots = atom([])
+  const history = atom([])
   const shuffle = atom(false)
   const repeat = atom('off')
   const spotifyAutoplay = atom(Boolean(ctx.storage.get('spotifyAutoplay', false)))
   let audio = null
   let audioSource = null
-  let context = null
-  let mediaSource = null
-  let analyser = null
-  let gain = null
+
   let disposed = false
   let radioGeneration = 0
   let radioTimeout = null
   let spotifyTimer = null
   let spotifyProgressTimer = null
+  let youtubeTimer = null
   let authTimer = null
   let authAttempts = 0
   let pollIntervalOpen = 8
@@ -59,8 +61,10 @@ function createController(ctx) {
   let requestSequence = 0
   let spotifyProgressAnchor = null
   let spotifyQueueGuard = null
+  let youtubeQueueGuard = null
   let transition = 0
   let transitionChain = Promise.resolve()
+  let lastHistory = { key: '', at: 0 }
   const localRegistry = new Map()
 
   const addLog = (level, event, detail = {}) => {
@@ -105,9 +109,13 @@ function createController(ctx) {
     ctx.storage.set('volume', volume.get())
     ctx.storage.set('spotifyAutoplay', spotifyAutoplay.get())
   }
-  const persistPlaylists = () => ctx.storage.set('playlistState', { version: 3, playlists: playlists.get() })
+  const playlistStorageState = entries => ({
+    ...rawPlaylistRoot,
+    version: 3,
+    playlists: entries.map(entry => rawLegacyPlaylists.get(entry.id) || entry)
+  })
+  const persistPlaylists = () => ctx.storage.set('playlistState', playlistStorageState(playlists.get()))
   persist()
-  persistPlaylists()
   const revokeLocal = item => {
     if (item?.source !== 'local' || !item.objectUrl) return
     try { URL.revokeObjectURL(item.objectUrl) } catch { /* Session object URL cleanup is best-effort. */ }
@@ -138,6 +146,33 @@ function createController(ctx) {
     }
   }
   const spotifyRequest = request
+  const recordHistory = item => {
+    const serialized = serializePlaylistItem(item)
+    if (!serialized) return
+    const key = `${serialized.source}:${serialized.id || serialized.uri || serialized.url || serialized.title}`
+    const now = Date.now()
+    if (lastHistory.key === key && now - lastHistory.at < 5000) return
+    lastHistory = { key, at: now }
+    void request('/history', { method: 'POST', body: { item: serialized } })
+      .then(data => {
+        const entry = data?.entry
+        if (entry?.item) history.set([{ id: entry.id, playedAt: safeText(entry.played_at), item: normalizeQueueItem(entry.item) }, ...history.get()].filter(value => value.item).slice(0, 500))
+      })
+      .catch(() => {})
+  }
+  const refreshHistory = async () => {
+    const data = await request('/history?limit=500&offset=0')
+    const entries = (Array.isArray(data?.items) ? data.items : []).map(entry => {
+      const item = normalizeQueueItem(entry?.item)
+      return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
+    }).filter(Boolean)
+    history.set(entries)
+    return entries
+  }
+  const clearHistory = async () => {
+    await request('/history', { method: 'DELETE' })
+    history.set([])
+  }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
     // An explicit user choice is authoritative even while Spotify's device list is stale.
@@ -164,6 +199,21 @@ function createController(ctx) {
     if (spotifyAutoplay.get() || !guard || guard.token !== transition || !guard.seenExpected || guard.advancing) return
     guard.advancing = true
     addLog('state', 'spotify.hermes-queue-advance', { reason, expectedTrack: guard.expectedUri, observedTrack: observedUri || 'none' })
+    void next().catch(error => {
+      guard.advancing = false
+      message.set(error?.message || 'FluidMusic could not advance to the next queue item.')
+    })
+  }
+
+  function armYouTubeQueueGuard(item, token = transition) {
+    youtubeQueueGuard = item?.source === 'youtube' ? { token, itemId: item.id, advancing: false } : null
+  }
+
+  function requestYouTubeQueueAdvance() {
+    const guard = youtubeQueueGuard
+    if (!guard || guard.token !== transition || guard.itemId !== current()?.id || guard.advancing) return
+    guard.advancing = true
+    addLog('state', 'youtube.hermes-queue-advance', { item: guard.itemId })
     void next().catch(error => {
       guard.advancing = false
       message.set(error?.message || 'FluidMusic could not advance to the next queue item.')
@@ -207,37 +257,25 @@ function createController(ctx) {
       audio = null
       audioSource = null
     }
-    if (gain) gain.disconnect()
-    if (analyser) analyser.disconnect()
-    if (mediaSource) mediaSource.disconnect()
-    gain = null
-    analyser = null
-    visualBuffer = null
-    mediaSource = null
-    if (context?.state === 'running') void context.suspend()
-    radioMeter.set('idle')
+
   }
 
-  async function startRadio(item, analyse, token) {
+  async function startRadio(item, _analyse, token) {
     stopInternalAudio()
     if (!item || item.source !== 'radio' || disposed || token !== transition) return
     const generation = radioGeneration
+    let historyRecorded = false
     const element = new Audio()
     audio = element
     audioSource = 'radio'
     element.preload = 'none'
-    element.volume = analyse ? 1 : volume.get()
-    if (analyse) element.crossOrigin = 'anonymous'
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
+    element.volume = volume.get()
     progress.set({ positionMs: 0, durationMs: 0 })
     status.set('loading')
     const isCurrent = () => !disposed && generation === radioGeneration && element === audio
     const finishFailure = () => {
       if (!isCurrent()) return
-      if (analyse) {
-        void startRadio(item, false, token)
-        return
-      }
+
       status.set('error')
       message.set('This HTTPS radio stream could not connect. Choose another station or retry.')
     }
@@ -247,30 +285,21 @@ function createController(ctx) {
       clearTimeout(radioTimeout)
       radioTimeout = null
       status.set('playing')
-      message.set(analyse ? '' : 'Audio is playing. Analyser unavailable; this display is static.')
+      message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('pause', () => { if (isCurrent() && !element.ended && status.get() === 'playing') status.set('paused') })
     element.addEventListener('error', finishFailure)
     element.addEventListener('ended', finishFailure)
     element.src = item.streamUrl
     try {
-      if (analyse) {
-        context ??= new AudioContext()
-        gain = context.createGain()
-        gain.gain.value = volume.get()
-        mediaSource = context.createMediaElementSource(element)
-        mediaSource.connect(gain)
-        gain.connect(context.destination)
-        syncAnalyser()
-        await context.resume()
-      }
       await element.play()
     } catch {
       finishFailure()
     }
   }
 
-  async function startLocal(item, token, analyse = Boolean(item?.objectUrl)) {
+  async function startLocal(item, token) {
     stopInternalAudio()
     if (!item || item.source !== 'local' || disposed || token !== transition) return
     const sources = [item.objectUrl, ...(Array.isArray(item.playbackUrls) ? item.playbackUrls : localPlaybackUrls(item.filePath))].filter(Boolean)
@@ -280,13 +309,12 @@ function createController(ctx) {
       return
     }
     const generation = radioGeneration
+    let historyRecorded = false
     const element = new Audio()
     audio = element
     audioSource = 'local'
     element.preload = 'metadata'
-    if (analyse) element.crossOrigin = 'anonymous'
     element.volume = volume.get()
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
     progress.set({ positionMs: 0, durationMs: Math.max(0, Number(item.durationMs) || 0) })
     status.set('loading')
     let sourceIndex = 0
@@ -301,8 +329,6 @@ function createController(ctx) {
         if (isCurrent() && sourceIndex + 1 < sources.length) {
           sourceIndex += 1
           await playSource()
-        } else if (isCurrent() && analyse) {
-          await startLocal(item, token, false)
         } else if (isCurrent()) {
           status.set('error')
           message.set('Hermes could not start this local audio file. Rescan it or check Chromium format support.')
@@ -312,21 +338,10 @@ function createController(ctx) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       played = true
-      if (analyse && !mediaSource) {
-        try {
-          context ??= new AudioContext()
-          gain = context.createGain()
-          gain.gain.value = volume.get()
-          mediaSource = context.createMediaElementSource(element)
-          element.volume = 1
-          mediaSource.connect(gain)
-          gain.connect(context.destination)
-          syncAnalyser()
-          void context.resume().catch(() => { if (isCurrent()) void startLocal(item, token, false) })
-        } catch { void startLocal(item, token, false); return }
-      }
+
       status.set('playing')
       message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('loadedmetadata', () => {
       if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
@@ -343,7 +358,7 @@ function createController(ctx) {
         void playSource()
         return
       }
-      if (analyse && !played) { void startLocal(item, token, false); return }
+
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder and retry.')
     })
@@ -533,7 +548,7 @@ function createController(ctx) {
     queue.set([...queue.get(), ...opened])
     if (index.get() < 0 && opened.length) { index.set(before); status.set('paused') }
     persist()
-    message.set(opened.length ? `Opened ${opened.length} audio file(s). Select Play to listen with visualization. Session files are not saved to playlists and must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
+    message.set(opened.length ? `Opened ${opened.length} audio file(s). Session files must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
     return opened.length
   }
 
@@ -568,6 +583,7 @@ function createController(ctx) {
     if (item?.source === 'spotify') {
       await spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() })
     }
+
   }
 
   function runTransition(work) {
@@ -589,6 +605,7 @@ function createController(ctx) {
       spotifyProgressAnchor = null
       spotifyQueueGuard = null
     }
+    if (item.source !== 'youtube') youtubeQueueGuard = null
     if (item.source === 'radio') {
       await startRadio(item, true, token)
       return
@@ -597,12 +614,21 @@ function createController(ctx) {
       await startLocal(item, token)
       return
     }
+    if (item.source === 'youtube') {
+      youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', item })
+      progress.set({ positionMs: 0, durationMs: item.durationMs })
+      status.set('paused')
+      message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+      recordHistory(item)
+      return
+    }
     if (item.source === 'spotify') {
       armSpotifyQueueGuard(item, token)
       status.set('loading')
       try {
         const payload = Number.isInteger(contextPosition) ? { context_uri: item.uri, offset: contextPosition } : spotifyPlayPayload(item)
         await spotifyRequest('/play', { method: 'POST', body: spotifyCommandBody(payload) })
+        recordHistory(item)
         spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -656,12 +682,18 @@ function createController(ctx) {
         }
         return
       }
+      if (item.source === 'youtube') {
+        message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+        if (token === transition) status.set('paused')
+        return
+      }
       const pause = status.get() === 'playing'
       status.set('loading')
       try {
         if (!pause) armSpotifyQueueGuard(item, token)
         const resume = spotifyStartedUri === item.uri
         await spotifyRequest(pause ? '/pause' : '/play', { method: 'POST', body: spotifyCommandBody(pause || resume ? {} : spotifyPlayPayload(item)) })
+        if (!pause) recordHistory(item)
         if (!pause) spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -717,6 +749,7 @@ function createController(ctx) {
       progress.set({ positionMs: target, durationMs })
       await refreshSpotify()
     }
+
   }
 
   async function setShuffle(value) {
@@ -822,12 +855,7 @@ function createController(ctx) {
     if (next > 0) { unmutedVolume = next; ctx.storage.set('unmutedVolume', next) }
     const version = ++volumeVersion
     if (volumeTimer) clearTimeout(volumeTimer)
-    if (audio && !gain) audio.volume = next
-    if (gain) {
-      const now = context?.currentTime || 0
-      gain.gain.cancelAndHoldAtTime?.(now)
-      gain.gain.setTargetAtTime(next, now, .015)
-    }
+    if (audio) audio.volume = next
     if (current()?.source === 'spotify') {
       const body = spotifyCommandBody({ volume_percent: Math.round(next * 100) })
       volumeTimer = setTimeout(() => {
@@ -835,6 +863,7 @@ function createController(ctx) {
         void spotifyRequest('/volume', { method: 'PUT', body }).catch(error => { if (version === volumeVersion) message.set(error?.message || 'Spotify volume could not be changed.') })
       }, 180)
     }
+
     persist()
   }
 
@@ -855,6 +884,7 @@ function createController(ctx) {
       queue.set([])
       index.set(-1)
       spotifyQueueGuard = null
+      youtubeQueueGuard = null
       spotifyProgressAnchor = null
       spotifyStartedUri = ''
       progress.set({ positionMs: 0, durationMs: 0 })
@@ -873,13 +903,18 @@ function createController(ctx) {
   function createPlaylist(name, description = '') {
     undoState.set(null)
     const now = new Date().toISOString()
-    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled playlist'), description: safeText(description), createdAt: now, updatedAt: now, items: [] }
+    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled collection'), description: safeText(description), createdAt: now, updatedAt: now, items: [], legacy: false }
     playlists.set([...playlists.get(), playlist])
     persistPlaylists()
     return playlist
   }
 
+  function isEditablePlaylist(id) {
+    return playlists.get().some(entry => entry.id === id && !entry.legacy)
+  }
+
   function updatePlaylist(id, changes = {}) {
+    if (!isEditablePlaylist(id)) return null
     undoState.set(null)
     let updated = null
     playlists.set(playlists.get().map(entry => {
@@ -893,7 +928,7 @@ function createController(ctx) {
 
   function deletePlaylist(id) {
     const before = playlists.get()
-    if (!before.some(entry => entry.id === id)) return false
+    if (!before.some(entry => entry.id === id && !entry.legacy)) return false
     rememberPlaylistEdit('Delete playlist')
     playlists.set(before.filter(entry => entry.id !== id))
     persistPlaylists()
@@ -902,7 +937,7 @@ function createController(ctx) {
 
   function duplicatePlaylist(id) {
     const original = playlists.get().find(entry => entry.id === id)
-    if (!original) return null
+    if (!original || original.legacy) return null
     const copy = createPlaylist(`${original.name} copy`, original.description)
     const items = original.items.map(item => ({ ...item }))
     playlists.set(playlists.get().map(entry => entry.id === copy.id ? { ...entry, items } : entry))
@@ -911,9 +946,11 @@ function createController(ctx) {
   }
 
   function addToPlaylist(id, value) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     const normalized = normalizeQueueItem(value)
     if (!normalized) return false
+    if (normalized.source !== 'local') { message.set('New FluidMusic collections are local-only. Use Up Next for cross-source listening.'); return false }
     if (normalized.source === 'local' && !normalized.localTrackId) { message.set('Session files cannot be saved to playlists. Index their folder to create persistent references.'); return false }
     if (normalized.source === 'local' && !normalized.unavailable) {
       localRegistry.set(normalized.id, normalized)
@@ -935,6 +972,7 @@ function createController(ctx) {
   }
 
   function moveInPlaylist(id, at, direction) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
@@ -991,7 +1029,12 @@ function createController(ctx) {
   }
 
   function saveQueueAsPlaylist(name) {
-    const items = queue.get().filter(item => item.source !== 'local' || item.localTrackId).map(serializePlaylistItem).filter(Boolean)
+    const queued = queue.get()
+    if (queued.some(item => item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Remove cloud, radio, YouTube, and session-only items before saving this queue.')
+      return null
+    }
+    const items = queued.map(serializePlaylistItem).filter(Boolean)
     if (!items.length) { message.set('There are no persistent items to save.'); return null }
     const playlist = createPlaylist(name)
     playlists.set(playlists.get().map(entry => entry.id === playlist.id ? { ...entry, items } : entry))
@@ -1000,16 +1043,22 @@ function createController(ctx) {
   }
 
   function addManyToPlaylist(id, values) {
+    if (!isEditablePlaylist(id)) return 0
+    const raw = Array.isArray(values) ? values : []
+    const items = raw.map(normalizeQueueItem)
+    if (!raw.length || items.some(item => !item || item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Nothing was saved.')
+      return 0
+    }
     undoState.set(null)
-    const items = (Array.isArray(values) ? values : []).map(normalizeQueueItem).filter(Boolean)
     let count = 0
     // Commit once, preserving duplicate occurrences and their order.
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
-      const stored = items.filter(item => item.source !== 'local' || item.localTrackId).map(item => {
-        if (item.source === 'local' && !item.unavailable) {
+      const stored = items.map(item => {
+        if (!item.unavailable) {
           localRegistry.set(item.id, item)
-          if (item.localTrackId) localRegistry.set(item.localTrackId, item)
+          localRegistry.set(item.localTrackId, item)
         }
         return serializePlaylistItem(item)
       }).filter(Boolean)
@@ -1034,6 +1083,7 @@ function createController(ctx) {
   }
 
   function removePlaylistItems(id, positions) {
+    if (!isEditablePlaylist(id)) return 0
     const selected = new Set(positions.filter(Number.isInteger))
     if (!selected.size) return 0
     rememberPlaylistEdit('Remove tracks')
@@ -1050,7 +1100,7 @@ function createController(ctx) {
 
   function deduplicatePlaylist(id) {
     const playlist = playlists.get().find(entry => entry.id === id)
-    if (!playlist) return 0
+    if (!playlist || playlist.legacy) return 0
     const seen = new Set()
     const duplicates = []
     playlist.items.forEach((item, at) => {
@@ -1062,7 +1112,11 @@ function createController(ctx) {
   }
 
   function exportPlaylists(id = '') {
-    return JSON.stringify({ format: 'fluid-music', ...normalizePlaylistState({ playlists: playlists.get().filter(entry => !id || entry.id === id) }) }, null, 2)
+    const entries = playlists.get().filter(entry => !id || entry.id === id).map(entry => {
+      const raw = rawLegacyPlaylists.get(entry.id)
+      return raw || normalizePlaylistState({ playlists: [entry] }).playlists[0]
+    })
+    return JSON.stringify({ format: 'fluid-music', version: 3, playlists: entries }, null, 2)
   }
 
   function importPlaylists(text) {
@@ -1076,7 +1130,11 @@ function createController(ctx) {
     const accepted = normalized.playlists.reduce((count, entry) => count + entry.items.length, 0)
     if (accepted !== supplied) throw new Error('The file contains unsupported or invalid tracks. Nothing was imported.')
     rememberPlaylistEdit('Import playlists')
-    const imported = normalized.playlists.map(entry => ({ ...entry, id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}` }))
+    const imported = normalized.playlists.map((entry, at) => {
+      const id = `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+      if (entry.legacy) rawLegacyPlaylists.set(id, { ...data.playlists[at], id })
+      return { ...entry, id }
+    })
     playlists.set([...playlists.get(), ...imported])
     persistPlaylists()
     return imported
@@ -1094,45 +1152,139 @@ function createController(ctx) {
   }
 
 
-  function syncAnalyser() {
-    if (!mediaSource || !gain || disposed) return
-    if (visualConsumers.size && !analyser) {
-      analyser = context.createAnalyser()
-      analyser.fftSize = 512
-      analyser.smoothingTimeConstant = .72
-      // Analysis is a side tap. Never break or reroute source → gain → speakers.
-      mediaSource.connect(analyser)
-      radioMeter.set('analyser')
-    } else if (!visualConsumers.size && analyser) {
-      mediaSource.disconnect(analyser)
-      analyser.disconnect()
-      analyser = null
-      visualBuffer = null
-      radioMeter.set('ready')
+  async function openYouTube(url = 'https://www.youtube.com/') {
+    const target = url === 'https://www.youtube.com/' ? url : normalizeQueueItem({ source: 'youtube', url })?.url
+    if (!target) throw new Error('Choose a valid YouTube watch URL.')
+    try {
+      youtubeHandle = await ctx.preview.openOrFocus({ key: 'fluid-music-youtube', url: target, label: 'YouTube' })
+      if (!youtubeHandle) throw new Error('Hermes did not return the owned YouTube tab handle.')
+      youtube.set({ ...youtube.get(), status: 'open', error: '' })
+      return youtubeHandle
+    } catch (error) {
+      const detail = userFacingError(error, 'YouTube could not be opened in the owned Browser tab.')
+      youtube.set({ ...youtube.get(), status: 'error', error: detail })
+      throw new Error(detail)
     }
   }
 
-  function acquireVisualizer() {
-    const consumer = Symbol('visualizer')
-    visualConsumers.add(consumer)
-    syncAnalyser()
-    return () => { visualConsumers.delete(consumer); syncAnalyser() }
+  async function runYouTube(command = 'state', value = 0) {
+    if (!youtubeHandle) {
+      const detail = 'Open YouTube first. FluidMusic never controls the focused chat preview.'
+      youtube.set({ ...youtube.get(), status: 'error', error: detail })
+      return null
+    }
+    const action = ['state', 'play', 'pause', 'toggle', 'seek', 'volume'].includes(command) ? command : 'state'
+    const numericValue = Number.isFinite(Number(value)) ? Number(value) : 0
+    const selectedYouTube = current()
+    const expectedVideoId = action !== 'state' && selectedYouTube?.source === 'youtube'
+      ? safeText(selectedYouTube.id).replace(/^youtube:/, '')
+      : ''
+    const requestTransition = transition
+    const code = `(async () => { const action = ${JSON.stringify(action)}; const value = ${JSON.stringify(numericValue)}; const expectedVideoId = ${JSON.stringify(expectedVideoId)}; const videoId = location.protocol === 'https:' && location.hostname === 'www.youtube.com' && location.pathname === '/watch' ? new URLSearchParams(location.search).get('v') || '' : ''; if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return {ok:false,invalidPage:true,error:'The owned tab is not on a valid YouTube watch page.',url:location.href}; if (expectedVideoId && videoId !== expectedVideoId) return {ok:false,wrongVideo:true,error:'The owned tab is not showing the selected YouTube video.',url:location.href}; const findMedia = () => { const media = [...document.getElementsByTagName('video'), ...document.getElementsByTagName('audio')].filter(node => node instanceof HTMLMediaElement); return media.find(node => !node.paused && !node.ended) || media[0] || null; }; let media = findMedia(); if (!media && action === 'play') { for (let attempt = 0; attempt < 20 && !media; attempt += 1) { await new Promise(resolve => setTimeout(resolve, 250)); media = findMedia(); } } if (!media) return {ok:false,error:'No YouTube video is available on this watch page.',url:location.href}; try { if (action === 'play') await media.play(); else if (action === 'pause') media.pause(); else if (action === 'toggle') media.paused ? await media.play() : media.pause(); else if (action === 'seek') media.currentTime = Math.max(0, Math.min(Number(media.duration) || 86400, value)); else if (action === 'volume') media.volume = Math.max(0, Math.min(1, value)); return {ok:true,url:location.href,title:document.title.replace(/ - YouTube$/,''),subtitle:'YouTube',artwork:media.poster || '',playing:!media.paused && !media.ended,ended:Boolean(media.ended),currentTime:Number(media.currentTime)||0,duration:Number(media.duration)||0,volume:Number(media.volume)}; } catch (error) { return {ok:false,error:error?.message || 'YouTube media control failed.',url:location.href}; } })()`
+    try {
+      const result = await ctx.preview.executeJavaScriptIn(youtubeHandle, code)
+      if (requestTransition !== transition) return null
+      if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error('The owned page returned an invalid state response.')
+      if (!result.ok) throw new Error(safeText(result.error, 'YouTube page control is unavailable.'))
+      const item = normalizeQueueItem({ source: 'youtube', url: result.url, title: result.title, subtitle: result.subtitle, artwork: result.artwork, durationMs: Math.max(0, Number(result.duration) || 0) * 1000 })
+      if (!item) throw new Error('The owned tab is not on a valid YouTube watch page. Open a video and refresh state.')
+      const snapshot = { status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: Boolean(result.playing), ended: Boolean(result.ended), error: '', item }
+      youtube.set(snapshot)
+      if (current()?.source === 'youtube' && current()?.id === item.id) {
+        progress.set({ positionMs: Math.max(0, Number(result.currentTime) || 0) * 1000, durationMs: item.durationMs })
+        status.set(snapshot.playing ? 'playing' : 'paused')
+        message.set('')
+        if (snapshot.ended) requestYouTubeQueueAdvance()
+      }
+      return snapshot
+    } catch (error) {
+      const detail = userFacingError(error, 'YouTube control was denied or the owned tab is unavailable. Keep it docked and grant script consent, then retry.')
+      youtube.set({ ...youtube.get(), status: 'error', error: detail })
+      message.set(detail)
+      return null
+    }
   }
 
-  function visualSamples(style = 'wave') {
-    if (!visualConsumers.size || !analyser || status.get() !== 'playing' || disposed) return null
-    const length = style === 'wave' ? analyser.fftSize : analyser.frequencyBinCount
-    if (!visualBuffer || visualBuffer.length !== length) visualBuffer = new Uint8Array(length)
-    if (style === 'wave') analyser.getByteTimeDomainData(visualBuffer)
-    else analyser.getByteFrequencyData(visualBuffer)
-    visualReads++
-    return visualBuffer
+  async function addCurrentYouTube() {
+    const snapshot = await runYouTube('state')
+    if (!snapshot?.item) return false
+    const added = add(snapshot.item)
+    if (added) message.set(`Added “${snapshot.item.title}” to Up Next.`)
+    return added
   }
-  function radioSamples() { return visualSamples('wave') }
-  function setStatusVisualizer(value) { statusVisualizer.set(Boolean(value)); ctx.storage.set('statusVisualizer', Boolean(value)) }
-  function setMiniVisualizer(value) { miniVisualizer.set(Boolean(value)); ctx.storage.set('miniVisualizer', Boolean(value)) }
-  function setVisualizerStyle(value) { if (['bars', 'wave', 'mirror'].includes(value)) { visualizerStyle.set(value); ctx.storage.set('visualizerStyle', value) } }
-  const visualDiagnostics = () => ({ consumers: visualConsumers.size, analyser: Boolean(analyser), reads: visualReads })
+
+  function addYouTubeItem(value, select = true) {
+    const item = normalizeQueueItem(value)
+    if (!item || item.source !== 'youtube') throw new Error('Choose a valid YouTube video.')
+    const before = queue.get().length
+    if (!add(item, false)) return false
+    if (select) void playAt(before)
+    message.set(`Added “${item.title}” from YouTube.`)
+    return true
+  }
+
+  async function addYouTubeUrl(url, select = true) {
+    const data = await request('/youtube/resolve', { method: 'POST', body: { url } })
+    return addYouTubeItem(data?.item, select)
+  }
+
+  async function searchYouTube(query) {
+    const data = await request(`/youtube/search?q=${encodeURIComponent(query)}&limit=12`)
+    return (Array.isArray(data?.items) ? data.items : []).map(normalizeQueueItem).filter(item => item?.source === 'youtube')
+  }
+
+  async function resolveYouTubeEmbedUrl(item) {
+    const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error('This YouTube item has an invalid video ID.')
+    const data = await request(`/youtube/embed-host?video_id=${encodeURIComponent(videoId)}`)
+    const url = safeText(data?.url)
+    if (!url.startsWith('http://127.0.0.1:')) throw new Error('FluidMusic returned an invalid YouTube player URL.')
+    return url
+  }
+
+  async function refreshQueuedYouTubeMetadata() {
+    const stale = queue.get().filter(item => item.source === 'youtube' && (item.title === 'YouTube video' || item.subtitle === 'Embedded player'))
+    if (!stale.length) return
+    let changed = false
+    for (const item of stale) {
+      try {
+        const data = await request('/youtube/resolve', { method: 'POST', body: { url: item.url } })
+        const resolved = normalizeQueueItem(data?.item)
+        if (!resolved) continue
+        queue.set(queue.get().map(value => value.id === item.id ? resolved : value))
+        if (current()?.id === resolved.id) youtube.set({ ...youtube.get(), title: resolved.title, subtitle: resolved.subtitle, artwork: resolved.artwork, item: resolved })
+        changed = true
+      } catch { /* Old queue labels remain usable when metadata is temporarily unavailable. */ }
+    }
+    if (changed) persist()
+  }
+
+  async function playCurrentYouTube() {
+    const snapshot = await runYouTube('state')
+    if (!snapshot?.item) return false
+    return runTransition(async token => {
+      if (token !== transition) return false
+      const previous = current()
+      await stopActive(previous)
+      if (token !== transition) return false
+      let at = queue.get().findIndex(item => item.id === snapshot.item.id)
+      if (at < 0) {
+        queue.set([...queue.get(), snapshot.item])
+        at = queue.get().length - 1
+      } else {
+        queue.set(queue.get().map((item, itemAt) => itemAt === at ? snapshot.item : item))
+      }
+      persist()
+      await startSelected(at, token)
+      return token === transition && status.get() !== 'error'
+    })
+  }
+
+  function toggleYouTube() {
+    const item = current()
+    if (!item || item.source !== 'youtube' || item.id !== youtube.get().item?.id) return Promise.resolve(false)
+    return toggle().then(() => true)
+  }
 
   const spotifyTrack = track => normalizeQueueItem({
     source: 'spotify', id: track?.id, title: track?.name, subtitle: (track?.artists || []).map(artist => artist.name).join(', '), uri: track?.uri,
@@ -1198,41 +1350,26 @@ function createController(ctx) {
   async function resolvePlaylistSave(item, mode, options = {}) {
     const normalized = normalizeQueueItem(item)
     if (!normalized) throw new Error('Choose a supported track or playlist.')
-    if (normalized.source === 'local' && !normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
+    if (normalized.source !== 'local') throw new Error('New FluidMusic collections accept indexed local tracks only.')
+    if (!normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
     const checkCancelled = () => { if (disposed || options.signal?.aborted) throw new Error('Save cancelled. Nothing was changed.') }
     checkCancelled()
-    if (mode !== 'tracks' || !/^spotify:playlist:/.test(normalized.uri || '')) return { items: [serializePlaylistItem(normalized)], skipped: 0 }
-    const items = []
-    let offset = 0, skipped = 0, expectedTotal = null
-    do {
-      checkCancelled()
-      const page = await loadSpotifyPlaylist(normalized, offset)
-      checkCancelled()
-      if (page.total > 10000 || (expectedTotal !== null && expectedTotal !== page.total)) throw new Error('This playlist is too large or changed while loading. Nothing was saved; retry with a stable playlist of up to 10,000 items.')
-      expectedTotal = page.total
-      skipped += page.skipped
-      items.push(...page.tracks.map(track => serializePlaylistItem({ ...track, contextUri: '' })))
-      options.onProgress?.({ loaded: page.nextOffset, total: page.total })
-      if (!page.next) break
-      if (page.nextOffset <= offset || page.nextOffset >= 10000) throw new Error('Spotify pagination could not complete. Nothing was saved; retry.')
-      offset = page.nextOffset
-    } while (true)
-    if (!items.length) throw new Error('This Spotify playlist has no supported tracks to save.')
-    return { items, skipped }
+    return { items: [serializePlaylistItem(normalized)], skipped: 0 }
   }
 
   async function saveToPlaylist({ id = '', name = '', item, mode = 'tracks', signal, onProgress } = {}) {
     // Resolve all pages first. No empty destination or partial copy is published on failure/cancel.
     if (!id && !safeText(name)) throw new Error('Enter a playlist name.')
-    if (id && !playlists.get().some(entry => entry.id === id)) throw new Error('Choose an existing destination playlist.')
+    if (id && playlists.get().some(entry => entry.id === id && entry.legacy)) throw new Error('Legacy mixes are read-only and cannot be save destinations.')
+    if (id && !playlists.get().some(entry => entry.id === id && !entry.legacy)) throw new Error('Choose an existing writable local collection.')
     const resolved = await resolvePlaylistSave(item, mode, { signal, onProgress })
     if (disposed || signal?.aborted) throw new Error('Save cancelled. Nothing was changed.')
     const existing = playlists.get()
     if (id && !existing.some(entry => entry.id === id)) throw new Error('The destination was deleted. Nothing was saved.')
     const now = new Date().toISOString()
     const destinationId = id || `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
-    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items }]
-    const state = { version: 3, playlists: next }
+    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items, legacy: false }]
+    const state = playlistStorageState(next)
     ctx.storage.set('playlistState', state)
     if (JSON.stringify(ctx.storage.get('playlistState', null)) !== JSON.stringify(state)) throw new Error('Playlist storage could not confirm the save. Check available storage and retry.')
     undoState.set(null)
@@ -1246,6 +1383,13 @@ function createController(ctx) {
       void refreshSpotify()
       void refreshSpotifyDevices()
     }, 1000 * (pollOpen ? pollIntervalOpen : pollIntervalClosed))
+  }
+
+  function restartYouTubePolling() {
+    if (youtubeTimer) clearInterval(youtubeTimer)
+    youtubeTimer = setInterval(() => {
+      if (youtubeHandle && current()?.source === 'youtube') void runYouTube('state')
+    }, 2000)
   }
 
   function setPollingOpen(open) {
@@ -1265,35 +1409,37 @@ function createController(ctx) {
   }
 
   restartSpotifyPolling()
+  restartYouTubePolling()
   spotifyProgressTimer = setInterval(updateSpotifyProgress, 500)
   void loadConfig()
   void refreshSpotify()
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
   void refreshLocalLibrary().catch(() => {})
+  void refreshHistory().catch(() => {})
+  void refreshQueuedYouTubeMetadata()
   ctx.onDispose(() => {
     disposed = true
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
+    clearInterval(youtubeTimer)
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
-    if (context) void context.close()
+
   })
   return {
-    visualSampleRate: () => context?.sampleRate || 0,
-    statusVisualizer, miniVisualizer, visualizerStyle, setStatusVisualizer, setMiniVisualizer, setVisualizerStyle, acquireVisualizer, visualSamples, visualDiagnostics,
-    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute,
+    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, radioMeter, progress, playlists, localTracks, localRoots, shuffle, repeat, spotifyAutoplay,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, radioSamples, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
-    capabilities: () => mediaCapabilities(current()), clearLogs, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
+    capabilities: () => mediaCapabilities(current()), clearLogs, refreshHistory, clearHistory, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
   }
 }
 /* CONTROLLER_END */

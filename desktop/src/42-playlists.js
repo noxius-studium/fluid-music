@@ -59,7 +59,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
     queue = useValue(controller.queue),
     favorites = useValue(controller.favorites),
     auth = useValue(controller.spotifyAuth)
-  const [source, setSource] = useState('queue'),
+  const [source, setSource] = useState('local'),
     [query, setQuery] = useState(''),
     [results, setResults] = useState([]),
     [chosen, setChosen] = useState(new Set()),
@@ -113,10 +113,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
       'div',
       { className: 'fluid-segmented', role: 'group', 'aria-label': 'Track source' },
       [
-        ['queue', 'Current queue'],
         ['local', 'Local music'],
-        ['radio', 'Radio'],
-        ['spotify', 'Spotify'],
       ].map(([value, label]) =>
         h(
           'button',
@@ -257,7 +254,6 @@ function PlaylistEditor({ controller, playlist }) {
       h(
         'div',
         { className: 'fluid-row-copy' },
-        h('p', { className: 'fluid-kicker' }, 'FluidMusic playlist'),
         h('h2', { className: 'fluid-library-title' }, playlist.name),
         h('p', { className: 'fluid-muted' }, playlist.description || 'A mix made by you.'),
         h(
@@ -448,6 +444,15 @@ function PlaylistEditor({ controller, playlist }) {
       ),
   )
 }
+function LegacyPlaylist({ controller, playlist }) {
+  const items = controller.playlistItems(playlist.id)
+  return h('section', { className: 'fluid-playlist-editor' },
+    h('div', { className: 'fluid-playlist-heading' }, h('div', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })), h('div', {}, h('span', { className: 'fluid-source-chip' }, 'Legacy mix · read only'), h('h2', { className: 'fluid-library-title' }, playlist.name), h('p', { className: 'fluid-muted' }, playlist.description || 'Preserved from FluidMusic v3.'))),
+    h('p', { className: 'fluid-notice' }, 'This mixed collection is preserved without rewriting it. You can play, enqueue, or export it; new FluidMusic collections are local-only.'),
+    h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { primary: true, disabled: !items.length, onClick: () => void controller.playPlaylist(playlist.id) }, 'Play legacy mix'), h(WorkspaceButton, { disabled: !items.length, onClick: () => controller.enqueuePlaylist(playlist.id) }, 'Add to Up Next'), h(WorkspaceButton, { onClick: () => downloadPlaylist(controller, playlist.id) }, 'Export')),
+    h('div', { className: 'fluid-track-list' }, items.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, onPlay: () => void controller.playPlaylist(playlist.id, at), extraActions: null }))),
+  )
+}
 function PlaylistsPage({ controller }) {
   const playlists = useValue(controller.playlists),
     selectedId = useValue(controller.selectedPlaylist),
@@ -457,6 +462,8 @@ function PlaylistsPage({ controller }) {
     [error, setError] = useState('')
   const file = useRef(null),
     selected = playlists.find((entry) => entry.id === selectedId) || playlists[0]
+  const localCollections = playlists.filter(entry => !entry.legacy)
+  const legacyCollections = playlists.filter(entry => entry.legacy)
   const filtered = playlists.filter((entry) =>
     `${entry.name} ${entry.description}`.toLowerCase().includes(filter.toLowerCase()),
   )
@@ -481,18 +488,13 @@ function PlaylistsPage({ controller }) {
     {},
     h(PageHead, {
       kicker: 'Made by you',
-      title: 'Your playlists.',
-      subtitle: 'Spotify, local tracks, and live radio. Arrange them your way.',
+      title: 'Local collections',
+      subtitle: 'New collections contain indexed local tracks only. Legacy mixes stay readable without migration or data loss.',
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { onClick: () => file.current?.click() }, 'Import'),
-        h(
-          WorkspaceButton,
-          { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) },
-          'Export all',
-        ),
-        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New playlist'),
+        h(WorkspaceButton, { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) }, 'Export all'),
+        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New local collection'),
       ),
     }),
     h('input', {
@@ -525,7 +527,7 @@ function PlaylistsPage({ controller }) {
           'aria-label': 'Filter playlists',
           placeholder: 'Find a playlist…',
         }),
-        h('p', { className: 'fluid-muted' }, `${playlists.length} collections`),
+        h('p', { className: 'fluid-muted' }, `${localCollections.length} local · ${legacyCollections.length} legacy`),
         h(
           'div',
           { className: 'fluid-playlist-list' },
@@ -545,7 +547,7 @@ function PlaylistsPage({ controller }) {
                 'span',
                 { className: 'fluid-row-copy' },
                 h('strong', {}, entry.name),
-                h('span', {}, `${entry.items.length} items`),
+                h('span', {}, `${entry.items.length} items${entry.legacy ? ' · Legacy mix' : ' · Local only'}`),
               ),
             ),
           ),
@@ -558,11 +560,11 @@ function PlaylistsPage({ controller }) {
           ),
       ),
       selected
-        ? h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
+        ? selected.legacy ? h(LegacyPlaylist, { key: selected.id, controller, playlist: selected }) : h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
         : h(
             Empty,
             { title: 'A home for your favourites.' },
-            'Create a playlist, then add tracks from your queue, local library, radio, or Spotify.',
+            'Create a collection, then add indexed tracks from your local library.',
             h(
               'div',
               { className: 'fluid-actions' },
@@ -580,7 +582,6 @@ function PlaylistsPage({ controller }) {
 }
 function QueuePage({ controller }) {
   const queue = useValue(controller.queue),
-    [save, setSave] = useState(false),
     [clear, setClear] = useState(false)
   return h(
     'div',
@@ -592,7 +593,7 @@ function QueuePage({ controller }) {
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { disabled: !queue.length, onClick: () => setSave(true) }, 'Save as playlist'),
+
         h(
           WorkspaceButton,
           { danger: true, disabled: !queue.length, onClick: () => setClear(true) },
@@ -601,14 +602,7 @@ function QueuePage({ controller }) {
       ),
     }),
     h(QueueList, { controller }),
-    save &&
-      h(PlaylistForm, {
-        onClose: () => setSave(false),
-        onSave: (name) => {
-          const playlist = controller.saveQueueAsPlaylist(name)
-          if (playlist) controller.message.set(`Saved queue as “${playlist.name}”.`)
-        },
-      }),
+
     clear &&
       h(
         Confirm,

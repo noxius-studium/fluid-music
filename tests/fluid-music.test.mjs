@@ -47,7 +47,7 @@ function makeAudioHarness({ analysisFails = false, events = [] } = {}) {
   return { FakeAudio, FakeAudioContext, elements }
 }
 
-function makeController({ rest, audio = makeAudioHarness(), timers = [], storage = new Map(), clock = { now: 0 } } = {}) {
+function makeController({ rest, preview, audio = makeAudioHarness(), timers = [], storage = new Map(), clock = { now: 0 } } = {}) {
   const disposers = []
   const original = { Audio: globalThis.Audio, AudioContext: globalThis.AudioContext, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, dateNow: Date.now }
   globalThis.Audio = audio.FakeAudio
@@ -61,11 +61,12 @@ function makeController({ rest, audio = makeAudioHarness(), timers = [], storage
     storage: { get: (key, fallback) => storage.has(key) ? storage.get(key) : fallback, set: (key, value) => storage.set(key, value) },
     rest: rest || (async path => path === '/config' ? { ok: true, data: { poll_interval_open: 8, poll_interval_closed: 20 } } : path === '/local/roots' ? { ok: true, data: { roots: [] } } : path.startsWith('/local/tracks') ? { ok: true, data: { items: [], total: 0 } } : { ok: true, data: { is_playing: false } }),
     os: { pickOpenPath: async () => null },
+    preview,
     onDispose: fn => disposers.push(fn)
   }
   const factory = new Function('atom', 'normalizeQueue', 'normalizeQueueSelection', 'clampVolume', 'normalizeQueueItem', 'nextQueueIndex', 'previousQueueIndex', 'safeText', 'spotifyPlayPayload', 'normalizeSpotifyAuth', 'normalizeSpotifyDevices', 'normalizePlaylistState', 'serializePlaylistItem', 'mediaCapabilities', 'localTrackItem', 'localPlaybackUrls', 'userFacingError', 'isWorkspaceView', 'isSupportedLocalAudio', `${controllerText}\nreturn createController;`)(atom, pure.normalizeQueue, pure.normalizeQueueSelection, pure.clampVolume, pure.normalizeQueueItem, pure.nextQueueIndex, pure.previousQueueIndex, (value, fallback = '') => typeof value === 'string' && value.trim() ? value.trim() : fallback, pure.spotifyPlayPayload, pure.normalizeSpotifyAuth, pure.normalizeSpotifyDevices, pure.normalizePlaylistState, pure.serializePlaylistItem, pure.mediaCapabilities, pure.localTrackItem, pure.localPlaybackUrls, pure.userFacingError, pure.isWorkspaceView, pure.isSupportedLocalAudio)
   const controller = factory(ctx)
-  return { controller, audio, timers, storage, clock, restore() { disposers.forEach(fn => fn()); globalThis.Audio = original.Audio; globalThis.AudioContext = original.AudioContext; globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval; globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout; Date.now = original.dateNow } }
+  return { controller, ctx, audio, timers, storage, clock, restore() { disposers.forEach(fn => fn()); globalThis.Audio = original.Audio; globalThis.AudioContext = original.AudioContext; globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval; globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout; Date.now = original.dateNow } }
 }
 
 test('clearing the queue pauses Spotify and cancels pending playback', async () => {
@@ -117,13 +118,13 @@ test('Spotify resume must not send a new track or context selection', async () =
   } finally { harness.restore() }
 })
 
-test('analysed radio uses one volume stage, not squared gain', async () => {
+test('radio uses the requested volume directly', async () => {
   const harness = makeController()
   try {
     harness.controller.setVolume(0.5)
     harness.controller.add({ source: 'radio', streamUrl: 'https://radio.example/live' })
     await harness.controller.playAt(0)
-    assert.equal(harness.audio.elements.at(-1).volume, 1)
+    assert.equal(harness.audio.elements.at(-1).volume, 0.5)
   } finally { harness.restore() }
 })
 
@@ -131,7 +132,7 @@ test('playlist bulk editing, deduplication, export/import and undo preserve save
   const harness = makeController()
   try {
     const c = harness.controller, p = c.createPlaylist('Collection')
-    const a = { source: 'spotify', title: 'A', uri: 'spotify:track:a' }, b = { source: 'spotify', title: 'B', uri: 'spotify:track:b' }
+    const a = { source: 'local', title: 'A', id: 'local:a', localTrackId: 'a' }, b = { source: 'local', title: 'B', id: 'local:b', localTrackId: 'b' }
     assert.equal(c.addManyToPlaylist(p.id, [a, b, a]), 3)
     assert.equal(c.deduplicatePlaylist(p.id), 1)
     assert.deepEqual(c.playlistItems(p.id).map(item => item.title), ['A', 'B'])
@@ -157,7 +158,7 @@ test('enqueue and play-from-occurrence preserve duplicates and leave playlist or
   const harness = makeController()
   try {
     const c = harness.controller, p = c.createPlaylist('Duplicates')
-    const item = { source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' }
+    const item = { source: 'local', title: 'Track', id: 'local:track', localTrackId: 'track', filePath: 'C:/Music/track.mp3' }
     c.addManyToPlaylist(p.id, [item, item, item])
     c.add(item)
     assert.equal(c.enqueuePlaylist(p.id), 3)
@@ -178,7 +179,7 @@ test('a pending playlist cannot resurrect playback after a later clear', async (
   } })
   try {
     const c = harness.controller, p = c.createPlaylist('Station')
-    c.addToPlaylist(p.id, { source: 'radio', streamUrl: 'https://radio.example/live' })
+    c.addToPlaylist(p.id, { source: 'local', id: 'local:track', localTrackId: 'track', filePath: 'C:/Music/track.mp3' })
     c.add({ source: 'spotify', uri: 'spotify:track:a' })
     defer = true
     const play = c.playPlaylist(p.id)
@@ -204,29 +205,6 @@ test('removing a paused current item does not unexpectedly start its successor',
   } finally { harness.restore() }
 })
 
-test('visualization uses reference-counted demand and does zero sample work when hidden', async () => {
-  const harness = makeController()
-  try {
-    const c = harness.controller
-    c.add({ source: 'radio', streamUrl: 'https://radio.example/live' })
-    await c.playAt(0)
-    assert.deepEqual(c.visualDiagnostics(), { consumers: 0, analyser: false, reads: 0 })
-    const releaseStatus = c.acquireVisualizer(), releasePane = c.acquireVisualizer()
-    assert.equal(c.visualDiagnostics().consumers, 2)
-    assert.ok(c.visualSamples('wave'))
-    releaseStatus()
-    assert.equal(c.visualDiagnostics().analyser, true)
-    releasePane(); releasePane()
-    assert.equal(c.visualDiagnostics().analyser, false)
-    const reads = c.visualDiagnostics().reads
-    assert.equal(c.visualSamples(), null)
-    assert.equal(c.visualDiagnostics().reads, reads)
-    c.setStatusVisualizer(false); c.setMiniVisualizer(false); c.setVisualizerStyle('mirror')
-    assert.equal(harness.storage.get('statusVisualizer'), false)
-    assert.equal(harness.storage.get('miniVisualizer'), false)
-    assert.equal(harness.storage.get('visualizerStyle'), 'mirror')
-  } finally { harness.restore() }
-})
 
 test('Spotify context Next stays with Spotify, not the next mixed queue item', async () => {
   const calls = []
@@ -249,7 +227,7 @@ test('mute restores last audible volume and workspace selection survives recreat
     first.controller.setWorkspaceView('playlists')
   } finally { first.restore() }
   const second = makeController({ storage })
-  try { second.controller.toggleMute(); assert.equal(second.controller.volume.get(), .37); assert.equal(second.controller.workspaceView.get(), 'playlists') } finally { second.restore() }
+  try { second.controller.toggleMute(); assert.equal(second.controller.volume.get(), .37); assert.equal(second.controller.workspaceView.get(), 'library') } finally { second.restore() }
 })
 
 test('direct file opening is session-only and cannot create broken saved playlist references', async () => {
@@ -266,34 +244,12 @@ test('direct file opening is session-only and cannot create broken saved playlis
     assert.equal(c.addManyToPlaylist(playlist.id, c.sessionTracks.get()), 0)
     assert.equal(c.playlistItems(playlist.id).length, 0)
     await c.playAt(0)
-    const release = c.acquireVisualizer()
-    assert.ok(c.visualSamples('wave'))
-    release()
-    assert.equal(c.visualDiagnostics().analyser, false)
     await c.refreshLocalLibrary()
     assert.equal(c.sessionTracks.get().length, 1)
     assert.equal(c.current().unavailable, false)
   } finally { harness.restore() }
 })
 
-test('showing and hiding visuals never disconnects or reroutes the audible gain path', async () => {
-  const events = [], harness = makeController({ audio: makeAudioHarness({ events }) })
-  try {
-    const c = harness.controller
-    c.add({ source: 'radio', streamUrl: 'https://radio.example/live' })
-    await c.playAt(0)
-    events.length = 0
-    const release = c.acquireVisualizer()
-    c.setVisualizerStyle('wave')
-    release()
-    assert.ok(!events.includes('source:disconnect:all'), events.join(', '))
-    assert.ok(!events.includes('source:connect:gain'), events.join(', '))
-    assert.equal(c.status.get(), 'playing')
-    assert.equal(harness.audio.elements.length, 1)
-    c.setVolume(.4)
-    assert.ok(events.includes('gain:ramp'), 'volume should use a smoothed gain transition')
-  } finally { harness.restore() }
-})
 
 test('Spotify playlist pages preserve raw positions and playlist context for duplicate tracks', async () => {
   const harness = makeController({ rest: async path => path.startsWith('/playlists/') ? { ok: true, data: { items: [{ track: null }, { track: { id: 'a', uri: 'spotify:track:a', name: 'A' } }, { track: { id: 'a', uri: 'spotify:track:a', name: 'A again' } }], total: 53, next: null } } : { ok: true, data: {} } })
@@ -327,82 +283,31 @@ test('queue song selection uses the exact duplicate occurrence and follows a mov
   } finally { harness.restore() }
 })
 
-test('copying a Spotify collection is paginated, ordered, duplicate-safe and survives restart', async () => {
-  const storage = new Map(), requests = []
-  const rest = async path => {
-    if (!path.startsWith('/playlists/')) return {ok:true,data:{}}
-    requests.push(path)
-    return {ok:true,data: path.includes('offset=0') ? {items:[{track:null},{track:{uri:'spotify:track:a',name:'First A'}}], total:3, next:'page2'} : {items:[{track:{uri:'spotify:track:a',name:'Second A'}}],total:3,next:null}}
-  }
-  const harness = makeController({storage,rest})
-  let id
-  try {
-    const result = await harness.controller.saveToPlaylist({name:'My copies',item:{source:'spotify',uri:'spotify:playlist:list'},mode:'tracks'})
-    id = result.playlist.id
-    assert.equal(result.added, 2); assert.equal(result.skipped, 1)
-    assert.deepEqual(result.playlist.items.map(item => item.title), ['First A','Second A'])
-    assert.ok(result.playlist.items.every(item => !item.contextUri))
-    assert.ok(requests[1].endsWith('offset=2'))
-    const referenced = await harness.controller.saveToPlaylist({id,item:{source:'spotify',uri:'spotify:playlist:list'},mode:'reference'})
-    assert.equal(referenced.added,1); assert.equal(requests.length,2)
-  } finally { harness.restore() }
-  const restarted = makeController({storage})
-  try {
-    assert.deepEqual(restarted.controller.playlists.get().find(p=>p.id===id).items.map(item=>item.uri), ['spotify:track:a','spotify:track:a','spotify:playlist:list'])
-  } finally { restarted.restore() }
-})
-
-test('a failed later Spotify page leaves both destination and storage unchanged', async () => {
-  let fail = false
-  const harness = makeController({rest:async path => !path.startsWith('/playlists/') ? {ok:true,data:{}} : path.includes('offset=0') ? {ok:true,data:{items:[{track:{uri:'spotify:track:a'}}],total:2,next:'page2'}} : fail ? {ok:false,error:'Provider unavailable'} : {ok:true,data:{items:[{track:{uri:'spotify:track:b'}}],total:2,next:null}}})
-  try {
-    const c = harness.controller, dest = c.createPlaylist('Existing'), original = JSON.stringify(harness.storage.get('playlistState'))
-    fail = true
-    await assert.rejects(c.saveToPlaylist({id:dest.id,item:{source:'spotify',uri:'spotify:playlist:list'}}), /Provider unavailable/)
-    await assert.rejects(c.saveToPlaylist({name:'Must not appear',item:{source:'spotify',uri:'spotify:playlist:list'}}), /Provider unavailable/)
-    assert.equal(JSON.stringify(harness.storage.get('playlistState')), original)
-    assert.equal(c.playlists.get().length,1); assert.equal(c.playlists.get()[0].items.length,0)
-  } finally { harness.restore() }
-})
-
-test('cancelled and deleted-destination saves never publish late results', async () => {
-  let resolvePage
-  const harness = makeController({rest:async path => path.startsWith('/playlists/') ? await new Promise(resolve=>{resolvePage=resolve}) : {ok:true,data:{}}})
-  const page = {ok:true,data:{items:[{track:{uri:'spotify:track:a'}}],total:1,next:null}}
-  try {
-    const c = harness.controller, abort = new AbortController()
-    const pending = c.saveToPlaylist({name:'Cancelled',item:{source:'spotify',uri:'spotify:playlist:list'},signal:abort.signal})
-    abort.abort(); resolvePage(page)
-    await assert.rejects(pending,/cancelled/)
-    assert.equal(c.playlists.get().length,0)
-    const destination = c.createPlaylist('Deleted')
-    const pendingDelete = c.saveToPlaylist({id:destination.id,item:{source:'spotify',uri:'spotify:playlist:list'}})
-    c.deletePlaylist(destination.id); resolvePage(page)
-    await assert.rejects(pendingDelete,/destination was deleted/)
-    assert.equal(c.playlists.get().length,0)
-  } finally { harness.restore() }
-})
-
-test('storage refusal, ephemeral files and empty Spotify pages cannot report a successful save', async () => {
+test('saveToPlaylist accepts indexed local tracks only and refuses legacy destinations', async () => {
   class RefusingStorage extends Map { refuse = false; set(key,value) { return key === 'playlistState' && this.refuse ? this : super.set(key,value) } }
-  const storage = new RefusingStorage(), harness = makeController({storage,rest:async path=>({ok:true,data:path.startsWith('/playlists/')?{items:[],total:0,next:null}:{}})})
+  const storage = new RefusingStorage([['playlistState', { version: 3, playlists: [{ id: 'legacy', name: 'Old mix', items: [{ source: 'spotify', uri: 'spotify:track:a' }] }] }]])
+  const harness = makeController({storage})
   try {
-    storage.refuse = true
-    await assert.rejects(harness.controller.saveToPlaylist({name:'No room',item:{source:'spotify',uri:'spotify:track:a'}}),/could not confirm/)
+    for (const item of [
+      {source:'spotify',uri:'spotify:track:a'},
+      {source:'radio',streamUrl:'https://radio.example/live'},
+      {source:'youtube',url:'https://www.youtube.com/watch?v=abcdefghijk'}
+    ]) await assert.rejects(harness.controller.saveToPlaylist({name:'No cloud',item}),/indexed local tracks only/)
     await assert.rejects(harness.controller.saveToPlaylist({name:'Temporary',item:{source:'local',objectUrl:'blob:test'}}),/Index this file/)
-    await assert.rejects(harness.controller.saveToPlaylist({name:'Empty',item:{source:'spotify',uri:'spotify:playlist:empty'}}),/no supported tracks/)
-    assert.equal(harness.controller.playlists.get().length,0)
+    await assert.rejects(harness.controller.saveToPlaylist({id:'legacy',item:{source:'local',localTrackId:'a',id:'local:a'}}),/Legacy mixes are read-only/)
+    storage.refuse = true
+    await assert.rejects(harness.controller.saveToPlaylist({name:'No room',item:{source:'local',localTrackId:'a',id:'local:a'}}),/could not confirm/)
+    assert.equal(harness.controller.playlists.get().length,1)
   } finally { harness.restore() }
 })
 
-test('indexed playback bypasses unsupported analysis without a failing first attempt', async () => {
+test('indexed playback starts without an analyser attempt', async () => {
   const harness = makeController({rest:async path=>({ok:true,data:path.startsWith('/local/tracks')?{items:[{id:'indexed',title:'Indexed file',path:'C:/Music/test.mp3',available:true}],total:1}:{}})})
   try {
     harness.controller.add({source:'local', localTrackId:'indexed', filePath:'C:/Music/test.mp3'})
     await harness.controller.playAt(0)
     assert.equal(harness.audio.elements.length,1)
     assert.equal(harness.audio.elements[0].crossOrigin, undefined)
-    assert.equal(harness.controller.visualDiagnostics().analyser, false)
     assert.equal(harness.controller.status.get(),'playing')
   } finally { harness.restore() }
 })
@@ -445,10 +350,10 @@ test('diagnostics record the sanitized Spotify command and backend failure', asy
   } finally { harness.restore() }
 })
 
-test('navigation uses SVG icons and the application surface inherits the active Hermes theme', () => {
+test('navigation uses four compact destinations and semantic Hermes-derived surfaces', () => {
   assert.doesNotMatch(source, /const NAV_(?:PRIMARY|LIBRARY) = .*?[⌂⌕◉◌▶♪◇≡⚙]/)
-  assert.ok(source.includes("h(Icon, { kind: icon })"))
-  assert.match(source, /\.fluid-app\{[^\n]*background:transparent/)
+  assert.match(source, /const PRIMARY_NAV = \[\['browse', 'Browse'\], \['library', 'Library'\], \['queue', 'Queue'\], \['settings', 'Settings'\]\]/)
+  assert.match(source, /--fm-night:color-mix\(in srgb,var\(--ui-bg-primary\)/)
 })
 
 test('single Spotify tracks retain a known album context and otherwise use the documented uris payload', () => {
@@ -541,70 +446,26 @@ test('local tracks play in the internal audio engine and are never restored from
   } finally { harness.restore() }
 })
 
-test('custom playlists support create, edit, duplicate, mixed items, and queue playback', async () => {
+test('local collections support create, edit, duplicate, and queue playback', async () => {
   const harness = makeController()
   try {
     await Promise.resolve()
     const playlist = harness.controller.createPlaylist('Late signal', 'Four-source mix')
-    harness.controller.addToPlaylist(playlist.id, { source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' })
+    assert.equal(harness.controller.addToPlaylist(playlist.id, { source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' }), false)
     harness.controller.addToPlaylist(playlist.id, { source: 'local', id: 'local:persistent', localTrackId: 'persistent', filePath: 'C:/Music/persistent.mp3', title: 'On disk', subtitle: 'Folder', mimeType: 'audio/mpeg' })
     harness.controller.updatePlaylist(playlist.id, { name: 'Late signal II' })
     const copy = harness.controller.duplicatePlaylist(playlist.id)
     assert.equal(harness.controller.playlists.get().length, 2)
-    assert.equal(copy.items.length, 2)
-    assert.equal(harness.storage.get('playlistState').playlists[0].items[1].localTrackId, 'persistent')
+    assert.equal(copy.items.length, 1)
+    assert.equal(harness.storage.get('playlistState').playlists[0].items[0].localTrackId, 'persistent')
     await harness.controller.playPlaylist(playlist.id)
-    assert.equal(harness.controller.queue.get().length, 2, 'persistent local references remain playable during the session')
-    assert.equal(harness.controller.current().source, 'radio')
+    assert.equal(harness.controller.queue.get().length, 1, 'persistent local references remain playable during the session')
+    assert.equal(harness.controller.current().source, 'local')
     harness.controller.deletePlaylist(copy.id)
     assert.equal(harness.controller.playlists.get().length, 1)
   } finally { harness.restore() }
 })
 
-test('persistent local tracks and Spotify tracks survive together in one FluidMusic playlist', async () => {
-  const storage = new Map()
-  const rest = async path => {
-    if (path === '/config') return { ok: true, data: {} }
-    if (path === '/local/roots') return { ok: true, data: { roots: [{ id: 'root-1', path: 'C:\\Music', track_count: 1, missing_count: 0 }] } }
-    if (path.startsWith('/local/tracks')) return { ok: true, data: { items: [{ id: 'track-1', title: 'On disk', subtitle: 'Album', path: 'C:\\Music\\track.mp3', mime_type: 'audio/mpeg', available: true }], total: 1 } }
-    if (path === '/player') return { ok: true, data: { is_playing: false } }
-    return { ok: true, data: {} }
-  }
-  const first = makeController({ rest, storage })
-  try {
-    await first.controller.refreshLocalLibrary()
-    const playlist = first.controller.createPlaylist('Hybrid')
-    first.controller.addToPlaylist(playlist.id, first.controller.localTracks.get()[0])
-    first.controller.addToPlaylist(playlist.id, { source: 'spotify', title: 'Cloud track', uri: 'spotify:track:abc123' })
-    const saved = storage.get('playlistState').playlists[0].items
-    assert.equal(saved[0].localTrackId, 'track-1')
-    assert.equal(Object.hasOwn(saved[0], 'filePath'), false)
-    assert.equal(saved[1].uri, 'spotify:track:abc123')
-  } finally { first.restore() }
-
-  const restarted = makeController({ rest, storage })
-  try {
-    await restarted.controller.refreshLocalLibrary()
-    await restarted.controller.playPlaylist(restarted.controller.playlists.get()[0].id)
-    assert.deepEqual(restarted.controller.queue.get().map(item => item.source), ['local', 'spotify'])
-    assert.equal(restarted.controller.current().localTrackId, 'track-1')
-    assert.equal(restarted.controller.status.get(), 'playing')
-  } finally { restarted.restore() }
-})
-
-test('radio analyser fallback has no crossOrigin property and tears down the failed element', async () => {
-  const audio = makeAudioHarness({ analysisFails: true })
-  const harness = makeController({ audio })
-  try {
-    harness.controller.add({ source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' })
-    await harness.controller.playAt(0)
-    assert.equal(audio.elements.length, 2)
-    assert.equal(audio.elements[0].removed, true)
-    assert.equal(Object.hasOwn(audio.elements[1], 'crossOrigin'), false)
-    assert.equal(harness.controller.status.get(), 'playing')
-    assert.equal(harness.controller.radioMeter.get(), 'unavailable')
-  } finally { harness.restore() }
-})
 
 test('Spotify uses root endpoints, source-specific payloads, bounded polls, and confirmed state', async () => {
   const calls = []
@@ -937,8 +798,8 @@ test('Spotify transient device-refresh failure clears cached devices and selecti
 
 test('workspace navigation, auth/device normalizers, queue settings, and diagnostics are shipped', () => {
   assert.equal(pure.isWorkspaceView('library'), 'library')
-  assert.equal(pure.isWorkspaceView('logs'), 'logs')
-  assert.equal(pure.isWorkspaceView('unexpected'), 'home')
+  assert.equal(pure.isWorkspaceView('logs'), 'settings')
+  assert.equal(pure.isWorkspaceView('unexpected'), 'browse')
 
   assert.equal(pure.normalizeSpotifyAuth({ client_id_configured: false }).needsClientId, true)
   assert.deepEqual(
@@ -947,11 +808,397 @@ test('workspace navigation, auth/device normalizers, queue settings, and diagnos
   )
   assert.deepEqual(pure.normalizeSpotifyDevices({ devices: [{ id: 'a', name: 'Living room', is_active: true }] }), [{ id: 'a', name: 'Living room', type: 'Spotify Connect', active: true, restricted: false }])
   assert.match(source, /pickOpenPath\?\.\(\{ directories: true/)
-  assert.match(source, /title: `Logs · \$\{entries\.length\}`/)
+  assert.match(source, /Diagnostics/)
   assert.match(source, /Let Spotify continue after a track/)
   assert.match(source, /guard\?\.expectedUri === anchor\.uri/)
   assert.match(source, /remainingMs: Math\.max\(0, snapshot\.durationMs - snapshot\.progressMs\)/)
-  assert.doesNotMatch(source, /youtube/i)
+  assert.match(source, /fluid-music-youtube/)
   assert.match(source, /codicon: 'music'/)
-  assert.match(source, /compact\s*\?\s*'Status bar volume'/)
+  assert.match(source, /TITLEBAR_AREAS\.right/)
+})
+
+test('chat focus changes cannot mutate application playback or its owned YouTube handle', async () => {
+  const handle = { key: 'fluid-music-youtube', id: 'owned-preview' }
+  const harness = makeController({ preview: {
+    openOrFocus: async () => handle,
+    executeJavaScriptIn: async target => ({ ok: target === handle, title: 'Owned page', playing: false, nextAvailable: false })
+  } })
+  try {
+    const c = harness.controller
+    c.add({ source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' })
+    await c.playAt(0)
+    await c.openYouTube()
+    const before = { current: c.current(), index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() }
+    harness.ctx.focusedSessionId = 'chat-b'
+    harness.ctx.activeSessionId = 'chat-c'
+    harness.ctx.events?.emit?.('session:focus', 'chat-b')
+    assert.deepEqual({ current: c.current(), index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() }, before)
+  } finally { harness.restore() }
+})
+
+test('YouTube controls execute only in the stable owned handle and reject malformed page state', async () => {
+  const handle = { key: 'fluid-music-youtube', id: 'owned-preview' }
+  const calls = []
+  const harness = makeController({ preview: {
+    openOrFocus: async options => (calls.push(['open', options]), handle),
+    executeJavaScriptIn: async (target, code) => (calls.push(['exec', target, code]), { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: true, currentTime: 4, duration: 90 })
+  } })
+  try {
+    await harness.controller.openYouTube()
+    await harness.controller.refreshYouTube()
+    assert.deepEqual(calls[0][1], { key: 'fluid-music-youtube', url: 'https://www.youtube.com/', label: 'YouTube' })
+    assert.equal(calls[1][1], handle)
+    assert.equal(harness.controller.youtube.get().title, 'Night set')
+  } finally { harness.restore() }
+})
+
+test('new collections accept local library tracks only while v3 mixed lists remain legacy read-only', () => {
+  const storage = new Map([['playlistState', { version: 3, playlists: [{ id: 'legacy', name: 'Old mix', items: [{ source: 'spotify', uri: 'spotify:track:a' }, { source: 'radio', streamUrl: 'https://radio.example/live' }] }] }]])
+  const harness = makeController({ storage })
+  try {
+    const collection = harness.controller.createPlaylist('Local shelf')
+    assert.equal(harness.controller.addToPlaylist(collection.id, { source: 'spotify', uri: 'spotify:track:new' }), false)
+    assert.equal(harness.controller.addToPlaylist(collection.id, { source: 'local', id: 'local:a', localTrackId: 'a', filePath: 'C:/Music/a.mp3' }), true)
+    assert.equal(harness.controller.playlists.get().find(entry => entry.legacy).name, 'Old mix')
+    assert.equal(harness.controller.updatePlaylist('legacy', { name: 'Changed' }), null)
+    assert.equal(harness.controller.deletePlaylist('legacy'), false)
+  } finally { harness.restore() }
+})
+
+test('radio capabilities hide queue transport, seek, shuffle, repeat, and devices', () => {
+  assert.deepEqual(pure.mediaCapabilities({ source: 'radio' }), { play: true, previous: false, next: false, seek: false, volume: true, shuffle: false, repeat: false, device: false })
+  assert.equal(pure.mediaCapabilities({ source: 'spotify' }).device, true)
+  assert.equal(pure.mediaCapabilities({ source: 'local' }).seek, true)
+})
+
+test('YouTube queue items require credential-free HTTPS watch URLs and persist safe metadata', () => {
+  const valid = pure.normalizeQueueItem({ source: 'youtube', url: 'https://youtu.be/abcdefghijk?t=12', title: 'Night set', subtitle: 'Channel', durationMs: 90000, artwork: 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg' })
+  assert.equal(valid.source, 'youtube')
+  assert.equal(valid.id, 'youtube:abcdefghijk')
+  assert.equal(valid.url, 'https://youtu.be/abcdefghijk?t=12')
+  assert.equal(valid.title, 'Night set')
+  for (const url of ['http://www.youtube.com/watch?v=abcdefghijk', 'https://user:pass@www.youtube.com/watch?v=abcdefghijk', 'https://youtube.com.evil.example/watch?v=abcdefghijk', 'https://www.youtube.com/', 'https://youtu.be/not-valid']) assert.equal(pure.normalizeQueueItem({ source: 'youtube', url }), null, url)
+  assert.deepEqual(pure.mediaCapabilities(valid), { play: true, previous: true, next: true, seek: true, volume: true, shuffle: false, repeat: false, device: false })
+})
+
+test('capturing the owned YouTube page validates state and adds its current video to Up Next', async () => {
+  const handle = { id: 'owned-youtube' }, calls = [], storage = new Map()
+  const harness = makeController({ preview: {
+    openOrFocus: async options => (calls.push(['open', options]), handle),
+    executeJavaScriptIn: async (target, code) => (calls.push(['exec', target, code]), { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', subtitle: 'YouTube', playing: false, currentTime: 4, duration: 90, artwork: 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg' })
+  }, storage })
+  try {
+    await harness.controller.openYouTube()
+    assert.equal(await harness.controller.addCurrentYouTube(), true)
+    assert.equal(harness.controller.queue.get()[0].source, 'youtube')
+    assert.equal(harness.storage.get('queue')[0].url, 'https://www.youtube.com/watch?v=abcdefghijk')
+    assert.equal(calls.at(-1)[1], handle)
+    assert.match(calls.at(-1)[2], /location\.href/)
+    assert.match(calls.at(-1)[2], /document\.title/)
+    assert.match(calls.at(-1)[2], /HTMLMediaElement/)
+  } finally { harness.restore() }
+  const restarted = makeController({ storage })
+  try {
+    assert.equal(restarted.controller.queue.get()[0].source, 'youtube')
+    assert.equal(restarted.controller.queue.get()[0].id, 'youtube:abcdefghijk')
+    assert.equal(restarted.controller.youtubeHandle(), null)
+  } finally { restarted.restore() }
+})
+
+test('queued YouTube playback uses its owned handle and pauses it before source handoff', async () => {
+  const handle = { id: 'owned-youtube' }, events = []
+  const harness = makeController({ preview: {
+    openOrFocus: async options => (events.push(['open', options]), handle),
+    executeJavaScriptIn: async (target, code) => {
+      events.push(['exec', target, code])
+      return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: !code.includes('const action = "pause"'), currentTime: 5, duration: 90 }
+    }
+  }, audio: makeAudioHarness({ events }) })
+  try {
+    const c = harness.controller
+    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
+    c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'Radio' })
+    await c.playAt(0)
+    assert.deepEqual(events.find(entry => entry[0] === 'open')[1], { key: 'fluid-music-youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', label: 'YouTube' })
+    assert.ok(events.some(entry => entry[0] === 'exec' && entry[1] === handle && entry[2].includes('const action = "play"')))
+    await c.seekTo(30000)
+    c.setVolume(.25)
+    await Promise.resolve()
+    assert.ok(events.some(entry => entry[0] === 'exec' && entry[2].includes('const action = "seek"')))
+    assert.ok(events.some(entry => entry[0] === 'exec' && entry[2].includes('const action = "volume"')))
+    await c.next()
+    const pauseAt = events.findIndex(entry => entry[0] === 'exec' && entry[2].includes('const action = "pause"'))
+    const radioAt = events.findIndex(entry => entry === 'audio:play')
+    assert.ok(pauseAt >= 0 && pauseAt < radioAt, JSON.stringify(events))
+    assert.equal(c.current().source, 'radio')
+  } finally { harness.restore() }
+})
+
+test('YouTube malformed, navigation, and consent failures are honest and never enqueue page data', async () => {
+  const handle = { id: 'owned-youtube' }
+  let response = { ok: true, url: 'https://evil.example/watch?v=abcdefghijk', title: 'Wrong origin', playing: false, duration: 1 }
+  const harness = makeController({ preview: { openOrFocus: async () => handle, executeJavaScriptIn: async () => response } })
+  try {
+    await harness.controller.openYouTube()
+    assert.equal(await harness.controller.addCurrentYouTube(), false)
+    assert.equal(harness.controller.queue.get().length, 0)
+    assert.match(harness.controller.youtube.get().error, /valid YouTube watch page/)
+    harness.ctx.preview.executeJavaScriptIn = async () => { throw new Error('Script consent denied') }
+    assert.equal(await harness.controller.refreshYouTube(), null)
+    assert.match(harness.controller.youtube.get().error, /Script consent denied/)
+  } finally { harness.restore() }
+})
+
+test('an inactive YouTube tab is not polled merely because compact surfaces are open', async () => {
+  const handle = { id: 'owned-youtube' }
+  let executions = 0
+  const timers = []
+  const harness = makeController({ timers, preview: {
+    openOrFocus: async () => handle,
+    executeJavaScriptIn: async () => { executions += 1; return { ok: true, url: 'https://youtu.be/abcdefghijk', title: 'Night set', playing: false, duration: 90 } }
+  } })
+  try {
+    await harness.controller.openYouTube()
+    const poll = timers.find(timer => timer.ms === 2000)
+    assert.ok(poll)
+    harness.controller.titlebarOpen.set(true)
+    poll.fn()
+    await Promise.resolve()
+    assert.equal(executions, 0)
+    harness.controller.titlebarOpen.set(false)
+    poll.fn()
+    await Promise.resolve()
+    assert.equal(executions, 0)
+  } finally { harness.restore() }
+})
+
+test('bulk and queue collection mutations reject mixed or session-only inputs without partial saves', () => {
+  const harness = makeController()
+  try {
+    const c = harness.controller
+    const playlist = c.createPlaylist('Local only')
+    const local = { source: 'local', id: 'local:a', localTrackId: 'a', title: 'A' }
+    const spotify = { source: 'spotify', uri: 'spotify:track:abc123', title: 'Cloud' }
+    const session = { source: 'local', objectUrl: 'blob:session', title: 'Session' }
+    assert.equal(c.addManyToPlaylist(playlist.id, [local, spotify]), 0)
+    assert.equal(c.playlistItems(playlist.id).length, 0)
+    assert.equal(c.addManyToPlaylist(playlist.id, [local, session]), 0)
+    assert.equal(c.playlistItems(playlist.id).length, 0)
+    c.add(local)
+    c.add(spotify)
+    assert.equal(c.saveQueueAsPlaylist('Mixed queue'), null)
+    assert.equal(c.playlists.get().length, 1)
+    assert.match(c.message.get(), /indexed local tracks only/)
+  } finally { harness.restore() }
+})
+
+test('legacy collections reject every mutation while retaining enqueue and export', () => {
+  const storage = new Map([['playlistState', { version: 3, playlists: [{ id: 'legacy', name: 'Old mix', items: [{ source: 'youtube', url: 'https://youtu.be/abcdefghijk', title: 'Old video' }] }] }]])
+  const harness = makeController({ storage })
+  try {
+    const c = harness.controller
+    assert.equal(c.addToPlaylist('legacy', { source: 'local', id: 'local:a', localTrackId: 'a' }), false)
+    assert.equal(c.addManyToPlaylist('legacy', [{ source: 'local', id: 'local:a', localTrackId: 'a' }]), 0)
+    assert.equal(c.updatePlaylist('legacy', { name: 'No' }), null)
+    assert.equal(c.deletePlaylist('legacy'), false)
+    assert.equal(c.duplicatePlaylist('legacy'), null)
+    assert.equal(c.removeFromPlaylist('legacy', 0), 0)
+    assert.equal(c.moveInPlaylist('legacy', 0, 1), false)
+    assert.equal(c.deduplicatePlaylist('legacy'), 0)
+    assert.equal(c.enqueuePlaylist('legacy'), 1)
+    assert.match(c.exportPlaylists('legacy'), /Old video/)
+  } finally { harness.restore() }
+})
+
+test('production bundle contains no retired footer player implementation or CSS', () => {
+  assert.doesNotMatch(source, /function PlayerDock/)
+  assert.doesNotMatch(source, /\.fluid-player\{/)
+  assert.doesNotMatch(source, /fluid-player-(?:track|cover|title|subtitle|source|center|side|device)/)
+  assert.doesNotMatch(source, /fluid-primary-action/)
+  assert.doesNotMatch(source, /Persistent player/)
+})
+
+test('Spotify discovery copy never promises forbidden FluidMusic collection saves', () => {
+  assert.doesNotMatch(source, /Save individual tracks or whole contexts/)
+  assert.doesNotMatch(source, /Save tracks to FluidMusic to build a mixed collection/)
+  assert.match(source, /Play Spotify results now or add them to your temporary Up Next queue/)
+  assert.match(source, /Your Spotify playlists stay on Spotify/)
+})
+
+test('YouTube transport validates the owned page before discovering or mutating media', async () => {
+  const handle = { id: 'owned-youtube' }
+  let mediaLookups = 0
+  const effects = []
+  class FakeMedia {}
+  const media = Object.assign(new FakeMedia(), {
+    ended: false, paused: false, currentTime: 8, duration: 90, volume: 1, poster: '',
+    play: async () => effects.push('play'), pause: () => effects.push('pause')
+  })
+  const location = { protocol: 'https:', hostname: 'example.com', pathname: '/watch', search: '?v=abcdefghijk', href: 'https://example.com/watch?v=abcdefghijk' }
+  const document = { title: 'Unrelated page', getElementsByTagName: () => { mediaLookups += 1; return [media] } }
+  const harness = makeController({ preview: {
+    openOrFocus: async () => handle,
+    // The evaluated string is the plugin's own generated script, never user input.
+    executeJavaScriptIn: async (_target, code) => new Function('location', 'document', 'HTMLMediaElement', 'setTimeout', `return ${code}`)(location, document, FakeMedia, setTimeout)
+  } })
+  try {
+    const c = harness.controller
+    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Video' })
+    await c.playAt(0)
+    await c.toggle()
+    await c.seekTo(3000)
+    c.setVolume(.2)
+    await Promise.resolve()
+    assert.equal(mediaLookups, 0)
+    assert.deepEqual(effects, [])
+    assert.match(c.youtube.get().error, /valid YouTube watch page/i)
+  } finally { harness.restore() }
+})
+
+test('YouTube transport refuses a different valid watch video before media mutation', async () => {
+  const handle = { id: 'owned-youtube' }
+  let mediaLookups = 0
+  const effects = []
+  class FakeMedia {}
+  const media = Object.assign(new FakeMedia(), {
+    ended: false, paused: false, currentTime: 8, duration: 90, volume: 1, poster: '',
+    play: async () => effects.push('play'), pause: () => effects.push('pause')
+  })
+  const location = { protocol: 'https:', hostname: 'www.youtube.com', pathname: '/watch', search: '?v=lmnopqrstuv', href: 'https://www.youtube.com/watch?v=lmnopqrstuv' }
+  const document = { title: 'Different video - YouTube', getElementsByTagName: () => { mediaLookups += 1; return [media] } }
+  const harness = makeController({ preview: {
+    openOrFocus: async () => handle,
+    executeJavaScriptIn: async (_target, code) => new Function('location', 'document', 'HTMLMediaElement', 'setTimeout', `return ${code}`)(location, document, FakeMedia, setTimeout)
+  } })
+  try {
+    const c = harness.controller
+    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Selected video' })
+    await c.playAt(0)
+    await c.toggle()
+    await c.seekTo(3000)
+    c.setVolume(.2)
+    await Promise.resolve()
+    assert.equal(mediaLookups, 0)
+    assert.deepEqual(effects, [])
+    assert.match(c.youtube.get().error, /selected YouTube video/i)
+  } finally { harness.restore() }
+})
+
+for (const previousSource of ['radio', 'spotify']) {
+  test(`${previousSource} to explicit YouTube play stops the active provider before starting the page`, async () => {
+    const events = []
+    const handle = { id: 'owned-youtube' }
+    const harness = makeController({
+      audio: makeAudioHarness({ events }),
+      rest: async (path, options = {}) => {
+        events.push(`${path}:${options.method || 'GET'}`)
+        return { ok: true, data: path === '/player' ? { is_playing: true, item: { uri: 'spotify:track:active', name: 'Active' } } : {} }
+      },
+      preview: {
+        openOrFocus: async () => handle,
+        executeJavaScriptIn: async (_target, code) => {
+          const action = code.match(/const action = "([^"]+)"/)?.[1]
+          events.push(`youtube:${action}`)
+          return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: action === 'play', ended: false, currentTime: 4, duration: 90 }
+        }
+      }
+    })
+    try {
+      const c = harness.controller
+      c.add(previousSource === 'radio'
+        ? { source: 'radio', title: 'Live', streamUrl: 'https://radio.example/live' }
+        : { source: 'spotify', title: 'Cloud', uri: 'spotify:track:active' })
+      await c.playAt(0)
+      await c.openYouTube()
+      events.length = 0
+      assert.equal(await c.playCurrentYouTube(), true)
+      const stopAt = previousSource === 'radio' ? events.indexOf('audio:pause') : events.indexOf('/pause:POST')
+      const playAt = events.indexOf('youtube:play')
+      assert.ok(stopAt >= 0 && stopAt < playAt, events.join(', '))
+      assert.equal(c.current().source, 'youtube')
+      assert.equal(c.index.get(), c.queue.get().findIndex(item => item.source === 'youtube'))
+      assert.equal(c.status.get(), 'playing')
+    } finally { harness.restore() }
+  })
+}
+
+test('active YouTube polls with compact surfaces closed and completion advances exactly once', async () => {
+  const handle = { id: 'owned-youtube' }
+  let ended = false
+  let stateReads = 0
+  const harness = makeController({ preview: {
+    openOrFocus: async () => handle,
+    executeJavaScriptIn: async (_target, code) => {
+      const action = code.match(/const action = "([^"]+)"/)?.[1]
+      if (action === 'state') stateReads += 1
+      return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: action === 'play' || (!ended && action === 'state'), ended, currentTime: ended ? 90 : 4, duration: 90 }
+    }
+  } })
+  try {
+    const c = harness.controller
+    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
+    c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'Next' })
+    await c.playAt(0)
+    const poll = harness.timers.find(timer => timer.ms === 2000)
+    const readsBefore = stateReads
+    poll.fn()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(stateReads, readsBefore + 1, 'active YouTube is observed without Media route or titlebar popover')
+    ended = true
+    await Promise.all([c.refreshYouTube(), c.refreshYouTube()])
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(c.current().title, 'Next')
+    assert.equal(c.index.get(), 1)
+    assert.equal(harness.audio.elements.length, 1, 'duplicate ended snapshots start the successor once')
+  } finally { harness.restore() }
+})
+
+test('a stale YouTube ended response cannot advance or overwrite a newer source', async () => {
+  const handle = { id: 'owned-youtube' }
+  let resolveState
+  const pending = new Promise(resolve => { resolveState = resolve })
+  const harness = makeController({ preview: {
+    openOrFocus: async () => handle,
+    executeJavaScriptIn: async (_target, code) => code.includes('const action = "state"') ? pending : { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: true, ended: false, currentTime: 1, duration: 90 }
+  } })
+  try {
+    const c = harness.controller
+    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
+    c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'New source' })
+    await c.playAt(0)
+    const stale = c.refreshYouTube()
+    await c.playAt(1)
+    resolveState({ ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Old response', playing: false, ended: true, currentTime: 90, duration: 90 })
+    await stale
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(c.current().title, 'New source')
+    assert.equal(c.index.get(), 1)
+    assert.equal(c.status.get(), 'playing')
+    assert.equal(c.progress.get().durationMs, 0)
+  } finally { harness.restore() }
+})
+
+test('legacy playlist records survive startup, local edits, deletion, and export without shape changes', () => {
+  const legacy = {
+    id: 'legacy', name: 'Unknown mix', legacy: true, future: { nested: ['keep', { byteShape: 7 }] },
+    items: [
+      { source: 'future-provider', opaque: { token: 'retain-me' } },
+      { source: 'spotify', uri: 'spotify:track:a', extra: { providerField: true } }
+    ]
+  }
+  const initial = { version: 3, rootFuture: { keep: true }, playlists: [legacy] }
+  const storage = new Map([['playlistState', structuredClone(initial)]])
+  const harness = makeController({ storage })
+  try {
+    const c = harness.controller
+    assert.deepEqual(storage.get('playlistState'), initial, 'initialization does not normalize persistence')
+    const local = c.createPlaylist('Writable')
+    c.addToPlaylist(local.id, { source: 'local', id: 'local:a', localTrackId: 'a', title: 'A' })
+    c.updatePlaylist(local.id, { name: 'Renamed' })
+    assert.deepEqual(storage.get('playlistState').playlists[0], legacy)
+    assert.deepEqual(storage.get('playlistState').rootFuture, initial.rootFuture)
+    assert.deepEqual(JSON.parse(c.exportPlaylists('legacy')).playlists[0], legacy)
+    c.deletePlaylist(local.id)
+    assert.deepEqual(storage.get('playlistState'), initial)
+  } finally { harness.restore() }
 })

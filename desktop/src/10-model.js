@@ -44,11 +44,34 @@ function localTrackItem(value) {
   })
 }
 
+function safeYouTubeWatchUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    if (url.protocol !== 'https:' || url.username || url.password) return null
+    let videoId = ''
+    if (url.hostname === 'www.youtube.com' && url.pathname === '/watch') videoId = safeText(url.searchParams.get('v'))
+    else if (url.hostname === 'youtu.be' && /^\/[A-Za-z0-9_-]{11}$/.test(url.pathname)) videoId = url.pathname.slice(1)
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null
+    return { url: url.href, videoId }
+  } catch {
+    return null
+  }
+}
+
+function safeHttpsMetadataUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
 function normalizeQueueItem(value) {
   if (!value || typeof value !== 'object') return null
   const source = value.source
-  if (!['spotify', 'radio', 'local'].includes(source)) return null
-  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : 'Untitled track')
+  if (!['spotify', 'radio', 'local', 'youtube'].includes(source)) return null
+  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : source === 'youtube' ? 'YouTube video' : 'Untitled track').slice(0, 300)
   if (source === 'spotify') {
     const uri = safeText(value.uri)
     if (!/^spotify:(track|album|playlist):[A-Za-z0-9]+$/.test(uri)) return null
@@ -59,6 +82,11 @@ function normalizeQueueItem(value) {
     const streamUrl = safeRadioStreamUrl(value.streamUrl)
     if (!streamUrl) return null
     return { id: safeText(value.id, makeId('radio', streamUrl)), source, title, subtitle: safeText(value.subtitle, safeText(value.provider)), streamUrl, homepage: safeText(value.homepage), favicon: safeText(value.favicon), artwork: safeText(value.artwork, safeText(value.favicon)), country: safeText(value.country), language: safeText(value.language), tags: safeText(value.tags), codec: safeText(value.codec), bitrate: safeText(value.bitrate) }
+  }
+  if (source === 'youtube') {
+    const watch = safeYouTubeWatchUrl(value.url)
+    if (!watch) return null
+    return { id: `youtube:${watch.videoId}`, source, url: watch.url, title, subtitle: safeText(value.subtitle, 'YouTube').slice(0, 300), durationMs: Math.max(0, Math.min(86_400_000, Number(value.durationMs) || 0)), artwork: safeHttpsMetadataUrl(value.artwork) }
   }
   if (source === 'local') {
     const objectUrl = safeText(value.objectUrl)
@@ -178,7 +206,9 @@ function spotifyPlayPayload(value) {
 }
 
 function isWorkspaceView(value) {
-  return ['home', 'search', 'library', 'radio', 'local', 'playlists', 'queue', 'settings', 'logs'].includes(value) ? value : 'home'
+  const aliases = { home: 'browse', search: 'browse', radio: 'browse', playlists: 'library', local: 'library', logs: 'settings' }
+  const next = aliases[value] || value
+  return ['browse', 'library', 'queue', 'settings'].includes(next) ? next : 'browse'
 }
 
 function serializePlaylistItem(value) {
@@ -203,8 +233,13 @@ function normalizePlaylistState(value) {
   return {
     version: 3,
     playlists: playlists.map((entry, at) => {
-      const items = Array.isArray(entry?.items) ? entry.items.map(item => serializePlaylistItem(item)).filter(Boolean) : []
-      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled playlist'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items }
+      const rawItems = Array.isArray(entry?.items) ? entry.items : []
+      const items = rawItems.map(item => serializePlaylistItem(item)).filter(Boolean)
+      const legacy = entry?.legacy === true || rawItems.some(value => {
+        const item = normalizeQueueItem(value)
+        return !item || item.source !== 'local' || !item.localTrackId
+      })
+      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled collection'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items, legacy }
     })
   }
 }
@@ -226,19 +261,6 @@ function normalizeSpotifyDevices(value) {
   return Array.isArray(devices) ? devices.filter(device => device && safeText(device.id)).map(device => ({ id: safeText(device.id), name: safeText(device.name, 'Unnamed device'), type: safeText(device.type, 'Spotify Connect'), active: Boolean(device.is_active || device.active), restricted: Boolean(device.is_restricted) })) : []
 }
 
-// Log-frequency bands over the useful audible range, excluding DC and unused ultrasonic bins.
-function spectrumBands(binCount, sampleRate, count) {
-  if (!Number.isInteger(binCount) || binCount < 1 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(count) || count < 1) return []
-  const binHz = sampleRate / (2 * binCount)
-  const maximumHz = Math.min(16000, sampleRate / 2)
-  const minimumHz = Math.min(maximumHz, Math.max(40, binHz))
-  const ratio = maximumHz / minimumHz
-  return Array.from({ length: count }, (_, at) => {
-    const low = Math.min(binCount - 1, Math.floor(minimumHz * Math.pow(ratio, at / count) / binHz))
-    const high = Math.min(binCount, Math.max(low + 1, Math.ceil(minimumHz * Math.pow(ratio, (at + 1) / count) / binHz)))
-    return { low, high }
-  })
-}
 
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },

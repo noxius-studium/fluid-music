@@ -5,19 +5,18 @@
 
 [Releases](https://github.com/noxius-studium/fluid-music/releases) · [Architecture](docs/architecture.md) · [Limitations](docs/limitations.md) · [Contributing](CONTRIBUTING.md)
 
-FluidMusic is a unified music application for **Hermes Desktop**. It combines Spotify Connect, internet radio, and a persistent on-device library without pretending those providers share one playback engine.
+FluidMusic is a unified music application for **Hermes Desktop**. It coordinates Spotify Connect, internet radio, a persistent on-device library, and an owned YouTube watch page without pretending those sources share one playback engine.
 
 ## What it provides
 
-- A redesigned, pane-responsive Media workspace, persistent player dock, and movable mini-player pane.
-- Status-bar volume, mute with volume restore, and an optional audio visualizer.
-- Spectrum, waveform, and mirrored visualization styles for audio decoded by Hermes. Hidden visuals perform no sampling or animation work; the analyser disconnects when no visible visualizer needs it.
-- One application-owned queue across Spotify, radio, and indexed local tracks.
-- A master/detail playlist editor with create/rename/description, bulk additions, track search, reorder, play from a specific occurrence, append to queue, duplicate, bulk removal, deduplicate, and one-level destructive-edit undo.
-- JSON playlist import/export and save-queue-as-playlist. Imports are validated and additive; existing collections are not replaced.
+- A Night Radio Media workspace with a circular artwork/record focal object and compact Browse, Library, Queue, and Settings navigation.
+- One persistent application controller, a titlebar quick-control popover, and an optional dockable mini-player. Route and chat-focus changes do not own or reset playback.
+- First-class YouTube capture and queue playback through one stable FluidMusic-owned Browser handle, with explicit refresh/capture and capability-driven transport after host script consent.
+- One restart-restorable application queue across Spotify, radio, indexed local tracks, and safe YouTube watch entries. Browser-opened session tracks are intentionally omitted at restart.
+- Local-only FluidMusic collections with edit/reorder/export workflows. Existing v3 mixed playlists remain visible as read-only Legacy mixes with play, enqueue, and export.
 - Spotify search for songs, albums, artists, and playlists, plus the user's Spotify playlists and track details.
 - Expandable Spotify playlists in the queue with exact song selection, including duplicate occurrences.
-- Atomic saves of full Spotify playlists as editable song copies, or explicitly as single context references; retry/cancel never creates partial collections.
+
 - Radio Browser discovery and direct internal radio playback.
 - A profile-scoped SQLite local-library catalog with approved scan roots, stable track IDs, availability tracking, rescans, and move recovery.
 - Theme-native SVG icons and Hermes theme variables throughout the FluidMusic chrome.
@@ -29,6 +28,7 @@ FluidMusic is a unified music application for **Hermes Desktop**. It combines Sp
 | Spotify | On the selected Spotify Connect device | FluidMusic sends remote-control commands; it does not decode Spotify audio. |
 | Internet radio | Inside Hermes through browser audio | Stream availability, codecs, CORS, advertising, and station content remain controlled by the station. |
 | Local music | Inside Hermes through the seekable `hermes-media` protocol | Only explicitly approved folders are scanned. Audio bytes remain on disk. |
+| YouTube | In one FluidMusic-owned Hermes Browser tab | Control requires a validated `https://www.youtube.com/watch?v=…` page and explicit host script consent. |
 
 FluidMusic does not download protected provider media, remove ads, bypass DRM, unlock Premium features, or override content restrictions.
 
@@ -90,33 +90,30 @@ A rescan recursively indexes MP3, FLAC, M4A, AAC, WAV, Ogg, Opus, and WebM audio
 
 Removing a scan root removes that root and its catalog rows. FluidMusic playlist references remain stable metadata; affected local entries become unavailable until the track is indexed again.
 
-## Direct files and audio visualization
+## Direct session files
 
-For local visualization, use **Media → Local music → Open audio files**, then Play beside an opened file. This grants the browser a file handle and makes real audio samples available without changing the indexed library. Opened files are session-only: they must be selected again after restarting Hermes and cannot be saved to persistent playlists. No full-file decoding or server upload is needed; browser audio streams the granted File.
+Use **Media → Library → Local music → Open audio files** to play a file without indexing its folder. Opened files are session-only: select them again after restarting Hermes. They cannot be saved to persistent collections.
 
-The indexed library remains the persistent option and deliberately bypasses analysis. Its audio transport is not modified to grant Web Audio access; playback still works and the visualizer explains the direct-file option. Spotify Connect has no local audio samples. Radio analysis depends on the station's CORS policy.
+FluidMusic no longer includes a visualizer or analyser settings. This does not change radio or local audio playback.
 
-## Mixed FluidMusic playlists
+## Collection ownership
 
-FluidMusic playlists are separate from Spotify playlists. A single FluidMusic playlist can contain:
-
-- a local-track ID resolved through the SQLite catalog;
-- a Spotify URI;
-- an HTTPS radio entry.
+New FluidMusic collections are local-only and store local-track IDs resolved through the SQLite catalog. Spotify playlists remain provider-owned live contexts, radio persistence is pinned stations, and Up Next is the temporary/restart-restorable cross-source list. Existing mixed v3 playlists are preserved without rewriting as read-only **Legacy mixes**.
 
 The persisted local entry contains only the stable local-track ID and display metadata—not a raw filesystem path or media URL. At startup, FluidMusic resolves that ID against the active profile's SQLite catalog before playback.
 
-## Search
+## Browse and YouTube
 
-The **Search** workspace returns normalized Spotify song, album, artist, and playlist results through the Spotify Web API.
+The **Browse** workspace combines Spotify search, radio discovery, and an owned YouTube page. YouTube opens or focuses one tab using key `fluid-music-youtube`; after the user opens or refreshes a video, **Add current YouTube video to Up Next** captures only its validated watch URL and safe display/playback metadata. FluidMusic controls only the returned handle and never inspects the focused chat preview or claims access to signed-in recommendations.
 
 ## Queue and controls
 
 The queue preserves provider order, but controls remain capability-driven:
 
-- Spotify exposes Connect transport, seek, volume, shuffle, repeat, and device state where accepted by Spotify.
+- Spotify exposes Connect transport, seek, volume, and device state where accepted by Spotify.
 - Local playback exposes seek, volume, previous, and next.
 - Radio exposes play/pause and volume, not fake seeking or station-content skipping. Select another queue item to switch sources.
+- YouTube exposes play/pause, seek, volume, previous, and next only for the selected validated watch item in the owned tab.
 
 By default, completing a Spotify track advances to the next FluidMusic queue item. The **Let Spotify continue after a track** setting instead leaves continuation to Spotify's active context or recommendations. Spotify progress is interpolated locally between authoritative snapshots, so the visible elapsed and remaining time advance smoothly without polling Spotify every second.
 
@@ -128,11 +125,11 @@ The desktop implementation is maintained as nine focused source fragments:
 - `desktop/src/10-model.js` — queue models, validation, and pure provider payloads
 - `desktop/src/20-styles.js` — theme-aware styling and shared UI primitives
 - `desktop/src/30-controller.js` — provider adapters, transitions, polling, and diagnostics
-- `desktop/src/40-ui.js` — shared rows, dialogs, volume, transport, and player dock
+- `desktop/src/40-ui.js` — shared rows, local-only save dialogs, volume, seek, and transport primitives
 - `desktop/src/41-library.js` — overview, Spotify catalog/library, radio, and local folders
 - `desktop/src/42-playlists.js` — playlist editor, bulk picker, import/export, and queue page
-- `desktop/src/43-visualizer.js` — visible-only audio visualization and dockable mini-player
-- `desktop/src/44-workspace.js` — navigation, settings, diagnostics, status bar, and registration
+- `desktop/src/43-visualizer.js` — optional dockable mini-player pane (the filename is retained for build ordering; there is no visualizer or footer player)
+- `desktop/src/44-workspace.js` — compact navigation, settings/diagnostics, titlebar control, and registration
 
 Hermes loads disk contributions through a blob URL, so relative browser imports are not reliable. `desktop/plugin.js` is the generated runtime entrypoint. Edit the fragments, then rebuild it:
 
@@ -141,7 +138,7 @@ python scripts/build_desktop.py
 python scripts/build_desktop.py --check
 ```
 
-The in-app **Logs** page records sanitized provider commands, response status, selected device suffixes, failures, and meaningful Spotify playback-state changes. It never stores OAuth credentials or tokens.
+The **Settings → Diagnostics** view records sanitized provider commands, response status, selected device suffixes, failures, and meaningful Spotify playback-state changes. It never stores OAuth credentials or tokens.
 
 Full verification:
 
@@ -163,7 +160,7 @@ hermes plugins validate . --json
 python scripts/package.py
 ```
 
-The package is ready only after those checks and live Hermes Desktop acceptance cover local restart persistence, a mixed local/Spotify playlist, Spotify library details, Spotify-to-Hermes queue handoff, locally interpolated progress, source-aware controls, and active-theme rendering.
+The package is ready only after those checks and live Hermes Desktop acceptance cover restart-restorable Up Next state, immutable Legacy mixes, local-only collection writes, Spotify library details, Spotify/YouTube queue handoff, titlebar stability, source-aware controls, and active-theme rendering. Isolated UI tests model the owned-preview API but do not prove live YouTube consent, navigation, host readiness, or popped-out behavior.
 
 ## License
 

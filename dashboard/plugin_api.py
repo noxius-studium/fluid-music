@@ -11,11 +11,15 @@ endpoints, never follow redirects, and accept no caller-supplied URL.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import html
+import http.server
 import ipaddress
 import logging
 import math
 import re
+import secrets
 import sqlite3
 import sys
 import threading
@@ -29,11 +33,81 @@ from urllib.parse import urlparse
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from hermes_cli.auth import get_spotify_auth_status, login_spotify_command
-from hermes_cli.auth_constants import SPOTIFY_DASHBOARD_URL
-from hermes_cli.auth_spotify import _spotify_client_id as _configured_spotify_client_id
-from hermes_cli.auth_spotify import _spotify_redirect_uri
-from plugins.spotify.client import SpotifyClient, SpotifyError
+
+def _load_spotify_integration():
+    """Support legacy core Spotify and the current official Spotify plugin."""
+    try:
+        from hermes_cli.auth import get_spotify_auth_status, login_spotify_command
+        from hermes_cli.auth_constants import SPOTIFY_DASHBOARD_URL
+        from hermes_cli.auth_spotify import _spotify_client_id, _spotify_redirect_uri
+        from plugins.spotify.client import SpotifyClient, SpotifyError
+        return (
+            SpotifyClient,
+            SpotifyError,
+            get_spotify_auth_status,
+            login_spotify_command,
+            _spotify_client_id,
+            _spotify_redirect_uri,
+            SPOTIFY_DASHBOARD_URL,
+        )
+    except ImportError:
+        pass
+
+    plugin_root = Path(__file__).resolve().parent.parent
+    sources_root = plugin_root.parent
+    from hermes_constants import get_hermes_home
+    canonical = Path(get_hermes_home()) / "plugins" / "spotify" / "spotify_auth.py"
+    candidates = [canonical] if canonical.is_file() else []
+    candidates.extend(sorted(sources_root.glob("spotify-*/spotify_auth.py"), reverse=True))
+    if not candidates:
+        raise ImportError("The official Spotify plugin is not installed beside FluidMusic")
+    spotify_root = candidates[0].parent
+    package_name = "hermes_fluid_music_spotify"
+    if package_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            package_name,
+            spotify_root / "__init__.py",
+            submodule_search_locations=[str(spotify_root)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("The official Spotify plugin could not be loaded")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[package_name] = package
+        try:
+            spec.loader.exec_module(package)
+        except Exception:
+            sys.modules.pop(package_name, None)
+            raise
+    spotify_auth = importlib.import_module(f"{package_name}.spotify_auth")
+    spotify_client = importlib.import_module(f"{package_name}.spotify_client")
+
+    def configured_client_id():
+        try:
+            from hermes_cli.auth import get_provider_auth_state
+            return spotify_auth._client_id(state=get_provider_auth_state("spotify") or {})
+        except Exception:
+            return None
+
+    return (
+        spotify_client.SpotifyClient,
+        spotify_client.SpotifyError,
+        spotify_auth.auth_status,
+        spotify_auth.login,
+        configured_client_id,
+        spotify_auth._redirect_uri,
+        spotify_auth.DASHBOARD_URL,
+    )
+
+
+(
+    SpotifyClient,
+    SpotifyError,
+    get_spotify_auth_status,
+    login_spotify_command,
+    _configured_spotify_client_id,
+    _spotify_redirect_uri,
+    SPOTIFY_DASHBOARD_URL,
+) = _load_spotify_integration()
 
 
 async def _profile_scope(profile: str | None = None) -> AsyncIterator[None]:
@@ -121,8 +195,53 @@ _MAX_SPOTIFY_CLIENT_ID_LENGTH = 128
 _SPOTIFY_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SPOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _SPOTIFY_AUTH_ERROR = "Spotify authentication could not start. Select Connect Spotify to retry."
+_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _spotify_auth_lock = threading.Lock()
 _spotify_auth_flow: dict[str, str | None] = {"state": "idle", "error": None}
+_youtube_embed_lock = threading.Lock()
+_youtube_embed_server: http.server.ThreadingHTTPServer | None = None
+_youtube_embed_origin = ""
+_youtube_embed_token = ""
+
+
+class _YouTubeEmbedHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract.
+        parsed = urlparse(self.path)
+        match = re.fullmatch(rf"/{re.escape(_youtube_embed_token)}/youtube/([A-Za-z0-9_-]{{11}})", parsed.path)
+        if not match or self.headers.get("Host") != urlparse(_youtube_embed_origin).netloc:
+            self.send_error(404)
+            return
+        from urllib.parse import parse_qs, urlencode
+        requested = parse_qs(parsed.query)
+        params = {key: requested[key][0] for key in ("controls", "enablejsapi", "playsinline", "rel", "start") if requested.get(key) and requested[key][0].isdigit()}
+        params["origin"] = _youtube_embed_origin
+        player_url = f"https://www.youtube-nocookie.com/embed/{match.group(1)}?{urlencode(params)}"
+        document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>html,body,iframe{{margin:0;width:100%;height:100%;border:0;background:#000;overflow:hidden}}</style></head><body><iframe src="{html.escape(player_url, quote=True)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" title="YouTube player"></iframe><script>const frame=document.querySelector('iframe');addEventListener('message',event=>{{if(event.source===parent){{frame.contentWindow.postMessage(event.data,'https://www.youtube-nocookie.com')}}else if(event.source===frame.contentWindow){{parent.postMessage(event.data,'*')}}}})</script></body></html>'''.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", "default-src 'none'; frame-src https://www.youtube-nocookie.com; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(document)))
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(document)
+
+
+def _ensure_youtube_embed_host() -> tuple[str, str]:
+    global _youtube_embed_server, _youtube_embed_origin, _youtube_embed_token
+    with _youtube_embed_lock:
+        if _youtube_embed_server is None:
+            _youtube_embed_token = secrets.token_urlsafe(24)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _YouTubeEmbedHandler)
+            server.daemon_threads = True
+            _youtube_embed_server = server
+            _youtube_embed_origin = f"http://127.0.0.1:{server.server_port}"
+            threading.Thread(target=server.serve_forever, daemon=True, name="fluid-music-youtube-embed").start()
+    return _youtube_embed_origin, _youtube_embed_token
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -622,6 +741,139 @@ async def playlist_tracks(playlist_id: str, limit: int = 50, offset: int = 0) ->
 def _local_library() -> Any:
     """Resolve the profile-scoped database path at request time."""
     return LocalLibrary()
+
+
+def _youtube_watch_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    if len(raw) > 2_048:
+        raise ValueError("YouTube URL is too long")
+    parsed = urlparse(raw)
+    video_id = ""
+    if parsed.scheme == "https" and parsed.hostname in {"www.youtube.com", "youtube.com", "m.youtube.com"} and parsed.path == "/watch":
+        from urllib.parse import parse_qs
+        video_id = str(parse_qs(parsed.query).get("v", [""])[0])
+    elif parsed.scheme == "https" and parsed.hostname == "youtu.be" and parsed.path.count("/") == 1:
+        video_id = parsed.path[1:]
+    if not _YOUTUBE_ID_RE.fullmatch(video_id):
+        raise ValueError("Paste a valid HTTPS YouTube watch URL")
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _youtube_item(info: Any) -> dict[str, Any] | None:
+    if not isinstance(info, Mapping):
+        return None
+    video_id = str(info.get("id") or "").strip()
+    title = str(info.get("title") or "").strip()
+    if not _YOUTUBE_ID_RE.fullmatch(video_id) or not title:
+        return None
+    artwork = str(info.get("thumbnail") or "").strip()
+    if not artwork.startswith("https://"):
+        artwork = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    duration = max(0, min(86_400, int(info.get("duration") or 0)))
+    return {
+        "id": f"youtube:{video_id}",
+        "source": "youtube",
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "title": title[:300],
+        "subtitle": str(info.get("uploader") or info.get("channel") or "YouTube")[:300],
+        "artwork": artwork[:2_048],
+        "durationMs": duration * 1_000,
+    }
+
+
+def _youtube_extract(target: str, *, flat: bool) -> Any:
+    from yt_dlp import YoutubeDL
+    options = {
+        "extract_flat": "in_playlist" if flat else False,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "socket_timeout": 12,
+    }
+    with YoutubeDL(options) as client:
+        return client.extract_info(target, download=False)
+
+
+@router.get("/youtube/embed-host")
+async def youtube_embed_host(video_id: str) -> dict[str, Any]:
+    if not _YOUTUBE_ID_RE.fullmatch(str(video_id or "")):
+        return _error("video_id must be an 11-character YouTube ID")
+    try:
+        origin, token = await anyio.to_thread.run_sync(_ensure_youtube_embed_host)
+        from urllib.parse import urlencode
+        query = urlencode({"controls": 1, "enablejsapi": 1, "playsinline": 1, "rel": 0})
+        return {"ok": True, "data": {"url": f"{origin}/{token}/youtube/{video_id}?{query}"}}
+    except OSError:
+        return _error("FluidMusic could not start its YouTube player host")
+
+
+@router.get("/youtube/search")
+async def youtube_search(q: str, limit: int = 12) -> dict[str, Any]:
+    try:
+        query = _spotify_search_query(q)
+        bounded_limit = _bounded_int(limit, 12, 1, 20)
+        result = await anyio.to_thread.run_sync(lambda: _youtube_extract(f"ytsearch{bounded_limit}:{query}", flat=True))
+        entries = result.get("entries", []) if isinstance(result, Mapping) else []
+        items = [item for item in (_youtube_item(entry) for entry in entries) if item is not None]
+        return {"ok": True, "data": {"items": items[:bounded_limit]}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except Exception:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+        logger.warning("YouTube search failed", exc_info=True)
+        return _error("YouTube search is temporarily unavailable")
+
+
+@router.post("/youtube/resolve")
+async def youtube_resolve(request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        watch_url = _youtube_watch_url(payload.get("url"))
+        result = await anyio.to_thread.run_sync(lambda: _youtube_extract(watch_url, flat=False))
+        item = _youtube_item(result)
+        if item is None:
+            return _error("YouTube did not return playable video metadata")
+        return {"ok": True, "data": {"item": item}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except Exception:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+        logger.warning("YouTube metadata lookup failed", exc_info=True)
+        return _error("YouTube video details could not be loaded")
+
+
+@router.get("/history")
+async def playback_history(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    try:
+        result = await anyio.to_thread.run_sync(
+            lambda: _local_library().list_history(
+                limit=_bounded_int(limit, 100, 1, 500),
+                offset=_bounded_int(offset, 0, 0, 1_000_000),
+            )
+        )
+        return {"ok": True, "data": result}
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        return _error("Playback history could not be loaded")
+
+
+@router.post("/history")
+async def playback_history_add(request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        entry = await anyio.to_thread.run_sync(lambda: _local_library().record_history(payload.get("item")))
+        return {"ok": True, "data": {"entry": entry}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Playback history could not be updated")
+
+
+@router.delete("/history")
+async def playback_history_clear() -> dict[str, Any]:
+    try:
+        removed = await anyio.to_thread.run_sync(lambda: _local_library().clear_history())
+        return {"ok": True, "data": {"removed": removed}}
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Playback history could not be cleared")
 
 
 @router.get("/local/roots")

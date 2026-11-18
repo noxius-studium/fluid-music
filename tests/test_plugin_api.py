@@ -614,3 +614,47 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
             "fluid-music/docs/limitations.md",
         } <= set(names)
         assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+
+
+def test_youtube_search_and_url_resolution_return_real_metadata(api: Any, monkeypatch: pytest.MonkeyPatch):
+    def fake_extract(target: str, *, flat: bool) -> Any:
+        item = {
+            "id": "D-PaXRCXtzE",
+            "title": "Tomorrowland 2026",
+            "uploader": "Arvin Trance EDM",
+            "duration": 3600,
+            "thumbnail": "https://i.ytimg.com/vi/D-PaXRCXtzE/hqdefault.jpg",
+        }
+        return {"entries": [item]} if flat else item
+
+    monkeypatch.setattr(api, "_youtube_extract", fake_extract)
+    app = app_for(api)
+
+    search = run(request(app, "GET", "/youtube/search?q=tomorrowland"))
+    resolved = run(request(app, "POST", "/youtube/resolve", json={"url": "https://youtu.be/D-PaXRCXtzE"}))
+
+    assert search.json()["data"]["items"][0]["title"] == "Tomorrowland 2026"
+    assert resolved.json()["data"]["item"] == search.json()["data"]["items"][0]
+
+
+def test_playback_history_persists_lists_and_clears(api: Any):
+    app = app_for(api)
+    item = {
+        "id": "youtube:D-PaXRCXtzE",
+        "source": "youtube",
+        "url": "https://www.youtube.com/watch?v=D-PaXRCXtzE",
+        "title": "Tomorrowland 2026",
+        "subtitle": "Arvin Trance EDM",
+        "artwork": "https://i.ytimg.com/vi/D-PaXRCXtzE/hqdefault.jpg",
+    }
+
+    added = run(request(app, "POST", "/history", json={"item": item}))
+    listed = run(request(app, "GET", "/history"))
+    cleared = run(request(app, "DELETE", "/history"))
+    empty = run(request(app, "GET", "/history"))
+
+    assert added.json()["data"]["entry"]["item"]["title"] == "Tomorrowland 2026"
+    assert listed.json()["data"]["total"] == 1
+    assert listed.json()["data"]["items"][0]["item"] == item
+    assert cleared.json()["data"]["removed"] == 1
+    assert empty.json()["data"] == {"items": [], "total": 0}

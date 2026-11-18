@@ -8,6 +8,7 @@ host's responsibility through its seekable media protocol.
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import sqlite3
@@ -122,10 +123,99 @@ class LocalLibrary:
                     ON local_tracks(root_id, available, relative_path);
                 CREATE INDEX IF NOT EXISTS local_tracks_fingerprint
                     ON local_tracks(root_id, fingerprint);
+                CREATE TABLE IF NOT EXISTS playback_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    media_key TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    subtitle TEXT NOT NULL DEFAULT '',
+                    artwork TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL,
+                    played_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS playback_history_played_at
+                    ON playback_history(played_at DESC, id DESC);
                 """
             )
             connection.commit()
             _INITIALIZED_DATABASES.add(key)
+
+    @staticmethod
+    def _history_payload(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("history item must be an object")
+        source = str(value.get("source") or "").strip()
+        if source not in {"spotify", "radio", "local", "youtube"}:
+            raise ValueError("history item has an unsupported source")
+        media_key = str(value.get("id") or value.get("uri") or value.get("url") or "").strip()
+        title = str(value.get("title") or "").strip()
+        if not media_key or len(media_key) > 500 or not title or len(title) > 300:
+            raise ValueError("history item is missing a valid identity or title")
+        subtitle = str(value.get("subtitle") or "").strip()[:300]
+        artwork = str(value.get("artwork") or "").strip()[:2_048]
+        payload = dict(value)
+        payload["id"] = media_key
+        payload["source"] = source
+        payload["title"] = title
+        payload["subtitle"] = subtitle
+        payload["artwork"] = artwork
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise ValueError("history item is too large")
+        return {
+            "media_key": media_key,
+            "source": source,
+            "title": title,
+            "subtitle": subtitle,
+            "artwork": artwork,
+            "payload_json": encoded,
+        }
+
+    def record_history(self, value: Any) -> dict[str, Any]:
+        item = self._history_payload(value)
+        played_at = _now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO playback_history(media_key, source, title, subtitle, artwork, payload_json, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["media_key"], item["source"], item["title"], item["subtitle"],
+                    item["artwork"], item["payload_json"], played_at,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM playback_history WHERE id NOT IN (SELECT id FROM playback_history ORDER BY id DESC LIMIT 5000)"
+            )
+            history_id = int(cursor.lastrowid)
+        return {"id": history_id, "played_at": played_at, "item": json.loads(item["payload_json"])}
+
+    def list_history(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        with self._connect() as connection:
+            total = int(connection.execute("SELECT COUNT(*) FROM playback_history").fetchone()[0])
+            rows = connection.execute(
+                """
+                SELECT id, payload_json, played_at
+                FROM playback_history
+                ORDER BY played_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (safe_limit, safe_offset),
+            ).fetchall()
+        return {
+            "items": [
+                {"id": int(row["id"]), "played_at": row["played_at"], "item": json.loads(row["payload_json"])}
+                for row in rows
+            ],
+            "total": total,
+        }
+
+    def clear_history(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("DELETE FROM playback_history").rowcount)
 
     @staticmethod
     def _root_path(value: Any) -> Path:

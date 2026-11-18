@@ -1,6 +1,6 @@
 # FluidMusic limitations and provider boundaries
 
-FluidMusic unifies discovery, playlists, and queue order. It does not unify provider rights, subscriptions, media pipelines, or transport semantics.
+FluidMusic unifies discovery and temporary queue order. It does not unify provider rights, subscriptions, media pipelines, persistent collection ownership, or transport semantics.
 
 ## Spotify Connect boundary
 
@@ -23,7 +23,7 @@ Elapsed time between Spotify snapshots is a local projection. It is corrected on
 
 Radio Browser is a directory, not an uptime or playback guarantee. A station can disappear, redirect, change codecs, require unsupported headers, reject a browser client, or block analysis through CORS.
 
-A station may play while its audio analyser is unavailable. FluidMusic keeps playback controls and shows a static visual state rather than fabricating waveform samples. Previous/Next traverse the FluidMusic queue, not the contents of a live station. Radio has no seek, shuffle, or repeat controls.
+Radio renders only play/pause and volume. It does not expose previous, next, seek, shuffle, repeat, or provider-device controls.
 
 ## Persistent local-library boundary
 
@@ -41,13 +41,13 @@ Current constraints:
 
 Removing a scan root removes that root's catalog rows. Existing playlist references remain but become unavailable until a matching stable track is cataloged again.
 
-### Visualization without host changes
+### Session files
 
-Indexed files retain ordinary persistent playback, but are not connected to Web Audio. Open a file using **Local music → Open audio files** for visualization; these browser-granted files are session-only and cannot become persistent playlist references. Reopen them after restarting, or index their folder for durable playback without visualization.
+Browser-granted files are session-only and cannot become persistent collection references. Reopen them after restarting, or index their folder for durable playback. FluidMusic has no visualizer or analyser settings.
 
-## Mixed playlists and queue
+## Collections and queue
 
-A FluidMusic playlist can persist local and Spotify tracks together, plus radio references. That does not make controls uniform:
+New FluidMusic collections are local-only. Existing v3 mixed playlists are preserved as read-only Legacy mixes and are not silently deleted, rewritten, or migrated. Spotify playlists remain provider-owned and radio persistence is pinned stations. The cross-provider Up Next queue is temporary/restart-restorable.
 
 - Spotify commands act on a remote device;
 - radio and local audio play in Hermes;
@@ -55,7 +55,11 @@ A FluidMusic playlist can persist local and Spotify tracks together, plus radio 
 - gapless playback is not promised;
 - a missing local file or unavailable provider item remains represented rather than silently substituted.
 
-Queued Spotify playlists can be expanded to select an individual song at its original position. Spotify still owns continuation inside that context. Available playlist content depends on Spotify API permissions and account restrictions; a rejected request produces a retryable error, not extracted or invented tracks. Copying a Spotify playlist into FluidMusic is a snapshot of its supported songs, not a live sync. Copies are bounded to 10,000 entries and preserve duplicates. A same-size edit made remotely during pagination cannot always be detected.
+Queued Spotify playlists can be expanded to select an individual song at its original position. Spotify still owns continuation inside that context. Available playlist content depends on Spotify API permissions and account restrictions; a rejected request produces a retryable error, not extracted or invented tracks.
+
+## YouTube host dependency
+
+YouTube requires the patched Hermes Desktop preview contract and explicit script consent for the FluidMusic-owned tab. Opening the tab alone does not grant consent. Control is rejected before media lookup unless the page is an exact HTTPS `www.youtube.com/watch` URL with an 11-character video ID. Popped-out previews reject control and page navigation can invalidate state. While a YouTube item is selected, FluidMusic polls the owned page even when compact UI surfaces are closed so one observed completion can advance Up Next. FluidMusic Next always means the next Up Next item; it does not invoke YouTube provider navigation. FluidMusic does not scrape recommendations, claim access to signed-in suggestions, or target the focused chat preview. Isolated fixture tests verify handle targeting and error handling, not live host behavior.
 
 ## Non-goals
 

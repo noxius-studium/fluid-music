@@ -20,6 +20,16 @@ const ctx = {
   onDispose: (fn) => disposers.push(fn),
   register: (entry) => contributions.push(entry),
   os: { pickOpenPath: async () => null },
+  preview: {
+    openOrFocus: async (options) => {
+      calls.push({ preview: 'openOrFocus', options })
+      return { key: options.key, owned: true }
+    },
+    executeJavaScriptIn: async (handle, code) => {
+      calls.push({ preview: 'executeJavaScriptIn', handle, code })
+      return { ok: true, title: 'Fixture video', playing: code.includes("action = \"toggle\""), nextAvailable: false, currentTime: 12, duration: 180 }
+    },
+  },
   rest: async (path, options) => {
     calls.push({ path, options })
     if (path === '/config') return { ok: true, data: {} }
@@ -96,14 +106,14 @@ const ctx = {
 }
 plugin.register(ctx)
 const route = contributions.find((entry) => entry.area === 'routes')
-const status = contributions.find((entry) => entry.area === 'statusBar.right')
+const titlebar = contributions.find((entry) => entry.area === 'titleBar.right')
 const pane = contributions.find((entry) => entry.area === 'panes')
 const controller = route.render().props.controller
 const workspace = createRoot(document.getElementById('workspace'))
-const statusRoot = createRoot(document.getElementById('status'))
+const titlebarRoot = createRoot(document.getElementById('titlebar'))
 const paneRoot = createRoot(document.getElementById('pane'))
 workspace.render(route.render())
-statusRoot.render(status.render())
+titlebarRoot.render(titlebar.render())
 paneRoot.render(pane.render())
 window.fixture = {
   faults,
@@ -118,16 +128,15 @@ window.fixture = {
   returnMedia: () => workspace.render(route.render()),
   dispose: () => {
     workspace.unmount()
-    statusRoot.unmount()
+    titlebarRoot.unmount()
     paneRoot.unmount()
     disposers.forEach((fn) => fn())
   },
   seed: () => {
-    const first = controller.createPlaylist(
-      'After hours',
-      'A test collection for late-night focus.',
-    )
-    controller.addManyToPlaylist(first.id, [
+    controller.add({ source: 'radio', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3' })
+    controller.add({ source: 'spotify', title: 'Night drive', subtitle: 'Fixture artist', uri: 'spotify:track:nightdrive', durationMs: 216000 })
+    const legacy = {
+      id: 'playlist:legacy', name: 'After hours', description: 'Preserved mixed collection.', createdAt: '', updatedAt: '', legacy: true, items: [
       {
         source: 'spotify',
         title: 'Night drive',
@@ -155,12 +164,14 @@ window.fixture = {
         uri: 'spotify:track:longtitle',
         durationMs: 194000,
       },
-    ])
-    controller.createPlaylist('Deep work', 'No distractions.')
-    controller.createPlaylist('Slow mornings', 'Start gently.')
-    controller.selectPlaylist(first.id)
-    controller.setWorkspaceView('playlists')
+      ]
+    }
+    const local = controller.createPlaylist('Local focus', 'Indexed tracks only.')
+    controller.playlists.set([legacy, local])
+    controller.selectPlaylist(legacy.id)
+    controller.setWorkspaceView('browse')
   },
+  changeChatFocus: (id) => { window.fixtureFocusedSession = id },
   playTone: async () => {
     const seconds = 45,
       sampleRate = 16000,

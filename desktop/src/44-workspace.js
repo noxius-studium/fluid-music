@@ -1,320 +1,196 @@
-function LogsPage({ controller }) {
-  const entries = useValue(controller.logs),
-    [query, setQuery] = useState('')
-  const rows = entries.filter((entry) =>
-    `${entry.event} ${entry.level} ${JSON.stringify(entry.detail)}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  )
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Diagnostics',
-      title: `Logs · ${entries.length}`,
-      subtitle: 'Provider requests, failures, and confirmed playback transitions. No credentials.',
-      actions: h(
-        WorkspaceButton,
-        { disabled: !entries.length, onClick: () => controller.clearLogs() },
-        'Clear logs',
-      ),
-    }),
-    h('input', {
-      className: 'fluid-input',
-      type: 'search',
-      value: query,
-      onChange: (event) => setQuery(event.target.value),
-      'aria-label': 'Filter diagnostics',
-      placeholder: 'Filter events…',
-    }),
-    h(
-      'div',
-      { className: 'fluid-log-list' },
-      rows.map((entry) =>
-        h(
-          'article',
-          { className: 'fluid-log-row', 'data-level': entry.level, key: entry.id },
-          h('time', { dateTime: entry.at }, new Date(entry.at).toLocaleTimeString()),
-          h('span', { className: 'fluid-log-level' }, entry.level),
-          h('strong', {}, entry.event),
-          h('pre', {}, JSON.stringify(entry.detail, null, 2)),
-        ),
-      ),
+function YouTubeControls({ controller, compact = false }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async event => {
+    event?.preventDefault()
+    setError('')
+    setBusy(true)
+    try {
+      if (/^https:\/\//i.test(query.trim())) {
+        await controller.addYouTubeUrl(query, true)
+        setQuery('')
+      } else {
+        setResults(await controller.searchYouTube(query))
+      }
+    } catch (reason) {
+      setError(userFacingError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return h('section', { className: compact ? 'fluid-youtube fluid-youtube-compact' : 'fluid-panel fluid-panel-pad fluid-youtube' },
+    h('div', { className: 'fluid-section-head' },
+      h('div', {}, h('h2', { className: 'fluid-section-title' }, 'YouTube'), h('p', { className: 'fluid-section-copy' }, 'Search songs or videos, or paste a watch URL. FluidMusic loads the real video title and channel.')),
     ),
-    !rows.length && h(Empty, { title: 'No matching events' }, 'Use the player to record provider activity.'),
+    h('form', { className: 'fluid-searchbar', onSubmit: submit },
+      h('input', { className: 'fluid-input', value: query, onChange: event => setQuery(event.target.value), placeholder: 'Search YouTube or paste a watch URL', 'aria-label': 'Search YouTube or paste a watch URL' }),
+      h(WorkspaceButton, { primary: true, type: 'submit', disabled: busy || !query.trim() }, busy ? 'Searching…' : 'Search'),
+    ),
+    error && h('p', { className: 'fluid-error', role: 'alert' }, error),
+    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: item.id, hideSave: true, onPlay: () => controller.addYouTubeItem(item, true) }))),
   )
 }
+
+function HistoryPage({ controller }) {
+  const entries = useValue(controller.history)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { void controller.refreshHistory().catch(() => {}) }, [controller])
+  const clear = async () => {
+    setBusy(true)
+    try { await controller.clearHistory() } finally { setBusy(false) }
+  }
+  return h('section', {},
+    h('div', { className: 'fluid-compact-toolbar' }, h('p', { className: 'fluid-muted' }, `${entries.length} recent play${entries.length === 1 ? '' : 's'}`), h(WorkspaceButton, { disabled: busy || !entries.length, onClick: clear }, busy ? 'Clearing…' : 'Clear history')),
+    entries.length ? h('div', { className: 'fluid-track-list' }, entries.map((entry, at) => h(TrackRow, {
+      controller,
+      item: entry.item,
+      at,
+      key: entry.id,
+      hideSave: true,
+      onPlay: () => controller.add(entry.item, true),
+      extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+    }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
+  )
+}
+
+function NowPlayingBand({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const status = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const capabilities = mediaCapabilities(item)
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  const upcoming = queue.slice(at + 1, at + 4)
+  return h('section', { className: 'fluid-now-band', 'aria-label': 'Now playing' },
+    h('div', { className: 'fluid-orbit', 'data-playing': status === 'playing' }, h(Artwork, { item: display, className: 'fluid-orbit-art' })),
+    h('div', { className: 'fluid-now-main' },
+      h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'),
+      h('h1', { className: 'fluid-now-title' }, display?.title || 'Choose what plays next'),
+      h('p', { className: 'fluid-now-subtitle' }, display?.subtitle || 'Spotify, live radio, local music, and embedded YouTube playback.'),
+      capabilities.play && h(Transport, { controller }),
+      capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : h('p', { className: 'fluid-live-line' }, item?.source === 'radio' ? 'LIVE · station broadcast' : status),
+      capabilities.volume && h(VolumeControl, { controller }),
+      item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device ? `Playing on ${spotify.device}` : 'Choose an available Spotify Connect device in Settings.'),
+    ),
+    h('aside', { className: 'fluid-up-next', 'aria-label': 'Up next preview' },
+      h('div', { className: 'fluid-section-head' }, h('h2', { className: 'fluid-section-title' }, 'Up Next'), h('span', {}, `${Math.max(0, queue.length - at - 1)}`)),
+      upcoming.length ? upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, onClick: () => void controller.playAt(at + offset + 1) }, h(Artwork, { item: next, className: 'fluid-mini-cover' }), h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next))))) : h('p', { className: 'fluid-muted' }, 'Nothing queued after this.'),
+      h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { onClick: () => controller.setWorkspaceView('queue') }, 'Open Queue')),
+    ),
+  )
+}
+
+function SecondaryTabs({ label, value, onChange, items }) {
+  return h('div', { className: 'fluid-secondary-tabs', role: 'tablist', 'aria-label': label }, items.map(([id, text]) => h('button', { type: 'button', role: 'tab', key: id, 'aria-selected': value === id, onClick: () => onChange(id) }, text)))
+}
+
+function BrowsePage({ controller }) {
+  const [tab, setTab] = useState('spotify')
+  return h('div', {}, h(PageHead, { title: 'Browse', subtitle: 'Search Spotify, YouTube, or live radio.' }), h(SecondaryTabs, { label: 'Browse sources', value: tab, onChange: setTab, items: [['spotify', 'Spotify'], ['youtube', 'YouTube'], ['radio', 'Radio']] }), tab === 'spotify' ? h(SearchPage, { controller }) : tab === 'youtube' ? h(YouTubeControls, { controller }) : h(RadioPage, { controller }))
+}
+
+function LibraryPage({ controller }) {
+  const [tab, setTab] = useState('spotify')
+  return h('div', {}, h(PageHead, { title: 'Library', subtitle: 'Playlists, local music, collections, and listening history.' }), h(SecondaryTabs, { label: 'Library sources', value: tab, onChange: setTab, items: [['spotify', 'Spotify'], ['local', 'Local'], ['collections', 'Collections'], ['history', 'History']] }), tab === 'spotify' ? h(SpotifyLibraryPage, { controller }) : tab === 'local' ? h(LocalPage, { controller }) : tab === 'history' ? h(HistoryPage, { controller }) : h(PlaylistsPage, { controller }))
+}
+
 function SettingsPage({ controller }) {
-  const autoplay = useValue(controller.spotifyAutoplay),
-    shuffle = useValue(controller.shuffle),
-    repeat = useValue(controller.repeat),
-    queue = useValue(controller.queue),
-    at = useValue(controller.index)
-  const item = queue[at],
-    polling = controller.polling()
-  const run = (work) => void work().catch((error) => controller.message.set(userFacingError(error)))
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Make it yours',
-      title: 'Playback & connections.',
-      subtitle: 'Choose where music plays and what happens next.',
-    }),
-    h(
-      'div',
-      { className: 'fluid-settings-grid' },
-      h(SpotifyConnection, { controller }),
-      h(
-        'section',
-        { className: 'fluid-panel fluid-panel-pad' },
-        h('h2', { className: 'fluid-section-title' }, 'Volume & visuals'),
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          'Volume is always available in the status bar, even outside Media.',
-        ),
-        h(VolumeControl, { controller }),
-        h(VisualizerSettings, { controller }),
-        h('hr', {}),
-        h('h2', { className: 'fluid-section-title' }, 'Spotify continuation'),
-        h(
-          'label',
-          { className: 'fluid-switch-row' },
-          h('input', {
-            type: 'checkbox',
-            checked: autoplay,
-            onChange: (event) => controller.setSpotifyAutoplay(event.target.checked),
-          }),
-          h(
-            'span',
-            {},
-            h('strong', {}, 'Let Spotify continue after a track'),
-            h(
-              'small',
-              {},
-              autoplay
-                ? 'Spotify controls the next song in its context.'
-                : 'FluidMusic advances to the next item in your queue.',
-            ),
-          ),
-        ),
-        item?.source === 'spotify' &&
-          h(
-            'div',
-            { className: 'fluid-actions' },
-            h(
-              WorkspaceButton,
-              { onClick: () => run(() => controller.setShuffle(!shuffle)), 'aria-pressed': shuffle },
-              shuffle ? 'Shuffle on' : 'Shuffle off',
-            ),
-            h(
-              WorkspaceButton,
-              {
-                onClick: () =>
-                  run(() =>
-                    controller.setRepeat(
-                      repeat === 'off' ? 'context' : repeat === 'context' ? 'track' : 'off',
-                    ),
-                  ),
-              },
-              `Repeat: ${repeat}`,
-            ),
-          ),
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          `State checks: ${polling.open}s in Media, ${polling.closed}s elsewhere. Progress advances between checks.`,
-        ),
-      ),
-      h(
-        'section',
-        { className: 'fluid-panel fluid-panel-pad' },
-        h('h2', { className: 'fluid-section-title' }, 'Three sources. Clear boundaries.'),
-        h(
-          'dl',
-          { className: 'fluid-boundaries' },
-          h('dt', {}, 'Spotify'),
-          h(
-            'dd',
-            {},
-            'Remote control of an official Connect device. No audio samples are available here; the visualizer never simulates them.',
-          ),
-          h('dt', {}, 'Radio'),
-          h(
-            'dd',
-            {},
-            'Browser audio, with station ads intact. Audio visualization is available when the stream permits analysis.',
-          ),
-          h('dt', {}, 'Local music'),
-          h(
-            'dd',
-            {},
-            'Audio stays on disk. Saved playlists store stable catalog IDs, never audio bytes or private paths.',
-          ),
-        ),
-      ),
-    ),
+  const [tab, setTab] = useState('providers')
+  const autoplay = useValue(controller.spotifyAutoplay)
+  return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['diagnostics', 'Diagnostics']] }),
+    tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.')))) : h(LogsPage, { controller }))
+}
+
+function LogsPage({ controller }) {
+  const entries = useValue(controller.logs)
+  return h('section', { className: 'fluid-panel fluid-panel-pad' },
+    h('div', { className: 'fluid-section-head' }, h('div', {}, h('h2', { className: 'fluid-section-title' }, `Diagnostics · ${entries.length}`), h('p', { className: 'fluid-section-copy' }, 'Sanitized provider commands and playback transitions.')), h(WorkspaceButton, { disabled: !entries.length, onClick: () => controller.clearLogs() }, 'Clear logs')),
+    h('div', { className: 'fluid-log-list' }, entries.map(entry => h('article', { className: 'fluid-log-row', 'data-level': entry.level, key: entry.id }, h('time', { dateTime: entry.at }, new Date(entry.at).toLocaleTimeString()), h('span', { className: 'fluid-log-level' }, entry.level), h('strong', {}, entry.event), h('pre', {}, JSON.stringify(entry.detail, null, 2))))),
+    !entries.length && h(Empty, { title: 'No diagnostics yet' }, 'Provider activity appears here when you use playback controls.'),
   )
 }
-const NAV_PRIMARY = [
-  ['home', 'home', 'Overview'],
-  ['search', 'search', 'Search'],
-  ['library', 'spotify', 'Spotify'],
-  ['radio', 'radio', 'Radio'],
-  ['local', 'local', 'Local music'],
-]
-const NAV_LIBRARY = [
-  ['playlists', 'playlist', 'Playlists'],
-  ['queue', 'queue', 'Queue'],
-  ['settings', 'settings', 'Settings'],
-  ['logs', 'logs', 'Logs'],
-]
-function Sidebar({ controller, view, navigate }) {
-  const queue = useValue(controller.queue),
-    playlists = useValue(controller.playlists),
-    auth = useValue(controller.spotifyAuth)
-  const group = (label, rows) =>
-    h(
-      'div',
-      { className: 'fluid-nav-group' },
-      h('p', { className: 'fluid-nav-label' }, label),
-      rows.map(([id, icon, text]) =>
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'fluid-nav-button',
-            'data-active': view === id,
-            'aria-current': view === id ? 'page' : undefined,
-            key: id,
-            onClick: () => navigate(id),
-          },
-          h('span', { className: 'fluid-nav-icon' }, h(Icon, { kind: icon })),
-          h('span', {}, text),
-          ['queue', 'playlists'].includes(id) &&
-            h('span', { className: 'fluid-nav-count' }, id === 'queue' ? queue.length : playlists.length),
-        ),
-      ),
-    )
-  return h(
-    'nav',
-    { className: 'fluid-sidebar', 'aria-label': 'FluidMusic' },
-    h(
-      'div',
-      { className: 'fluid-brand' },
-      h(Icon, { kind: 'music' }),
-      h('span', {}, h('strong', {}, 'FluidMusic'), h('small', {}, 'A soundtrack for your work')),
-    ),
-    group('Listen', NAV_PRIMARY),
-    group('Collection', NAV_LIBRARY),
-    h(
-      'div',
-      { className: 'fluid-sidebar-foot' },
-      h(
-        'span',
-        { className: 'fluid-provider-state' },
-        h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
-        auth.authenticated ? 'Spotify connected' : 'Spotify disconnected',
-      ),
-    ),
+
+const PRIMARY_NAV = [['browse', 'Browse'], ['library', 'Library'], ['queue', 'Queue'], ['settings', 'Settings']]
+function TopNavigation({ controller, view }) {
+  return h('header', { className: 'fluid-topbar' },
+    h('button', { type: 'button', className: 'fluid-wordmark', onClick: () => controller.setWorkspaceView('browse') }, h(Icon, { kind: 'music' }), h('span', {}, 'FluidMusic')),
+    h('nav', { className: 'fluid-primary-nav', 'aria-label': 'FluidMusic' }, PRIMARY_NAV.map(([id, label]) => h('button', { type: 'button', className: 'fluid-nav-button', key: id, 'data-active': view === id, 'aria-current': view === id ? 'page' : undefined, onClick: () => controller.setWorkspaceView(id) }, label))),
   )
 }
+
 function MediaPage({ controller }) {
   const view = useValue(controller.workspaceView)
+  useEffect(() => { controller.setPollingOpen(true); return () => controller.setPollingOpen(false) }, [controller])
+  const pages = { browse: BrowsePage, library: LibraryPage, queue: QueuePage, settings: SettingsPage }
+  const Page = pages[view] || BrowsePage
+  return h('div', { className: 'fluid-root' }, h('main', { className: 'fluid-app' }, h(TopNavigation, { controller, view }), h('section', { className: 'fluid-content' }, h('div', { className: 'fluid-content-inner' }, h(Notice, { controller }), h(NowPlayingBand, { controller }), h(Page, { controller })))))
+}
+
+function PlayerPopover({ controller, popoverRef }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const item = queue[at]
+  const progress = useValue(controller.progress)
+  const spotify = useValue(controller.spotify)
+  const state = useValue(controller.status)
+  const capabilities = mediaCapabilities(item)
+  const upcoming = queue.slice(at + 1, at + 4)
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  return h('div', { ref: popoverRef, className: 'fluid-title-popover', role: 'dialog', 'aria-label': 'FluidMusic quick controls' },
+    h('div', { className: 'fluid-popover-now' }, h('div', { className: 'fluid-orbit fluid-orbit-small', 'data-playing': state === 'playing' }, h(Artwork, { item: display, className: 'fluid-orbit-art' })), h('div', { className: 'fluid-row-copy' }, h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'), h('strong', { className: 'fluid-popover-title' }, display?.title || 'Nothing selected'), h('span', { className: 'fluid-row-detail' }, display?.subtitle || 'Open Media to choose something.'))),
+    item && h(Transport, { controller }),
+    capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : item?.source === 'radio' && h('p', { className: 'fluid-live-line' }, 'LIVE'),
+    capabilities.volume && h(VolumeControl, { controller }),
+    item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device || 'No confirmed Connect device'),
+    upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext' }, h('h3', {}, 'Up Next'), upcoming.map(next => h('div', { className: 'fluid-next-row', key: next.id }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
+    h(Notice, { controller }),
+    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); host.navigate(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Open Media')),
+  )
+}
+
+function TitlebarPlayer({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const state = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const open = useValue(controller.titlebarOpen)
+  const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const popoverRef = useRef(null)
+  const item = queue[at]
+  const title = item?.source === 'spotify' && spotify.title ? spotify.title : item?.title || 'FluidMusic'
   useEffect(() => {
-    controller.setPollingOpen(true)
-    void controller.refreshSpotifyAuth()
-    void controller.refreshSpotifyDevices()
-    return () => controller.setPollingOpen(false)
-  }, [controller])
-  const pages = {
-    home: HomePage,
-    search: SearchPage,
-    library: SpotifyLibraryPage,
-    radio: RadioPage,
-    local: LocalPage,
-    playlists: PlaylistsPage,
-    queue: QueuePage,
-    settings: SettingsPage,
-    logs: LogsPage,
-  }
-  return h(
-    'div',
-    { className: 'fluid-root' },
-    h(
-      'main',
-      { className: 'fluid-app' },
-      h(
-        'div',
-        { className: 'fluid-shell' },
-        h(Sidebar, { controller, view, navigate: controller.setWorkspaceView }),
-        h(
-          'section',
-          { className: 'fluid-content', key: view },
-          h(
-            'div',
-            { className: 'fluid-content-inner' },
-            h(Notice, { controller }),
-            h(pages[view] || HomePage, { controller, navigate: controller.setWorkspaceView }),
-          ),
-        ),
-      ),
-      h(PlayerDock, { controller }),
-    ),
+    if (!open) return undefined
+    const trigger = triggerRef.current
+    const popover = popoverRef.current
+    popover?.querySelector('button:not([disabled]), input:not([disabled]), [tabindex="0"]')?.focus()
+    const dismiss = () => controller.titlebarOpen.set(false)
+    const onKeyDown = event => { if (event.key === 'Escape') { event.preventDefault(); dismiss() } }
+    const onPointerDown = event => { if (!rootRef.current?.contains(event.target)) dismiss() }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+      if (trigger instanceof HTMLElement && trigger.isConnected) setTimeout(() => trigger.isConnected && trigger.focus(), 0)
+    }
+  }, [open, controller])
+  return h('div', { ref: rootRef, className: 'fluid-titlebar' },
+    h(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'micro', className: 'fluid-titlebar-summary', 'aria-expanded': open, 'aria-haspopup': 'dialog', onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
+    mediaCapabilities(item).play && h(Action, { compact: true, kind: ['playing', 'loading'].includes(state) ? 'pause' : 'play', label: ['playing', 'loading'].includes(state) ? 'Pause' : 'Play', onClick: () => void controller.toggle() }),
+    open && h(PlayerPopover, { controller, popoverRef }),
   )
 }
-function StatusBar({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    status = useValue(controller.status),
-    spotify = useValue(controller.spotify),
-    message = useValue(controller.message),
-    visual = useValue(controller.statusVisualizer)
-  const item = queue[at],
-    active = status === 'playing' || status === 'loading'
-  const title =
-    item?.source === 'spotify' && spotify.title && status === 'playing'
-      ? spotify.title
-      : item?.title || 'FluidMusic'
-  return h(
-    'div',
-    { className: 'fluid-statusbar', 'aria-label': 'FluidMusic controls' },
-    h(
-      Button,
-      {
-        variant: 'ghost',
-        size: 'micro',
-        onClick: () => host.navigate(ROUTE),
-        title: message || `${title} · ${status}`,
-        'aria-label': 'Open FluidMusic',
-      },
-      h('span', { className: 'fluid-status-dot', 'data-state': status }),
-      h('span', { className: 'fluid-statusbar-title' }, title),
-    ),
-    item &&
-      h(Action, {
-        compact: true,
-        label: active ? 'Pause' : 'Play',
-        kind: active ? 'pause' : 'play',
-        onClick: () => void controller.toggle(),
-      }),
-    item && h(Action, { compact: true, label: 'Next', kind: 'next', onClick: () => void controller.next() }),
-    h(VolumeControl, { controller, compact: true }),
-    h(Action, {
-      compact: true,
-      kind: 'wave',
-      label: visual ? 'Hide status visualizer' : 'Show status visualizer',
-      onClick: () => controller.setStatusVisualizer(!visual),
-    }),
-    visual && h(AudioVisualizer, { controller, compact: true }),
-    visual && h(VisualizerStyle, { controller, compact: true }),
-  )
-}
+
 export default {
   id: ID,
   name: 'FluidMusic',
-  description: 'Your listening workspace: Spotify Connect, radio, and local music.',
+  description: 'Source-aware listening for Spotify Connect, radio, local music, and embedded YouTube playback.',
   defaultEnabled: true,
   register(ctx) {
     const style = document.createElement('style')
@@ -322,29 +198,8 @@ export default {
     document.head.append(style)
     ctx.onDispose(() => style.remove())
     const controller = createController(ctx)
-    ctx.register({
-      id: 'media-route',
-      area: ROUTES_AREA,
-      data: { path: ROUTE },
-      render: () => h(MediaPage, { controller }),
-    })
-    ctx.register({
-      id: 'media-nav',
-      area: SIDEBAR_NAV_AREA,
-      data: { path: ROUTE, label: 'Media', codicon: 'music' },
-    })
-    ctx.register({
-      id: 'media-status',
-      area: STATUSBAR_AREAS.right,
-      order: 18,
-      render: () => h(StatusBar, { controller }),
-    })
-    ctx.register({
-      id: 'mini-player',
-      area: 'panes',
-      title: 'FluidMusic player',
-      data: { placement: 'right', width: '300px', height: '420px' },
-      render: () => h(MiniPlayer, { controller }),
-    })
+    ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
+    ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    ctx.register({ id: 'mini-player', area: 'panes', title: 'FluidMusic player', data: { placement: 'right', width: '300px', height: '420px' }, render: () => h(MiniPlayer, { controller }) })
   },
 }

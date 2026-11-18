@@ -17,7 +17,6 @@ function PageHead({ kicker, title, subtitle, actions }) {
     h(
       'div',
       {},
-      h('p', { className: 'fluid-kicker' }, kicker),
       h('h1', { className: 'fluid-page-title' }, title),
       h('p', { className: 'fluid-page-subtitle' }, subtitle),
     ),
@@ -148,17 +147,14 @@ function Notice({ controller }) {
 }
 function AddToPlaylist({ controller, item }) {
   const [open, setOpen] = useState(false)
-  const sessionOnly = item.source === 'local' && !item.localTrackId
+  if (item.source !== 'local' || !item.localTrackId) return null
   return h(
     'span',
     {},
     h(Action, {
       compact: true,
       kind: 'playlist',
-      disabled: sessionOnly,
-      label: sessionOnly
-        ? 'Session file: index its folder to save in playlists'
-        : `Save ${item.title} to playlist`,
+      label: `Save ${item.title} to playlist`,
       onClick: () => setOpen(true),
     }),
     open &&
@@ -170,14 +166,13 @@ function AddToPlaylist({ controller, item }) {
   )
 }
 function SavePlaylistDialog({ controller, item, onClose }) {
-  const playlists = useValue(controller.playlists)
+  const playlists = useValue(controller.playlists).filter(entry => !entry.legacy)
   const [destination, setDestination] = useState(playlists[0]?.id || 'new')
   const [name, setName] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [progress, setProgress] = useState(null)
-  const collection = /^spotify:playlist:/.test(item.uri || '')
-  const [mode, setMode] = useState(collection ? 'tracks' : 'reference')
+
   const operation = useRef(null),
     mounted = useRef(true)
   useEffect(
@@ -208,7 +203,7 @@ function SavePlaylistDialog({ controller, item, onClose }) {
         id: destination === 'new' ? '' : destination,
         name,
         item,
-        mode,
+
         signal: abort.signal,
         onProgress: (value) => {
           if (mounted.current) setProgress(value)
@@ -241,38 +236,14 @@ function SavePlaylistDialog({ controller, item, onClose }) {
         h(
           'span',
           { className: 'fluid-row-detail' },
-          collection ? 'Spotify playlist' : sourceLabel(item),
+          sourceLabel(item),
         ),
       ),
     ),
     h(
       'form',
       { onSubmit: save },
-      collection &&
-        h(
-          'label',
-          { className: 'fluid-field' },
-          'What to save',
-          h(
-            'select',
-            {
-              className: 'fluid-select',
-              value: mode,
-              disabled: busy,
-              onChange: (event) => setMode(event.target.value),
-            },
-            h('option', { value: 'tracks' }, 'Copy the individual songs'),
-            h('option', { value: 'reference' }, 'Keep as a single Spotify playlist reference'),
-          ),
-        ),
-      collection &&
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          mode === 'tracks'
-            ? 'Copies all supported songs in their current order. You can then edit and mix them in FluidMusic. Spotify itself is not changed.'
-            : 'Saves one context entry. Spotify continues to manage the songs inside it.',
-        ),
+
       h(
         'fieldset',
         { className: 'fluid-save-destinations', disabled: busy },
@@ -507,11 +478,12 @@ function Transport({ controller }) {
   const queue = useValue(controller.queue),
     at = useValue(controller.index),
     status = useValue(controller.status),
-    item = queue[at]
+    item = queue[at],
+    capabilities = mediaCapabilities(item)
   return h(
     'div',
     { className: 'fluid-player-controls' },
-    h(Action, {
+    capabilities.previous && h(Action, {
       compact: true,
       kind: 'previous',
       label: 'Previous',
@@ -522,7 +494,6 @@ function Transport({ controller }) {
       WorkspaceButton,
       {
         primary: true,
-        className: 'fluid-primary-action',
         disabled: !item,
         onClick: () => void controller.toggle(),
         'aria-label': ['playing', 'loading'].includes(status) ? 'Pause' : 'Play',
@@ -531,82 +502,13 @@ function Transport({ controller }) {
         kind: ['playing', 'loading'].includes(status) ? 'pause' : 'play',
       }),
     ),
-    h(Action, {
+    capabilities.next && h(Action, {
       compact: true,
       kind: 'next',
       label: 'Next',
       disabled: !item,
       onClick: () => void controller.next(),
     }),
-  )
-}
-function PlayerDock({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    state = useValue(controller.status),
-    spotify = useValue(controller.spotify),
-    progress = useValue(controller.progress),
-    autoplay = useValue(controller.spotifyAutoplay)
-  const item = queue[at],
-    confirmed =
-      item?.source === 'spotify' &&
-      spotify.title &&
-      (spotify.uri === item.uri || item.kind !== 'track' || autoplay)
-  const display = confirmed
-    ? {
-        ...item,
-        title: spotify.title,
-        subtitle: spotify.subtitle,
-        artwork: spotify.artwork,
-      }
-    : item
-  return h(
-    'footer',
-    { className: 'fluid-player', 'aria-label': 'Persistent player' },
-    h(
-      'div',
-      { className: 'fluid-player-track' },
-      h(Artwork, { item: display, className: 'fluid-player-cover' }),
-      h(
-        'div',
-        { className: 'fluid-row-copy' },
-        h('span', { className: 'fluid-player-title' }, display?.title || 'Ready when you are'),
-        h(
-          'span',
-          { className: 'fluid-player-subtitle' },
-          display?.subtitle || 'Choose a track, station, or playlist',
-        ),
-        h(
-          'span',
-          { className: 'fluid-player-source' },
-          item ? `${sourceLabel(item)} · ${state}` : 'FluidMusic',
-        ),
-      ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-player-center' },
-      h(Transport, { controller }),
-      item?.source !== 'radio' && progress.durationMs > 0
-        ? h(SeekBar, { controller })
-        : h(
-            'p',
-            { className: 'fluid-player-hint' },
-            item?.source === 'radio'
-              ? 'LIVE RADIO'
-              : state === 'loading'
-                ? 'Connecting…'
-                : 'Your music, without leaving your work',
-          ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-player-side' },
-      item?.source === 'spotify' &&
-        spotify.device &&
-        h('span', { className: 'fluid-player-device' }, spotify.device),
-      h(VolumeControl, { controller }),
-    ),
   )
 }
 function QueuePlaylistTracks({ controller, item }) {

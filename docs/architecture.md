@@ -2,13 +2,14 @@
 
 ## Design goal
 
-FluidMusic presents one music workflow while keeping three playback engines honest:
+FluidMusic presents one music workflow while keeping four playback engines honest:
 
 ```text
 FluidMusic coordinator
 ├── Spotify adapter ──> Spotify Web/Connect APIs ──> selected Spotify device
 ├── radio adapter ──> Radio Browser metadata ──> internal HTMLAudioElement
-└── local adapter ──> SQLite catalog ──> Hermes seekable media protocol
+├── local adapter ──> SQLite catalog ──> Hermes seekable media protocol
+└── YouTube adapter ──> owned validated watch page ──> page HTMLMediaElement
 ```
 
 The coordinator owns queue order and source handoff. Each adapter owns its actual playback state, capabilities, and error meanings.
@@ -37,11 +38,11 @@ The backend mounts under `/api/plugins/fluid-music/`. The desktop contribution r
 - source handoff sequencing and stale-transition invalidation;
 - internal radio/local audio elements;
 - Spotify polling and provider state;
-- FluidMusic playlists;
+- local-only collections and preserved read-only legacy mixes;
 - hydrated local roots/tracks;
 - disposal of timers, media elements, object URLs, and audio nodes.
 
-Route navigation can unmount workspace components without stopping playback.
+Route navigation and chat focus changes can unmount workspace components without stopping playback or changing queue selection. No playback state subscribes to `focusedSessionId` or `activeSessionId`.
 
 ## Normalized queue
 
@@ -50,6 +51,7 @@ Every queue item has a `source` discriminator. Provider-specific stable referenc
 - `spotify`: Spotify URI and catalog metadata;
 - `radio`: validated public HTTPS stream URL;
 - `local`: stable SQLite `localTrackId`, resolved runtime path, and availability.
+- `youtube`: exact validated HTTPS watch URL and 11-character video ID.
 
 The coordinator stops the previous engine before starting the next. A command being issued is not treated as provider-confirmed playback.
 
@@ -88,11 +90,7 @@ The renderer never gets Node integration or arbitrary filesystem APIs. The backe
 
 FluidMusic playlist state stores only `localTrackId` and display metadata for local items. Raw filesystem paths and runtime playback URLs are stripped before persistence. At startup, `refreshLocalLibrary()` hydrates those references from SQLite. Missing tracks remain visible as unavailable and can recover after rescan.
 
-This is what allows a playlist to persist this sequence safely:
-
-```text
-local-track-id → spotify:track:… → radio-station → local-track-id
-```
+New collections accept only local catalog references. Existing v3 mixed collections are tagged as legacy and preserved byte-for-byte at the item level; their UI is read-only with play, enqueue, and export. Spotify playlists remain live provider contexts, radio uses pinned stations, and Up Next is the only new cross-provider collection FluidMusic owns.
 
 ## Spotify
 
@@ -115,17 +113,17 @@ The **Let Spotify continue after a track** setting disables that guard. Spotify 
 
 Authoritative Spotify snapshots are bounded to no more often than every 8 seconds while the workspace is open and 20 seconds while closed. Between snapshots, a 500 ms local clock projects elapsed position from the last position, duration, playback state, and receipt time. The local clock makes no network calls; later snapshots correct any drift.
 
-### Expandable Spotify playlists and copies
+### Expandable Spotify playlists
 
 Queued Spotify playlists remain provider contexts. Their expanded track rows carry the original page position before unsupported entries are filtered; selecting a duplicate song sends a numeric context offset, not the first matching URI. The controller resolves the original queue object again after asynchronous work, so removing or moving a duplicate context does not select another occurrence.
 
-The save dialog explicitly distinguishes copying individual songs from retaining one Spotify playlist reference. Collection copies resolve every page (up to 10,000 entries) before committing a destination. Cancellation, provider failure, stalled pagination, or a deleted destination cannot publish a partial copy or an empty new playlist. Copies preserve duplicates/order and strip the source playlist context so they remain independently editable. The controller checks stored state before acknowledging success.
+FluidMusic does not copy Spotify playlists into new local collections.
 
-## Audio analysis and continuity
+## Titlebar and owned YouTube page
 
-Indexed playback uses the existing host transport without attempting Web Audio access. Browser-opened File/blob audio and compatible CORS radio can use real analysis. No custom-scheme permissions or Hermes host code are modified.
+The controller is created at plugin registration and is shared by the Media route, titlebar contribution, and optional mini-player pane. The titlebar contribution replaces the old statusbar and workspace footer player.
 
-For analysis-capable audio, `source → gain → destination` stays connected for the lifetime of the engine. An analyser is a separate source tap with no speaker output. Visibility leases connect/disconnect only that tap; they never reroute the audible path. Volume changes use a short AudioParam ramp. Hidden/reduced-motion visuals do no sample work. This does not promise gapless provider handoff or eliminate network/device buffering.
+`openYouTube()` calls `ctx.preview.openOrFocus({ key: 'fluid-music-youtube', url: 'https://www.youtube.com/', label: 'YouTube' })` and retains only that returned handle. Explicit user actions and polling while YouTube is the selected source call `ctx.preview.executeJavaScriptIn(handle, code)`. Before discovering or mutating media, the injected script requires HTTPS, exact host `www.youtube.com`, exact path `/watch`, and an exact 11-character `v` ID. Results are schema-checked before display or queue insertion. Ended state advances FluidMusic Up Next through a transition-bound exactly-once guard. Previous and Next traverse FluidMusic Up Next rather than invoking provider navigation. Opening grants no execution consent; popped-out, navigated, missing-page, and consent errors remain visible to the user.
 
 ## Search
 
@@ -133,18 +131,17 @@ Spotify API results are normalized into track rows and album/artist/playlist car
 
 ## Capability matrix
 
-| Capability | Spotify | Radio | Local |
-| --- | --- | --- | --- |
-| Play/pause | Connect command | Internal audio | Internal audio |
-| Previous/next | Connect contexts + app queue tracks | App queue, not station skipping | App queue |
-| Seek | Connect | No | Yes |
-| Volume | Connect | Internal | Internal |
-| Shuffle/repeat | Connect | No | No |
-| Audio analyser | No decoded audio | When CORS permits | Browser-opened session files only; not indexed transport |
+| Capability | Spotify | Radio | Local | YouTube |
+| --- | --- | --- | --- | --- |
+| Play/pause | Connect command | Internal audio | Internal audio | Owned watch page |
+| Previous/next | Connect contexts + app queue tracks | App queue, not station skipping | App queue | App queue |
+| Seek | Connect | No | Yes | Selected watch item |
+| Volume | Connect | Internal | Internal | Selected watch item |
+
 
 ## Theme and accessibility
 
-FluidMusic chrome derives from Hermes `--ui-*` variables and `color-mix(...)`. App icons use SVG paths, never emoji. Essential actions are visible and keyboard reachable, focus rings use the active accent, container queries respond to the actual pane width, and reduced-motion preference disables visualizer processing as well as transitions. Dialogs trap focus through native `dialog`, focus their form field on open, and restore focus on close.
+FluidMusic chrome derives from Hermes `--ui-*` variables and `color-mix(...)`. The Night Radio palette uses semantic dark navy/graphite surfaces, off-white type, coral live state, and restrained violet provider identity while remaining legible in light host themes. App icons use SVG paths, essential actions are keyboard reachable, focus rings use the active accent, and container queries cover desktop through 390 px.
 
 ## Security boundaries
 
