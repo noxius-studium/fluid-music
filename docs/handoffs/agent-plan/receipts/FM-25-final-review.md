@@ -3,7 +3,7 @@
 Task: FM-25 (t_0bbb3bc2) · Board: fluid-music · Written: 2026-11-19 (UTC)
 Profile: default · Provider: nous · Model pin: qwen/qwen4-max:free (no delegation used).
 Repository: noxius-studium/fluid-music · Workspace: /home/node/fluid-music · Branch: docs/cloud-kanban-handoff
-Final source SHA: 1a52f0892ab8c740b876046c01673aa45226fcf6 (remote ls-remote read-back EQUAL; tree clean).
+Final source SHA at lean-check time: 1a52f0892ab8c740b876046c01673aa45226fcf6 (remote ls-remote read-back EQUAL; tree clean). The authoritative FINAL commit/artifact binding (this receipt's own commit included) is recorded in the FM-25 CALLBACK REVIEW comment on the board; the artifact is regenerated after each receipt commit so BUILD-INFO always binds the exact final SHA.
 Status: all autonomous core slices FM-00..FM-24 complete with scoped pushed checkpoints. FM-25 is PARKED at the genuine owner audio/theme/UI review gate — NOT self-approved, NOT marked complete.
 
 ## 1. Final lean check set (one serial pass at the final SHA, ACTUAL results)
@@ -15,7 +15,7 @@ Status: all autonomous core slices FM-00..FM-24 complete with scoped pushed chec
 - Package contract/hash/determinism fixtures included above; artifact re-verified below.
 - No full service stack, no browser farm, no downloads, no paid/live provider calls.
 
-## 2. Review manifest (actual artifact)
+## 2. Review manifest (actual artifact; check-time values — final binding in CALLBACK REVIEW)
 
 - Artifact: `/home/node/fluid-music/dist/fluid-music-0.5.0.zip` (gitignored build output; rebuild from the verified SHA with `python3 scripts/package.py`).
 - Size: 296 074 bytes · 55 members · one installable `fluid-music/` directory.
