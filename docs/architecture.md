@@ -9,7 +9,8 @@ FluidMusic coordinator
 ├── Spotify adapter ──> Spotify Web/Connect APIs ──> selected Spotify device
 ├── radio adapter ──> Radio Browser metadata ──> internal HTMLAudioElement
 ├── local adapter ──> SQLite catalog ──> Hermes seekable media protocol
-└── YouTube adapter ──> owned validated watch page ──> page HTMLMediaElement
+└── YouTube adapter ──> capability-protected loopback embed host ──> official iframe relay
+                      (optional first-party watch fallback only with a verified host owned-view capability)
 ```
 
 The coordinator owns queue order and source handoff. Each adapter owns its actual playback state, capabilities, and error meanings.
@@ -94,14 +95,14 @@ New collections accept only local catalog references. Existing v3 mixed collecti
 
 ## Spotify
 
-Hermes' bundled `SpotifyClient` remains the credential and refresh authority. FluidMusic never exposes OAuth tokens to the renderer. The backend provides:
+FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. No Hermes-core or sibling-plugin Spotify implementation is imported, and OAuth tokens never reach the renderer, logs, or exports. Older credential stores are left untouched until a separately approved migration/login. The backend provides:
 
 - PKCE status/start routes;
 - `/me/player/devices` discovery and active-device fallback;
 - playback, seek, volume, transfer, queue, shuffle, and repeat routes;
 - paginated search;
-- current-user playlists;
-- playlist items through `/playlists/{id}/items`.
+- current-user playlists via `/playlists`;
+- playlist items via `/playlists/{id}/tracks` with occurrence identity.
 
 Spotify audio always remains on a Spotify Connect device.
 
@@ -119,11 +120,17 @@ Queued Spotify playlists remain provider contexts. Their expanded track rows car
 
 FluidMusic does not copy Spotify playlists into new local collections.
 
-## Titlebar and owned YouTube page
+## Titlebar and YouTube player
 
-The controller is created at plugin registration and is shared by the Media route, titlebar contribution, and optional mini-player pane. The titlebar contribution replaces the old statusbar and workspace footer player.
+The controller is created at plugin registration and is shared by the Media route, titlebar contribution (when the host exposes `TITLEBAR_AREAS.right`), and optional mini-player pane. The titlebar contribution replaces the old statusbar and workspace footer player.
 
-`openYouTube()` calls `ctx.preview.openOrFocus({ key: 'fluid-music-youtube', url: 'https://www.youtube.com/', label: 'YouTube' })` and retains only that returned handle. Explicit user actions and polling while YouTube is the selected source call `ctx.preview.executeJavaScriptIn(handle, code)`. Before discovering or mutating media, the injected script requires HTTPS, exact host `www.youtube.com`, exact path `/watch`, and an exact 11-character `v` ID. Results are schema-checked before display or queue insertion. Ended state advances FluidMusic Up Next through a transition-bound exactly-once guard. Previous and Next traverse FluidMusic Up Next rather than invoking provider navigation. Opening grants no execution consent; popped-out, navigated, missing-page, and consent errors remain visible to the user.
+YouTube search (`/youtube/search`) and watch-URL resolution (`/youtube/resolve`) return real titles and safe metadata. Playback runs inside the FluidMusic player through the backend's 127.0.0.1-only capability-token embed host (`/youtube/embed-host`) with Host/path checks, exact video-ID validation, origin/Referer preservation, and an official postMessage command/state relay. Stale or foreign player messages are ignored; commands and completions are generation-bound so a late report from a previous item can never settle or advance the current one.
+
+For content that refuses embedding but works on the authorized normal watch page, a first-party watch fallback is offered only when `youTubeWatchCapability` verifies the public SDK's owned-view door (`OwnedMediaView` + `host.mediaSession`); otherwise the exact missing contract is reported with Retry/Skip. The fallback keeps exactly one active engine and one queue/current-item/history event, retaining position/volume where supported. There is no second YouTube pane, no focused-chat Browser borrowing, and no private host patch. Ended state advances FluidMusic Up Next through a transition-bound exactly-once guard; Previous/Next traverse the FluidMusic queue, never provider navigation.
+
+## Listening sessions, resume, recovery and data safety (0.5.0)
+
+Queue editing (Play next, multi-select remove/move, confirmed clears, one-step undo) carries display-only provenance; listening sessions persist safe source references under a separate storage key with Replace/Append restore review. Eligible long-form YouTube/local items store resume positions and timestamp bookmarks in profile-local SQLite (`resume_positions`, `bookmarks`); history supports title/source/date filters, pagination, per-entry removal and an explicit retention preference. A single monotonic sleep-timer owner pauses only the bound current engine and cancels on source change. The Recovery center projects evidence-based source health with bounded retries/cooldowns. SQLite schema changes are versioned (`PRAGMA user_version`) with bounded pre-migration backups and rollback; raw legacy collections are preserved byte-for-byte. Host doors and fallbacks are declared in `docs/handoffs/agent-plan/COMPATIBILITY.md`.
 
 ## Search
 
@@ -133,19 +140,19 @@ Spotify API results are normalized into track rows and album/artist/playlist car
 
 | Capability | Spotify | Radio | Local | YouTube |
 | --- | --- | --- | --- | --- |
-| Play/pause | Connect command | Internal audio | Internal audio | Owned watch page |
+| Play/pause | Connect command | Internal audio | Internal audio | Embed relay / capability-gated watch |
 | Previous/next | Connect contexts + app queue tracks | App queue, not station skipping | App queue | App queue |
-| Seek | Connect | No | Yes | Selected watch item |
-| Volume | Connect | Internal | Internal | Selected watch item |
+| Seek | Connect | No | Yes | Selected item via relay |
+| Volume | Connect | Internal | Internal | Selected item via relay |
 
 
 ## Theme and accessibility
 
-FluidMusic chrome derives from Hermes `--ui-*` variables and `color-mix(...)`. The Night Radio palette uses semantic dark navy/graphite surfaces, off-white type, coral live state, and restrained violet provider identity while remaining legible in light host themes. App icons use SVG paths, essential actions are keyboard reachable, focus rings use the active accent, and container queries cover desktop through 390 px.
+FluidMusic chrome derives exclusively from Hermes `--ui-*` semantic variables and `color-mix(...)` — there is no private palette (the historical private-palette description is superseded). Surfaces, text roles, hairlines, hover/selected, focus and live state all follow the active host theme, including tinted themes; state is never conveyed by color alone. App icons use one semantic SVG stroke vocabulary, essential actions are keyboard reachable, icon-only controls are named, focus rings use the active accent, reduced motion is honored, and container queries cover desktop through 320–390 px.
 
 ## Security boundaries
 
-- OAuth and provider tokens remain in Hermes credential stores.
-- SQLite contains no credentials, cookies, object URLs, or audio bytes.
+- Spotify OAuth tokens remain in the FluidMusic-owned protected profile-local token store, never in the renderer, public SQLite, logs or exports.
+- SQLite contains no credentials, cookies, object URLs, or audio bytes; resume/bookmark rows store safe source references only.
 - Radio inputs accept only public credential-free HTTPS streams and are not backend-proxied.
 - Local scanning is rooted in explicit user approvals and renderer Node integration remains disabled.

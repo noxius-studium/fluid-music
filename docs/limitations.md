@@ -13,7 +13,7 @@ Consequences:
 - transfer, track availability, seek, volume, shuffle, repeat, and queue commands can be rejected by Spotify or the target device;
 - account plan and regional availability remain Spotify decisions.
 
-Spotify credentials remain under Hermes' PKCE/token management and never enter the renderer or local-library database.
+Spotify credentials live in the FluidMusic-owned protected profile-local token store (official OAuth/PKCE with single-flight refresh) and never enter the renderer, logs, exports, or the public local-library database.
 
 FluidMusic follows its own queue after an individual Spotify track by default. This handoff is not gapless because the remote Spotify device must stop before the next engine starts. When **Let Spotify continue after a track** is enabled, Spotify owns continuation and may choose a context track or recommendation; FluidMusic cannot predict that selection in advance.
 
@@ -57,9 +57,17 @@ New FluidMusic collections are local-only. Existing v3 mixed playlists are prese
 
 Queued Spotify playlists can be expanded to select an individual song at its original position. Spotify still owns continuation inside that context. Available playlist content depends on Spotify API permissions and account restrictions; a rejected request produces a retryable error, not extracted or invented tracks.
 
-## YouTube host dependency
+## YouTube playback boundaries
 
-YouTube requires the patched Hermes Desktop preview contract and explicit script consent for the FluidMusic-owned tab. Opening the tab alone does not grant consent. Control is rejected before media lookup unless the page is an exact HTTPS `www.youtube.com/watch` URL with an 11-character video ID. Popped-out previews reject control and page navigation can invalidate state. While a YouTube item is selected, FluidMusic polls the owned page even when compact UI surfaces are closed so one observed completion can advance Up Next. FluidMusic Next always means the next Up Next item; it does not invoke YouTube provider navigation. FluidMusic does not scrape recommendations, claim access to signed-in suggestions, or target the focused chat preview. Isolated fixture tests verify handle targeting and error handling, not live host behavior.
+YouTube plays through the backend's 127.0.0.1-only, capability-token embed host with strict Host/origin checks and the official iframe command/state relay. Embedding availability remains the provider's decision: embed-denied, private, deleted, geo/age/rights-restricted videos are not promised playable, and FluidMusic does not bypass DRM, ads, or entitlements. When a video refuses embedding but works on the authorized normal watch page, the first-party watch fallback is offered only if the host exposes the verified owned-view capability (`OwnedMediaView` + `host.mediaSession`); otherwise the exact missing contract is reported with Retry/Skip. The embed viewport respects the provider's documented minimum — the mini-player never squeezes the video below it. Exactly one engine is active; stale/foreign player reports are ignored and completions advance Up Next exactly once. If the backend runs on a remote cloud host, its loopback URL is not directly reachable from the owner's Desktop; cross-host browser/media acceptance is explicitly gated. Headless fixtures verify routing, validation and error handling, not live embedding or host rendering.
+
+## Listening sessions, resume and recovery boundaries (0.5.0)
+
+- Listening sessions store safe source references only; restore skips unavailable items and never autoplays. Sessions are not a writable mixed-provider playlist hierarchy.
+- Resume/bookmarks apply only to eligible long-form YouTube/local items (10 minutes or longer). LIVE radio is never seekable; Spotify position remains provider-owned. Saved positions are profile-local and bounded.
+- The sleep timer is session-only: it is not restored after reload, cancels when the source changes, and pauses only the bound current engine. Spotify end-of-item uses the local projected-end anchor, not a provider ended event.
+- Recovery health reflects the last real evidence, not a live guarantee; retries are bounded (three attempts, then a cooldown). History retention removes only this profile's played-history rows — never media, queues, collections or provider history.
+- Host compatibility is declared for the current/next SDK shape (see COMPATIBILITY.md); arbitrary future breaking Hermes releases are not guaranteed.
 
 ## Non-goals
 

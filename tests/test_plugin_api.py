@@ -629,7 +629,8 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
         text=True,
     )
 
-    assert Path(completed.stdout.strip()) == output.resolve()
+    assert Path(completed.stdout.strip().splitlines()[0]) == output.resolve()
+    assert completed.stdout.strip().splitlines()[1].startswith("sha256 ")
     assert output.read_bytes() == second_output.read_bytes()
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
