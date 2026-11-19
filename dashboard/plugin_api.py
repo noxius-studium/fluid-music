@@ -815,6 +815,8 @@ def _youtube_watch_url(value: Any) -> str:
     if len(raw) > 2_048:
         raise ValueError("YouTube URL is too long")
     parsed = urlparse(raw)
+    if parsed.username or parsed.password:
+        raise ValueError("Paste a valid HTTPS YouTube watch URL")
     video_id = ""
     if parsed.scheme == "https" and parsed.hostname in {"www.youtube.com", "youtube.com", "m.youtube.com"} and parsed.path == "/watch":
         from urllib.parse import parse_qs

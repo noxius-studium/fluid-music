@@ -4044,22 +4044,34 @@ function MiniPlayer({ controller }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState([])
   const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState('search')
+  const [searched, setSearched] = useState(false)
   const [error, setError] = useState('')
+  const request = useRef(0)
+  useEffect(() => () => { request.current += 1 }, [])
   const submit = async event => {
     event?.preventDefault()
+    const trimmed = query.trim()
+    if (!trimmed || busy) return
+    const token = ++request.current
+    const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
     setError('')
     setBusy(true)
+    setMode(isUrl ? 'resolve' : 'search')
     try {
-      if (/^https:\/\//i.test(query.trim())) {
-        await controller.addYouTubeUrl(query, true)
-        setQuery('')
+      if (isUrl) {
+        await controller.addYouTubeUrl(trimmed, true)
+        if (token === request.current) setQuery('')
       } else {
-        setResults(await controller.searchYouTube(query))
+        const items = await controller.searchYouTube(trimmed)
+        if (token !== request.current) return
+        setResults(items)
+        setSearched(true)
       }
     } catch (reason) {
-      setError(userFacingError(reason))
+      if (token === request.current) setError(userFacingError(reason))
     } finally {
-      setBusy(false)
+      if (token === request.current) setBusy(false)
     }
   }
   return h('section', { className: compact ? 'fluid-youtube fluid-youtube-compact' : 'fluid-panel fluid-panel-pad fluid-youtube' },
@@ -4068,10 +4080,11 @@ function MiniPlayer({ controller }) {
     ),
     h('form', { className: 'fluid-searchbar', onSubmit: submit },
       h('input', { className: 'fluid-input', value: query, onChange: event => setQuery(event.target.value), placeholder: 'Search YouTube or paste a watch URL', 'aria-label': 'Search YouTube or paste a watch URL' }),
-      h(WorkspaceButton, { primary: true, type: 'submit', disabled: busy || !query.trim() }, busy ? 'Searching…' : 'Search'),
+      h(WorkspaceButton, { primary: true, type: 'submit', disabled: busy || !query.trim() }, busy ? (mode === 'resolve' ? 'Resolving…' : 'Searching…') : 'Search'),
     ),
     error && h('p', { className: 'fluid-error', role: 'alert' }, error),
-    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: item.id, hideSave: true, onPlay: () => controller.addYouTubeItem(item, true) }))),
+    searched && !busy && !error && results.length === 0 && h('p', { className: 'fluid-muted', role: 'status' }, 'No videos found. Try different words or paste a watch URL.'),
+    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, onPlay: () => controller.addYouTubeItem(item, true) }))),
   )
 }
 
