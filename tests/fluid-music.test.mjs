@@ -817,38 +817,51 @@ test('workspace navigation, auth/device normalizers, queue settings, and diagnos
   assert.match(source, /TITLEBAR_AREAS\.right/)
 })
 
-test('chat focus changes cannot mutate application playback or its owned YouTube handle', async () => {
-  const handle = { key: 'fluid-music-youtube', id: 'owned-preview' }
-  const harness = makeController({ preview: {
-    openOrFocus: async () => handle,
-    executeJavaScriptIn: async target => ({ ok: target === handle, title: 'Owned page', playing: false, nextAvailable: false })
-  } })
+test('chat focus and surface changes cannot mutate the selected YouTube occurrence or issue commands', async () => {
+  const previewCalls = []
+  const calls = []
+  const harness = makeController({
+    preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) },
+    rest: async (path, options) => { calls.push({ path, method: options?.method || 'GET' }); return { ok: true, data: {} } },
+  })
   try {
     const c = harness.controller
-    c.add({ source: 'radio', title: 'Station', streamUrl: 'https://radio.example/live' })
-    await c.playAt(0)
-    await c.openYouTube()
-    const before = { current: c.current(), index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() }
+    c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' }, true)
+    await new Promise(resolve => setImmediate(resolve))
+    const before = { current: JSON.stringify(c.current()), index: c.index.get(), status: c.status.get() }
     harness.ctx.focusedSessionId = 'chat-b'
     harness.ctx.activeSessionId = 'chat-c'
     harness.ctx.events?.emit?.('session:focus', 'chat-b')
-    assert.deepEqual({ current: c.current(), index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() }, before)
+    c.titlebarOpen.set(true)
+    c.titlebarOpen.set(false)
+    c.setPollingOpen(false)
+    c.setPollingOpen(true)
+    c.setWorkspaceView('queue')
+    c.setWorkspaceView('browse')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual({ current: JSON.stringify(c.current()), index: c.index.get(), status: c.status.get() }, before)
+    assert.equal(previewCalls.length, 0, 'the embed architecture never opens or scripts a Browser preview')
+    assert.equal(calls.filter(call => call.method !== 'GET' && call.path !== '/history').length, 0, 'no transport command from focus changes')
   } finally { harness.restore() }
 })
 
-test('YouTube controls execute only in the stable owned handle and reject malformed page state', async () => {
-  const handle = { key: 'fluid-music-youtube', id: 'owned-preview' }
-  const calls = []
-  const harness = makeController({ preview: {
-    openOrFocus: async options => (calls.push(['open', options]), handle),
-    executeJavaScriptIn: async (target, code) => (calls.push(['exec', target, code]), { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: true, currentTime: 4, duration: 90 })
-  } })
+test('YouTube embed resolution accepts only the backend loopback capability URL and rejects malformed state', async () => {
+  const previewCalls = []
+  let response = { ok: true, data: { url: 'http://127.0.0.1:43827/token/youtube/abcdefghijk?controls=1&enablejsapi=1' } }
+  const harness = makeController({
+    preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) },
+    rest: async path => path.startsWith('/youtube/embed-host') ? response : { ok: true, data: {} },
+  })
   try {
-    await harness.controller.openYouTube()
-    await harness.controller.refreshYouTube()
-    assert.deepEqual(calls[0][1], { key: 'fluid-music-youtube', url: 'https://www.youtube.com/', label: 'YouTube' })
-    assert.equal(calls[1][1], handle)
-    assert.equal(harness.controller.youtube.get().title, 'Night set')
+    const c = harness.controller
+    const item = { source: 'youtube', id: 'youtube:abcdefghijk', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' }
+    assert.equal(await c.resolveYouTubeEmbedUrl(item), response.data.url)
+    response = { ok: true, data: { url: 'https://evil.example/youtube/abcdefghijk' } }
+    await assert.rejects(() => c.resolveYouTubeEmbedUrl(item), /invalid YouTube player URL/)
+    response = { ok: false, error: 'FluidMusic could not start its YouTube player host' }
+    await assert.rejects(() => c.resolveYouTubeEmbedUrl(item))
+    await assert.rejects(() => c.resolveYouTubeEmbedUrl({ source: 'youtube', id: 'youtube:short', url: 'https://www.youtube.com/watch?v=abcdefghijk' }), /invalid video ID/)
+    assert.equal(previewCalls.length, 0, 'no Browser preview is opened or scripted')
   } finally { harness.restore() }
 })
 
@@ -878,97 +891,102 @@ test('YouTube queue items require credential-free HTTPS watch URLs and persist s
   assert.equal(valid.url, 'https://youtu.be/abcdefghijk?t=12')
   assert.equal(valid.title, 'Night set')
   for (const url of ['http://www.youtube.com/watch?v=abcdefghijk', 'https://user:pass@www.youtube.com/watch?v=abcdefghijk', 'https://youtube.com.evil.example/watch?v=abcdefghijk', 'https://www.youtube.com/', 'https://youtu.be/not-valid']) assert.equal(pure.normalizeQueueItem({ source: 'youtube', url }), null, url)
-  assert.deepEqual(pure.mediaCapabilities(valid), { play: true, previous: true, next: true, seek: true, volume: true, shuffle: false, repeat: false, device: false })
+  // Embed architecture: controller-level transport is honestly unavailable for
+  // YouTube; the integrated player surface owns embed controls (FM-04/FM-12).
+  assert.deepEqual(pure.mediaCapabilities(valid), { play: false, previous: false, next: false, seek: false, volume: false, shuffle: false, repeat: false, device: false })
 })
 
-test('capturing the owned YouTube page validates state and adds its current video to Up Next', async () => {
-  const handle = { id: 'owned-youtube' }, calls = [], storage = new Map()
-  const harness = makeController({ preview: {
-    openOrFocus: async options => (calls.push(['open', options]), handle),
-    executeJavaScriptIn: async (target, code) => (calls.push(['exec', target, code]), { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', subtitle: 'YouTube', playing: false, currentTime: 4, duration: 90, artwork: 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg' })
-  }, storage })
+test('YouTube resolve results enqueue safe restart-safe metadata without handles or auto-play', async () => {
+  const storage = new Map()
+  const calls = []
+  const resolved = { id: 'youtube:abcdefghijk', source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', subtitle: 'Channel', durationMs: 90000, artwork: 'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg' }
+  const harness = makeController({
+    storage,
+    rest: async (path, options) => {
+      calls.push({ path, method: options?.method || 'GET' })
+      return path === '/youtube/resolve' ? { ok: true, data: { item: resolved } } : { ok: true, data: {} }
+    },
+  })
   try {
-    await harness.controller.openYouTube()
-    assert.equal(await harness.controller.addCurrentYouTube(), true)
+    assert.equal(await harness.controller.addYouTubeUrl('https://www.youtube.com/watch?v=abcdefghijk', false), true)
     assert.equal(harness.controller.queue.get()[0].source, 'youtube')
-    assert.equal(harness.storage.get('queue')[0].url, 'https://www.youtube.com/watch?v=abcdefghijk')
-    assert.equal(calls.at(-1)[1], handle)
-    assert.match(calls.at(-1)[2], /location\.href/)
-    assert.match(calls.at(-1)[2], /document\.title/)
-    assert.match(calls.at(-1)[2], /HTMLMediaElement/)
+    const stored = harness.storage.get('queue')[0]
+    assert.equal(stored.url, 'https://www.youtube.com/watch?v=abcdefghijk')
+    assert.equal(stored.title, 'Night set')
+    assert.ok(!JSON.stringify(stored).includes('127.0.0.1'), 'no ephemeral capability URL is persisted')
+    assert.equal(calls.filter(call => call.method !== 'GET' && call.path !== '/history' && call.path !== '/youtube/resolve').length, 0, 'enqueue never starts playback')
   } finally { harness.restore() }
   const restarted = makeController({ storage })
   try {
     assert.equal(restarted.controller.queue.get()[0].source, 'youtube')
     assert.equal(restarted.controller.queue.get()[0].id, 'youtube:abcdefghijk')
-    assert.equal(restarted.controller.youtubeHandle(), null)
+    assert.equal(restarted.controller.status.get(), 'idle', 'restart never auto-plays')
   } finally { restarted.restore() }
 })
 
-test('queued YouTube playback uses its owned handle and pauses it before source handoff', async () => {
-  const handle = { id: 'owned-youtube' }, events = []
-  const harness = makeController({ preview: {
-    openOrFocus: async options => (events.push(['open', options]), handle),
-    executeJavaScriptIn: async (target, code) => {
-      events.push(['exec', target, code])
-      return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: !code.includes('const action = "pause"'), currentTime: 5, duration: 90 }
-    }
-  }, audio: makeAudioHarness({ events }) })
+test('radio to YouTube handoff stops the radio engine and leaves playback to the embed surface', async () => {
+  const events = []
+  const previewCalls = []
+  const harness = makeController({
+    audio: makeAudioHarness({ events }),
+    preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) },
+  })
   try {
     const c = harness.controller
-    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
     c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'Radio' })
     await c.playAt(0)
-    assert.deepEqual(events.find(entry => entry[0] === 'open')[1], { key: 'fluid-music-youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', label: 'YouTube' })
-    assert.ok(events.some(entry => entry[0] === 'exec' && entry[1] === handle && entry[2].includes('const action = "play"')))
-    await c.seekTo(30000)
-    c.setVolume(.25)
-    await Promise.resolve()
-    assert.ok(events.some(entry => entry[0] === 'exec' && entry[2].includes('const action = "seek"')))
-    assert.ok(events.some(entry => entry[0] === 'exec' && entry[2].includes('const action = "volume"')))
-    await c.next()
-    const pauseAt = events.findIndex(entry => entry[0] === 'exec' && entry[2].includes('const action = "pause"'))
-    const radioAt = events.findIndex(entry => entry === 'audio:play')
-    assert.ok(pauseAt >= 0 && pauseAt < radioAt, JSON.stringify(events))
+    assert.equal(c.status.get(), 'playing')
+    c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' }, true)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(events.includes('audio:pause'), 'the radio engine is stopped before the YouTube selection settles')
+    assert.equal(c.current().source, 'youtube')
+    assert.equal(c.status.get(), 'paused', 'embed surface owns YouTube playback; the coordinator does not fake playing')
+    assert.equal(c.youtube.get().playing, false)
+    assert.ok(harness.audio.elements.every(element => element.removed), 'no internal audio engine survives the handoff')
+    // The embed surface (FM-04 bridge) will report playing through the atom;
+    // handing back to radio must reset that state and restart exactly one engine.
+    c.youtube.set({ ...c.youtube.get(), playing: true, ended: true })
+    await c.playAt(0)
     assert.equal(c.current().source, 'radio')
+    assert.equal(c.youtube.get().playing, false, 'leaving YouTube clears its reported playback state')
+    assert.equal(c.youtube.get().ended, false)
+    assert.equal(c.status.get(), 'playing')
+    assert.equal(harness.audio.elements.filter(element => !element.removed).length, 1, 'exactly one live engine')
+    assert.equal(previewCalls.length, 0)
   } finally { harness.restore() }
 })
 
-test('YouTube malformed, navigation, and consent failures are honest and never enqueue page data', async () => {
-  const handle = { id: 'owned-youtube' }
-  let response = { ok: true, url: 'https://evil.example/watch?v=abcdefghijk', title: 'Wrong origin', playing: false, duration: 1 }
-  const harness = makeController({ preview: { openOrFocus: async () => handle, executeJavaScriptIn: async () => response } })
+test('invalid YouTube input and backend failures are honest and never enqueue foreign page data', async () => {
+  const harness = makeController({ rest: async path => path === '/youtube/resolve' ? { ok: false, error: 'YouTube video details could not be loaded' } : { ok: true, data: {} } })
   try {
-    await harness.controller.openYouTube()
-    assert.equal(await harness.controller.addCurrentYouTube(), false)
-    assert.equal(harness.controller.queue.get().length, 0)
-    assert.match(harness.controller.youtube.get().error, /valid YouTube watch page/)
-    harness.ctx.preview.executeJavaScriptIn = async () => { throw new Error('Script consent denied') }
-    assert.equal(await harness.controller.refreshYouTube(), null)
-    assert.match(harness.controller.youtube.get().error, /Script consent denied/)
+    const c = harness.controller
+    assert.throws(() => c.addYouTubeItem({ source: 'youtube', url: 'https://evil.example/watch?v=abcdefghijk', title: 'Wrong origin' }), /valid YouTube video/)
+    assert.equal(c.queue.get().length, 0)
+    await assert.rejects(() => c.addYouTubeUrl('https://www.youtube.com/watch?v=abcdefghijk'), /could not be loaded/)
+    assert.equal(c.queue.get().length, 0, 'failed resolution never enqueues page data')
+    assert.throws(() => c.addYouTubeItem({ source: 'youtube', url: 'https://user:pass@www.youtube.com/watch?v=abcdefghijk' }), /valid YouTube video/)
+    assert.equal(c.queue.get().length, 0)
   } finally { harness.restore() }
 })
 
-test('an inactive YouTube tab is not polled merely because compact surfaces are open', async () => {
-  const handle = { id: 'owned-youtube' }
-  let executions = 0
+test('no controller-side YouTube polling exists and compact surfaces create no observation timers', async () => {
   const timers = []
-  const harness = makeController({ timers, preview: {
-    openOrFocus: async () => handle,
-    executeJavaScriptIn: async () => { executions += 1; return { ok: true, url: 'https://youtu.be/abcdefghijk', title: 'Night set', playing: false, duration: 90 } }
-  } })
+  const previewCalls = []
+  const harness = makeController({ timers, preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) } })
   try {
-    await harness.controller.openYouTube()
-    const poll = timers.find(timer => timer.ms === 2000)
-    assert.ok(poll)
-    harness.controller.titlebarOpen.set(true)
-    poll.fn()
-    await Promise.resolve()
-    assert.equal(executions, 0)
-    harness.controller.titlebarOpen.set(false)
-    poll.fn()
-    await Promise.resolve()
-    assert.equal(executions, 0)
+    const c = harness.controller
+    c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' }, true)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(timers.find(timer => timer.ms === 2000), undefined, 'the retired owned-tab poll is gone; embed observation is surface-owned')
+    c.titlebarOpen.set(true)
+    c.setPollingOpen(true)
+    c.titlebarOpen.set(false)
+    c.setPollingOpen(false)
+    assert.equal(timers.find(timer => timer.ms === 2000), undefined)
+    assert.ok(timers.some(timer => timer.ms === 20000 && !timer.cleared), 'Spotify observation continues at the closed cadence')
+    c.setPollingOpen(true)
+    assert.ok(timers.some(timer => timer.ms === 8000 && !timer.cleared), 'open cadence resumes without any YouTube timer')
+    assert.equal(previewCalls.length, 0)
   } finally { harness.restore() }
 })
 
@@ -1025,83 +1043,57 @@ test('Spotify discovery copy never promises forbidden FluidMusic collection save
   assert.match(source, /Your Spotify playlists stay on Spotify/)
 })
 
-test('YouTube transport validates the owned page before discovering or mutating media', async () => {
-  const handle = { id: 'owned-youtube' }
-  let mediaLookups = 0
-  const effects = []
-  class FakeMedia {}
-  const media = Object.assign(new FakeMedia(), {
-    ended: false, paused: false, currentTime: 8, duration: 90, volume: 1, poster: '',
-    play: async () => effects.push('play'), pause: () => effects.push('pause')
+test('YouTube controller transport never mutates media, issues provider commands, or scripts a Browser', async () => {
+  const calls = []
+  const previewCalls = []
+  const harness = makeController({
+    rest: async (path, options) => { calls.push({ path, method: options?.method || 'GET' }); return { ok: true, data: {} } },
+    preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) },
   })
-  const location = { protocol: 'https:', hostname: 'example.com', pathname: '/watch', search: '?v=abcdefghijk', href: 'https://example.com/watch?v=abcdefghijk' }
-  const document = { title: 'Unrelated page', getElementsByTagName: () => { mediaLookups += 1; return [media] } }
-  const harness = makeController({ preview: {
-    openOrFocus: async () => handle,
-    // The evaluated string is the plugin's own generated script, never user input.
-    executeJavaScriptIn: async (_target, code) => new Function('location', 'document', 'HTMLMediaElement', 'setTimeout', `return ${code}`)(location, document, FakeMedia, setTimeout)
-  } })
   try {
     const c = harness.controller
     c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Video' })
     await c.playAt(0)
+    calls.length = 0
     await c.toggle()
     await c.seekTo(3000)
     c.setVolume(.2)
-    await Promise.resolve()
-    assert.equal(mediaLookups, 0)
-    assert.deepEqual(effects, [])
-    assert.match(c.youtube.get().error, /valid YouTube watch page/i)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(calls.filter(call => call.method !== 'GET').length, 0, 'embed media is never driven through provider REST commands')
+    assert.equal(previewCalls.length, 0)
+    assert.equal(harness.audio.elements.length, 0, 'no internal audio engine is created for YouTube')
+    assert.match(c.message.get(), /embedded YouTube controls/)
   } finally { harness.restore() }
 })
 
-test('YouTube transport refuses a different valid watch video before media mutation', async () => {
-  const handle = { id: 'owned-youtube' }
-  let mediaLookups = 0
-  const effects = []
-  class FakeMedia {}
-  const media = Object.assign(new FakeMedia(), {
-    ended: false, paused: false, currentTime: 8, duration: 90, volume: 1, poster: '',
-    play: async () => effects.push('play'), pause: () => effects.push('pause')
-  })
-  const location = { protocol: 'https:', hostname: 'www.youtube.com', pathname: '/watch', search: '?v=lmnopqrstuv', href: 'https://www.youtube.com/watch?v=lmnopqrstuv' }
-  const document = { title: 'Different video - YouTube', getElementsByTagName: () => { mediaLookups += 1; return [media] } }
-  const harness = makeController({ preview: {
-    openOrFocus: async () => handle,
-    executeJavaScriptIn: async (_target, code) => new Function('location', 'document', 'HTMLMediaElement', 'setTimeout', `return ${code}`)(location, document, FakeMedia, setTimeout)
-  } })
+test('a different YouTube video is a distinct occurrence and never overwrites the selected one', async () => {
+  const harness = makeController()
   try {
     const c = harness.controller
-    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Selected video' })
-    await c.playAt(0)
-    await c.toggle()
-    await c.seekTo(3000)
-    c.setVolume(.2)
-    await Promise.resolve()
-    assert.equal(mediaLookups, 0)
-    assert.deepEqual(effects, [])
-    assert.match(c.youtube.get().error, /selected YouTube video/i)
+    c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Selected video' }, true)
+    await new Promise(resolve => setImmediate(resolve))
+    c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=lmnopqrstuv', title: 'Different video' }, false)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(c.queue.get().length, 2)
+    assert.equal(c.current().id, 'youtube:abcdefghijk', 'enqueueing another video never retargets the selection')
+    assert.equal(c.index.get(), 0)
+    await c.playAt(1)
+    assert.equal(c.current().id, 'youtube:lmnopqrstuv', 'play-at selects the exact occurrence')
+    assert.equal(c.index.get(), 1)
   } finally { harness.restore() }
 })
 
 for (const previousSource of ['radio', 'spotify']) {
-  test(`${previousSource} to explicit YouTube play stops the active provider before starting the page`, async () => {
+  test(`${previousSource} to explicit YouTube play stops the active provider before the embed selection`, async () => {
     const events = []
-    const handle = { id: 'owned-youtube' }
+    const previewCalls = []
     const harness = makeController({
       audio: makeAudioHarness({ events }),
       rest: async (path, options = {}) => {
         events.push(`${path}:${options.method || 'GET'}`)
         return { ok: true, data: path === '/player' ? { is_playing: true, item: { uri: 'spotify:track:active', name: 'Active' } } : {} }
       },
-      preview: {
-        openOrFocus: async () => handle,
-        executeJavaScriptIn: async (_target, code) => {
-          const action = code.match(/const action = "([^"]+)"/)?.[1]
-          events.push(`youtube:${action}`)
-          return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: action === 'play', ended: false, currentTime: 4, duration: 90 }
-        }
-      }
+      preview: { openOrFocus: async (...args) => previewCalls.push(args), executeJavaScriptIn: async (...args) => previewCalls.push(args) },
     })
     try {
       const c = harness.controller
@@ -1109,72 +1101,69 @@ for (const previousSource of ['radio', 'spotify']) {
         ? { source: 'radio', title: 'Live', streamUrl: 'https://radio.example/live' }
         : { source: 'spotify', title: 'Cloud', uri: 'spotify:track:active' })
       await c.playAt(0)
-      await c.openYouTube()
       events.length = 0
-      assert.equal(await c.playCurrentYouTube(), true)
+      c.addYouTubeItem({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' }, true)
+      await new Promise(resolve => setImmediate(resolve))
       const stopAt = previousSource === 'radio' ? events.indexOf('audio:pause') : events.indexOf('/pause:POST')
-      const playAt = events.indexOf('youtube:play')
-      assert.ok(stopAt >= 0 && stopAt < playAt, events.join(', '))
+      assert.ok(stopAt >= 0, `prior ${previousSource} engine is stopped: ${events.join(', ')}`)
       assert.equal(c.current().source, 'youtube')
       assert.equal(c.index.get(), c.queue.get().findIndex(item => item.source === 'youtube'))
-      assert.equal(c.status.get(), 'playing')
+      assert.equal(c.status.get(), 'paused', 'the embed surface owns playback; no fake playing state')
+      assert.equal(c.youtube.get().playing, false)
+      assert.ok(!events.some(entry => String(entry).startsWith('youtube:')), 'no Browser-scripted YouTube play exists')
+      assert.equal(previewCalls.length, 0)
+      assert.equal(harness.audio.elements.filter(element => !element.removed).length, 0, 'no internal engine runs alongside the embed')
     } finally { harness.restore() }
   })
 }
 
-test('active YouTube polls with compact surfaces closed and completion advances exactly once', async () => {
-  const handle = { id: 'owned-youtube' }
-  let ended = false
-  let stateReads = 0
-  const harness = makeController({ preview: {
-    openOrFocus: async () => handle,
-    executeJavaScriptIn: async (_target, code) => {
-      const action = code.match(/const action = "([^"]+)"/)?.[1]
-      if (action === 'state') stateReads += 1
-      return { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: action === 'play' || (!ended && action === 'state'), ended, currentTime: ended ? 90 : 4, duration: 90 }
-    }
-  } })
+test('duplicate local ended events advance the queue and start the successor exactly once', async () => {
+  const harness = makeController()
   try {
     const c = harness.controller
-    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
-    c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'Next' })
+    c.add({ source: 'local', id: 'local:a', localTrackId: 'a', objectUrl: 'blob:fixture-a', title: 'One' })
+    c.add({ source: 'local', id: 'local:b', localTrackId: 'b', objectUrl: 'blob:fixture-b', title: 'Two' })
     await c.playAt(0)
-    const poll = harness.timers.find(timer => timer.ms === 2000)
-    const readsBefore = stateReads
-    poll.fn()
+    assert.equal(c.status.get(), 'playing')
+    const element = harness.audio.elements.at(-1)
+    // A duplicate completion delivery must not double-advance or restart twice.
+    element.listeners.get('ended')()
+    element.listeners.get('ended')()
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(stateReads, readsBefore + 1, 'active YouTube is observed without Media route or titlebar popover')
-    ended = true
-    await Promise.all([c.refreshYouTube(), c.refreshYouTube()])
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(c.current().title, 'Next')
-    assert.equal(c.index.get(), 1)
-    assert.equal(harness.audio.elements.length, 1, 'duplicate ended snapshots start the successor once')
+    assert.equal(c.index.get(), 1, 'exactly one completion advance')
+    assert.equal(c.current().title, 'Two')
+    assert.equal(harness.audio.elements.length, 2, 'the successor engine is started exactly once')
+    assert.equal(c.status.get(), 'playing')
   } finally { harness.restore() }
 })
 
-test('a stale YouTube ended response cannot advance or overwrite a newer source', async () => {
-  const handle = { id: 'owned-youtube' }
-  let resolveState
-  const pending = new Promise(resolve => { resolveState = resolve })
-  const harness = makeController({ preview: {
-    openOrFocus: async () => handle,
-    executeJavaScriptIn: async (_target, code) => code.includes('const action = "state"') ? pending : { ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set', playing: true, ended: false, currentTime: 1, duration: 90 }
-  } })
+test('a late YouTube metadata resolve cannot overwrite a newer selection or advance the queue', async () => {
+  let resolveItem
+  const pending = new Promise(resolve => { resolveItem = resolve })
+  const storage = new Map([
+    ['queue', [
+      { source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'YouTube video' },
+      { source: 'radio', streamUrl: 'https://radio.example/live', title: 'New source' },
+    ]],
+    ['queueIndex', 1],
+  ])
+  const harness = makeController({
+    storage,
+    rest: async path => path === '/youtube/resolve' ? pending : { ok: true, data: {} },
+  })
   try {
     const c = harness.controller
-    c.add({ source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Night set' })
-    c.add({ source: 'radio', streamUrl: 'https://radio.example/live', title: 'New source' })
-    await c.playAt(0)
-    const stale = c.refreshYouTube()
-    await c.playAt(1)
-    resolveState({ ok: true, url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Old response', playing: false, ended: true, currentTime: 90, duration: 90 })
-    await stale
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(c.current().title, 'New source')
+    assert.equal(c.current().title, 'New source', 'the newer radio selection is active while metadata is pending')
+    resolveItem({ ok: true, data: { item: { id: 'youtube:abcdefghijk', source: 'youtube', url: 'https://www.youtube.com/watch?v=abcdefghijk', title: 'Resolved title', subtitle: 'Channel', durationMs: 90000 } } })
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(c.current().title, 'New source', 'late metadata never retargets the selection')
     assert.equal(c.index.get(), 1)
-    assert.equal(c.status.get(), 'playing')
-    assert.equal(c.progress.get().durationMs, 0)
+    assert.equal(c.queue.get()[0].title, 'Resolved title', 'matching occurrence metadata still updates')
+    assert.equal(c.queue.get()[1].title, 'New source')
+    assert.equal(c.status.get(), 'idle', 'no implicit playback or advance from metadata refresh')
   } finally { harness.restore() }
 })
 

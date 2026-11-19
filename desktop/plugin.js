@@ -400,7 +400,6 @@ function createController(ctx) {
   const spotifyDevices = atom([])
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
-  let youtubeHandle = null
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
@@ -418,7 +417,6 @@ function createController(ctx) {
   let radioTimeout = null
   let spotifyTimer = null
   let spotifyProgressTimer = null
-  let youtubeTimer = null
   let authTimer = null
   let authAttempts = 0
   let pollIntervalOpen = 8
@@ -953,7 +951,11 @@ function createController(ctx) {
     if (item?.source === 'spotify') {
       await spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() })
     }
-
+    if (item?.source === 'youtube') {
+      // The embed surface owns the engine; leaving the item clears its reported
+      // state so a stale iframe snapshot can never describe the next source.
+      youtube.set({ ...youtube.get(), playing: false, ended: false })
+    }
   }
 
   function runTransition(work) {
@@ -985,6 +987,7 @@ function createController(ctx) {
       return
     }
     if (item.source === 'youtube') {
+      armYouTubeQueueGuard(item, token)
       youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
@@ -1522,67 +1525,6 @@ function createController(ctx) {
   }
 
 
-  async function openYouTube(url = 'https://www.youtube.com/') {
-    const target = url === 'https://www.youtube.com/' ? url : normalizeQueueItem({ source: 'youtube', url })?.url
-    if (!target) throw new Error('Choose a valid YouTube watch URL.')
-    try {
-      youtubeHandle = await ctx.preview.openOrFocus({ key: 'fluid-music-youtube', url: target, label: 'YouTube' })
-      if (!youtubeHandle) throw new Error('Hermes did not return the owned YouTube tab handle.')
-      youtube.set({ ...youtube.get(), status: 'open', error: '' })
-      return youtubeHandle
-    } catch (error) {
-      const detail = userFacingError(error, 'YouTube could not be opened in the owned Browser tab.')
-      youtube.set({ ...youtube.get(), status: 'error', error: detail })
-      throw new Error(detail)
-    }
-  }
-
-  async function runYouTube(command = 'state', value = 0) {
-    if (!youtubeHandle) {
-      const detail = 'Open YouTube first. FluidMusic never controls the focused chat preview.'
-      youtube.set({ ...youtube.get(), status: 'error', error: detail })
-      return null
-    }
-    const action = ['state', 'play', 'pause', 'toggle', 'seek', 'volume'].includes(command) ? command : 'state'
-    const numericValue = Number.isFinite(Number(value)) ? Number(value) : 0
-    const selectedYouTube = current()
-    const expectedVideoId = action !== 'state' && selectedYouTube?.source === 'youtube'
-      ? safeText(selectedYouTube.id).replace(/^youtube:/, '')
-      : ''
-    const requestTransition = transition
-    const code = `(async () => { const action = ${JSON.stringify(action)}; const value = ${JSON.stringify(numericValue)}; const expectedVideoId = ${JSON.stringify(expectedVideoId)}; const videoId = location.protocol === 'https:' && location.hostname === 'www.youtube.com' && location.pathname === '/watch' ? new URLSearchParams(location.search).get('v') || '' : ''; if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return {ok:false,invalidPage:true,error:'The owned tab is not on a valid YouTube watch page.',url:location.href}; if (expectedVideoId && videoId !== expectedVideoId) return {ok:false,wrongVideo:true,error:'The owned tab is not showing the selected YouTube video.',url:location.href}; const findMedia = () => { const media = [...document.getElementsByTagName('video'), ...document.getElementsByTagName('audio')].filter(node => node instanceof HTMLMediaElement); return media.find(node => !node.paused && !node.ended) || media[0] || null; }; let media = findMedia(); if (!media && action === 'play') { for (let attempt = 0; attempt < 20 && !media; attempt += 1) { await new Promise(resolve => setTimeout(resolve, 250)); media = findMedia(); } } if (!media) return {ok:false,error:'No YouTube video is available on this watch page.',url:location.href}; try { if (action === 'play') await media.play(); else if (action === 'pause') media.pause(); else if (action === 'toggle') media.paused ? await media.play() : media.pause(); else if (action === 'seek') media.currentTime = Math.max(0, Math.min(Number(media.duration) || 86400, value)); else if (action === 'volume') media.volume = Math.max(0, Math.min(1, value)); return {ok:true,url:location.href,title:document.title.replace(/ - YouTube$/,''),subtitle:'YouTube',artwork:media.poster || '',playing:!media.paused && !media.ended,ended:Boolean(media.ended),currentTime:Number(media.currentTime)||0,duration:Number(media.duration)||0,volume:Number(media.volume)}; } catch (error) { return {ok:false,error:error?.message || 'YouTube media control failed.',url:location.href}; } })()`
-    try {
-      const result = await ctx.preview.executeJavaScriptIn(youtubeHandle, code)
-      if (requestTransition !== transition) return null
-      if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error('The owned page returned an invalid state response.')
-      if (!result.ok) throw new Error(safeText(result.error, 'YouTube page control is unavailable.'))
-      const item = normalizeQueueItem({ source: 'youtube', url: result.url, title: result.title, subtitle: result.subtitle, artwork: result.artwork, durationMs: Math.max(0, Number(result.duration) || 0) * 1000 })
-      if (!item) throw new Error('The owned tab is not on a valid YouTube watch page. Open a video and refresh state.')
-      const snapshot = { status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: Boolean(result.playing), ended: Boolean(result.ended), error: '', item }
-      youtube.set(snapshot)
-      if (current()?.source === 'youtube' && current()?.id === item.id) {
-        progress.set({ positionMs: Math.max(0, Number(result.currentTime) || 0) * 1000, durationMs: item.durationMs })
-        status.set(snapshot.playing ? 'playing' : 'paused')
-        message.set('')
-        if (snapshot.ended) requestYouTubeQueueAdvance()
-      }
-      return snapshot
-    } catch (error) {
-      const detail = userFacingError(error, 'YouTube control was denied or the owned tab is unavailable. Keep it docked and grant script consent, then retry.')
-      youtube.set({ ...youtube.get(), status: 'error', error: detail })
-      message.set(detail)
-      return null
-    }
-  }
-
-  async function addCurrentYouTube() {
-    const snapshot = await runYouTube('state')
-    if (!snapshot?.item) return false
-    const added = add(snapshot.item)
-    if (added) message.set(`Added “${snapshot.item.title}” to Up Next.`)
-    return added
-  }
-
   function addYouTubeItem(value, select = true) {
     const item = normalizeQueueItem(value)
     if (!item || item.source !== 'youtube') throw new Error('Choose a valid YouTube video.')
@@ -1627,33 +1569,6 @@ function createController(ctx) {
       } catch { /* Old queue labels remain usable when metadata is temporarily unavailable. */ }
     }
     if (changed) persist()
-  }
-
-  async function playCurrentYouTube() {
-    const snapshot = await runYouTube('state')
-    if (!snapshot?.item) return false
-    return runTransition(async token => {
-      if (token !== transition) return false
-      const previous = current()
-      await stopActive(previous)
-      if (token !== transition) return false
-      let at = queue.get().findIndex(item => item.id === snapshot.item.id)
-      if (at < 0) {
-        queue.set([...queue.get(), snapshot.item])
-        at = queue.get().length - 1
-      } else {
-        queue.set(queue.get().map((item, itemAt) => itemAt === at ? snapshot.item : item))
-      }
-      persist()
-      await startSelected(at, token)
-      return token === transition && status.get() !== 'error'
-    })
-  }
-
-  function toggleYouTube() {
-    const item = current()
-    if (!item || item.source !== 'youtube' || item.id !== youtube.get().item?.id) return Promise.resolve(false)
-    return toggle().then(() => true)
   }
 
   const spotifyTrack = track => normalizeQueueItem({
@@ -1759,15 +1674,6 @@ function createController(ctx) {
     }, 1000 * (pollOpen ? pollIntervalOpen : pollIntervalClosed))
   }
 
-  function restartYouTubePolling() {
-    if (youtubeTimer) clearInterval(youtubeTimer)
-    youtubeTimer = null
-    if (disposed) return
-    youtubeTimer = setInterval(() => {
-      if (youtubeHandle && current()?.source === 'youtube') void runYouTube('state')
-    }, 2000)
-  }
-
   function setPollingOpen(open) {
     pollOpen = Boolean(open)
     restartSpotifyPolling()
@@ -1785,7 +1691,6 @@ function createController(ctx) {
   }
 
   restartSpotifyPolling()
-  restartYouTubePolling()
   spotifyProgressTimer = setInterval(updateSpotifyProgress, 500)
   void loadConfig()
   void refreshSpotify()
@@ -1799,7 +1704,6 @@ function createController(ctx) {
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
-    clearInterval(youtubeTimer)
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
@@ -1818,7 +1722,8 @@ function createController(ctx) {
     capabilities: () => mediaCapabilities(current()), clearLogs, refreshHistory, clearHistory, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
   }
 }
-/* CONTROLLER_END */function WorkspaceButton({ children, primary = false, danger = false, ...props }) {
+/* CONTROLLER_END */
+function WorkspaceButton({ children, primary = false, danger = false, ...props }) {
   // Button is an optional host SDK export; fall back to a plain button rather
   // than crashing when a host build does not provide it.
   return h(
