@@ -3,26 +3,48 @@ import { createElement as h, useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 /* SDK_BOUNDARY_START */
+const HOST_CONTRACT = {
+  contractVersion: 1,
+  sdk: '@hermes/plugin-sdk',
+  required: ['atom', 'useValue', 'host', 'ROUTES_AREA', 'TITLEBAR_AREAS'],
+  optional: {
+    Button: 'plain-button fallback with the same actions',
+    'host.navigate': 'navigation shortcuts degrade; in-pane view switching still works',
+    'TITLEBAR_AREAS.right': 'titlebar surface skipped; route and mini-player remain',
+    OwnedMediaView: 'first-party YouTube watch fallback reports unavailable',
+    'host.mediaSession': 'first-party YouTube watch fallback reports unavailable',
+    'window.hermesDesktop.getEmbedHostOrigin': 'direct embed URL fallback',
+    'window.Spotify.Player': 'in-plugin Spotify audio assessed as unsupported; Connect control remains',
+  },
+  minimum: 'Namespace SDK exposing atom, useValue, host, ROUTES_AREA and TITLEBAR_AREAS; React createElement/hooks are stable platform imports, not optional host exports.',
+  policy: 'Current/next/absent capability fixtures guard the declared doors. Unknown arbitrary future breaking releases are not guaranteed; an incompatible host gets a precise recovery surface, never silent data deletion or rewritten product scope.',
+}
 const resolveSdk = namespace => {
   const sdk = namespace && typeof namespace === 'object' ? namespace : {}
-  const required = ['atom', 'useValue', 'host', 'ROUTES_AREA', 'TITLEBAR_AREAS']
-  const missing = required.filter(name => sdk[name] == null)
-  return { sdk, missing, compatible: missing.length === 0 }
+  const missing = HOST_CONTRACT.required.filter(name => sdk[name] == null)
+  const optional = {
+    button: typeof sdk.Button === 'function',
+    navigate: typeof sdk.host?.navigate === 'function',
+    titlebarRight: sdk.TITLEBAR_AREAS?.right != null,
+  }
+  return { sdk, missing, compatible: missing.length === 0, optional }
 }
 /* SDK_BOUNDARY_END */
 // Namespace import + capability check before any export is referenced: a
 // missing named ESM binding would abort the whole plugin at link time, while
 // this boundary lets registration render an honest fallback instead. Button
-// is optional (WorkspaceButton falls back to a plain button); the rest are
-// required for the current surfaces. React bindings above are stable platform
-// APIs, not optional host exports.
-const { sdk: SDK, missing: SDK_MISSING, compatible: SDK_COMPATIBLE } = resolveSdk(HermesSDK)
+// is optional (WorkspaceButton and the titlebar summary fall back to a plain
+// button); the rest are required for the current surfaces. React bindings
+// above are stable platform APIs, not optional host exports.
+const { sdk: SDK, missing: SDK_MISSING, compatible: SDK_COMPATIBLE, optional: SDK_OPTIONAL } = resolveSdk(HermesSDK)
 const atom = SDK.atom
 const useValue = SDK.useValue
 const host = SDK.host
 const ROUTES_AREA = SDK.ROUTES_AREA
 const TITLEBAR_AREAS = SDK.TITLEBAR_AREAS
 const Button = SDK.Button
+const HOST_NAVIGATE = SDK_OPTIONAL.navigate ? SDK.host.navigate.bind(SDK.host) : null
+const TITLEBAR_RIGHT = SDK_OPTIONAL.titlebarRight ? SDK.TITLEBAR_AREAS.right : null
 
 const ID = 'fluid-music'
 const ROUTE = '/media'
@@ -5556,7 +5578,7 @@ function PlayerPopover({ controller, popoverRef }) {
     item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device || 'No confirmed Connect device'),
     upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext', 'aria-label': 'Up next preview' }, h('h3', {}, 'Up Next'), upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, title: next.title, 'aria-label': `Play ${next.title}`, onClick: () => void controller.playAt(at + offset + 1) }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
     h(Notice, { controller }),
-    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); host.navigate(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Open Media')),
+    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); HOST_NAVIGATE?.(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); HOST_NAVIGATE?.(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { disabled: !HOST_NAVIGATE, title: HOST_NAVIGATE ? 'Open Media' : 'Host navigation is unavailable on this build', onClick: () => HOST_NAVIGATE?.(ROUTE) }, 'Open Media')),
   )
 }
 
@@ -5588,7 +5610,7 @@ function TitlebarPlayer({ controller }) {
     }
   }, [open, controller])
   return h('div', { ref: rootRef, className: 'fluid-titlebar' },
-    h(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'micro', className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
+    h(Button || 'button', { ref: triggerRef, type: 'button', ...(Button ? { variant: 'ghost', size: 'micro' } : {}), className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
     mediaCapabilities(item).play && h(Action, { compact: true, kind: ['playing', 'loading'].includes(state) ? 'pause' : 'play', label: ['playing', 'loading'].includes(state) ? 'Pause' : 'Play', onClick: () => void controller.toggle() }),
     open && h(PlayerPopover, { controller, popoverRef }),
   )
@@ -5609,7 +5631,7 @@ export default {
       // polling. Never reference the missing exports beyond this message.
       const renderFallback = () => h('div', { className: 'fluid-root', role: 'alert' },
         h('main', { className: 'fluid-app' },
-          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Update Hermes, then reopen Media.`)))
+          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Required by host contract v${HOST_CONTRACT.contractVersion}: ${HOST_CONTRACT.required.join(', ')}. Update Hermes, then reopen Media. Your saved data is untouched.`)))
       if (ROUTES_AREA != null) {
         ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: renderFallback })
       } else {
@@ -5619,7 +5641,9 @@ export default {
     }
     const controller = createController(ctx, { watchCapability: youTubeWatchCapability(SDK) })
     ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
-    ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    if (TITLEBAR_RIGHT != null) {
+      ctx.register({ id: 'media-titlebar', area: TITLEBAR_RIGHT, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    }
     // One dockable pane for every source. 320px is the audio-only target width;
     // 420px keeps the YouTube video above its 200px minimum plus controls. The
     // pane itself declares shorter-height behavior honestly (see CSS).

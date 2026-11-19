@@ -377,7 +377,7 @@ function PlayerPopover({ controller, popoverRef }) {
     item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device || 'No confirmed Connect device'),
     upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext', 'aria-label': 'Up next preview' }, h('h3', {}, 'Up Next'), upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, title: next.title, 'aria-label': `Play ${next.title}`, onClick: () => void controller.playAt(at + offset + 1) }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
     h(Notice, { controller }),
-    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); host.navigate(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Open Media')),
+    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); HOST_NAVIGATE?.(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); HOST_NAVIGATE?.(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { disabled: !HOST_NAVIGATE, title: HOST_NAVIGATE ? 'Open Media' : 'Host navigation is unavailable on this build', onClick: () => HOST_NAVIGATE?.(ROUTE) }, 'Open Media')),
   )
 }
 
@@ -409,7 +409,7 @@ function TitlebarPlayer({ controller }) {
     }
   }, [open, controller])
   return h('div', { ref: rootRef, className: 'fluid-titlebar' },
-    h(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'micro', className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
+    h(Button || 'button', { ref: triggerRef, type: 'button', ...(Button ? { variant: 'ghost', size: 'micro' } : {}), className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
     mediaCapabilities(item).play && h(Action, { compact: true, kind: ['playing', 'loading'].includes(state) ? 'pause' : 'play', label: ['playing', 'loading'].includes(state) ? 'Pause' : 'Play', onClick: () => void controller.toggle() }),
     open && h(PlayerPopover, { controller, popoverRef }),
   )
@@ -430,7 +430,7 @@ export default {
       // polling. Never reference the missing exports beyond this message.
       const renderFallback = () => h('div', { className: 'fluid-root', role: 'alert' },
         h('main', { className: 'fluid-app' },
-          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Update Hermes, then reopen Media.`)))
+          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Required by host contract v${HOST_CONTRACT.contractVersion}: ${HOST_CONTRACT.required.join(', ')}. Update Hermes, then reopen Media. Your saved data is untouched.`)))
       if (ROUTES_AREA != null) {
         ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: renderFallback })
       } else {
@@ -440,7 +440,9 @@ export default {
     }
     const controller = createController(ctx, { watchCapability: youTubeWatchCapability(SDK) })
     ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
-    ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    if (TITLEBAR_RIGHT != null) {
+      ctx.register({ id: 'media-titlebar', area: TITLEBAR_RIGHT, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    }
     // One dockable pane for every source. 320px is the audio-only target width;
     // 420px keeps the YouTube video above its 200px minimum plus controls. The
     // pane itself declares shorter-height behavior honestly (see CSS).
