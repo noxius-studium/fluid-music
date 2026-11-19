@@ -105,7 +105,7 @@ def test_code_exchange_stores_protected_tokens_and_binds_the_account(owned: Any)
         return httpx.Response(404)
 
     data = spotify._exchange_code("cid", "auth-code", "verifier", transport=httpx.MockTransport(handler))
-    assert data["account"] == {"id": "owner", "display_name": "Owner"}
+    assert data["account"] == {"id": "owner", "display_name": "Owner", "product": ""}
     path = owned.store.credentials_path()
     assert path.is_file()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600, "credentials must be owner-only"

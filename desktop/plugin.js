@@ -403,6 +403,51 @@ function youTubeWatchCapability(namespace) {
   return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
 }
 
+function classifySpotifyFailure(value) {
+  // Distinct remediation per official Web API status semantics; unknown stays
+  // unknown. Connect control errors are never evidence about local audio.
+  const status = Number(value?.statusCode ?? value?.status_code)
+  const text = safeText(value?.message).toLowerCase()
+  let reason = 'undetermined'
+  if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
+  else if (status === 429) reason = 'rate-limited'
+  else if (status === 403) reason = 'forbidden'
+  else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
+  else if (status === 404) reason = 'not-found'
+  else if (status >= 500 && status <= 599) reason = 'transient'
+  const matrix = {
+    'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
+    'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
+    'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
+    'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
+    'transient': { action: 'retry', retryable: true, message: 'Spotify had a temporary problem.', remedy: 'Retry in a moment.' },
+    'undetermined': { action: 'diagnose', retryable: false, message: 'Spotify request failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+  }
+  return { reason, ...matrix[reason] }
+}
+function spotifyLocalPlaybackCapability(signals) {
+  // Official Web Playback SDK requirements: Premium account, encrypted-media
+  // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's
+  // prior written approval for commercial use. Connect remote control is NOT
+  // decoded in-plugin audio. Without owner-side audio proof the best honest
+  // state is 'eligible-unproven' — never a silent full-audio certification.
+  const product = safeText(signals?.product).toLowerCase()
+  if (product && product !== 'premium') {
+    return { state: 'ineligible-account', reasons: ['Spotify Web Playback SDK requires a Premium account.'], localAudio: false }
+  }
+  if (signals?.checked && (!signals.sdkPresent || !signals.emeSupported)) {
+    const reasons = []
+    if (!signals.sdkPresent) reasons.push('The Spotify Web Playback SDK is not available in this runtime.')
+    if (!signals.emeSupported) reasons.push('Encrypted-media (Widevine) support was not detected in this runtime.')
+    return { state: 'unsupported-runtime', reasons, localAudio: false }
+  }
+  if (signals?.checked && signals.sdkPresent && signals.emeSupported && product === 'premium') {
+    return { state: 'eligible-unproven', reasons: ['Account and runtime checks pass; actual in-plugin audio still needs owner Desktop proof and provider approval.'], localAudio: null }
+  }
+  return { state: 'unverified', reasons: ['Local playback capability has not been checked on this runtime.'], localAudio: null }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },
@@ -516,6 +561,8 @@ function createController(ctx, hostCapabilities = {}) {
   const spotify = atom({ connected: false, title: '', subtitle: '', playing: false })
   const spotifyAuth = atom({ state: 'loading', authenticated: false, needsClientId: false, detail: '' })
   const spotifyDevices = atom([])
+  const spotifyFailure = atom(null)
+  const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
   const progress = atom({ positionMs: 0, durationMs: 0 })
@@ -877,6 +924,7 @@ function createController(ctx, hostCapabilities = {}) {
         repeat: safeText(state.repeat_state, 'off')
       }
       spotify.set(snapshot)
+      spotifyFailure.set(null)
       shuffle.set(snapshot.shuffle)
       repeat.set(['off', 'context', 'track'].includes(snapshot.repeat) ? snapshot.repeat : 'off')
       const fingerprint = `${snapshot.playing}:${snapshot.uri}:${snapshot.device}`
@@ -903,6 +951,7 @@ function createController(ctx, hostCapabilities = {}) {
       }
       return snapshot
     } catch (error) {
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (token === transition && current()?.source === 'spotify') {
         status.set('error')
         message.set(error?.message || 'Spotify Connect state could not be confirmed.')
@@ -950,6 +999,7 @@ function createController(ctx, hostCapabilities = {}) {
       }
       spotifyDevices.set([])
       clearSpotifyDeviceSelection()
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (isSpotifyAuthFailure(error)) {
         spotifyAuth.set({ state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication has expired. Reconnect to continue.' })
       }
@@ -1763,6 +1813,32 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  async function assessSpotifyLocalPlayback() {
+    let product = ''
+    try {
+      const data = await request('/spotify/local-capability')
+      product = safeText(data?.account_product)
+    } catch { product = '' }
+    let sdkPresent = false
+    let emeSupported = false
+    let checked = false
+    try {
+      if (typeof window !== 'undefined') {
+        sdkPresent = typeof window.Spotify?.Player === 'function'
+        if (typeof navigator !== 'undefined' && typeof navigator.requestMediaKeySystemAccess === 'function') {
+          try {
+            await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }] }])
+            emeSupported = true
+          } catch { emeSupported = false }
+        }
+        checked = true
+      }
+    } catch { checked = false }
+    const capability = spotifyLocalPlaybackCapability({ product, sdkPresent, emeSupported, checked })
+    spotifyLocalCapability.set(capability)
+    return capability
+  }
+
   function retryYouTube() {
     const item = current()
     if (!item || item.source !== 'youtube') return Promise.resolve(false)
@@ -1907,7 +1983,7 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
@@ -2620,7 +2696,8 @@ function QueueList({ controller }) {
 }
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
-    devices = useValue(controller.spotifyDevices)
+    devices = useValue(controller.spotifyDevices),
+    localCap = useValue(controller.spotifyLocalCapability)
   const [clientId, setClientId] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
@@ -2653,6 +2730,12 @@ function SpotifyConnection({ controller }) {
         h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
         auth.authenticated ? 'Connected' : auth.state,
       ),
+    ),
+    h(
+      'div',
+      { className: 'fluid-local-playback' },
+      h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
     auth.needsClientId &&
       h(

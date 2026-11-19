@@ -566,6 +566,37 @@ async def spotify_auth_start(request: Request) -> dict[str, Any]:
     return {"ok": True, "data": {"flow": _spotify_auth_flow_status()}}
 
 
+@router.get("/spotify/local-capability")
+async def spotify_local_capability() -> dict[str, Any]:
+    """Honest in-plugin playback assessment inputs; never certifies local audio.
+
+    The backend can only know the account product. SDK presence, encrypted
+    media and actual decoded audio are runtime/owner-side evidence; Connect
+    control availability is reported separately and is NOT local audio.
+    """
+    try:
+        _resolve_spotify_integration()
+    except SpotifyIntegrationUnavailable as exc:
+        return _error(str(exc))
+    try:
+        status = get_spotify_auth_status()
+    except Exception:  # noqa: BLE001 - auth-store errors stay sanitized.
+        status = {}
+    account = status.get("account") if isinstance(status, Mapping) else None
+    product = str((account or {}).get("product") or "") or None
+    return {
+        "ok": True,
+        "data": {
+            "account_product": product,
+            "sdk": "unverified",
+            "encrypted_media": "unverified",
+            "provider_approval": "unverified",
+            "connect_control": True,
+            "local_audio": "unverified",
+        },
+    }
+
+
 @router.get("/player")
 async def player() -> dict[str, Any]:
     result = await _call(_spotify_playback_state)

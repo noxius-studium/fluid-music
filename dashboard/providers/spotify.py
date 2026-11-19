@@ -40,7 +40,7 @@ REDIRECT_PORT = 43827
 REDIRECT_PATH = "/spotify/callback"
 SCOPES = (
     "user-read-playback-state user-modify-playback-state user-read-currently-playing "
-    "user-library-read playlist-read-private playlist-read-collaborative streaming user-read-email"
+    "user-library-read playlist-read-private playlist-read-collaborative streaming user-read-email user-read-private"
 )
 _HTTP_TIMEOUT = 15.0
 
@@ -144,7 +144,11 @@ def _bind_account(data: dict[str, Any], transport: httpx.BaseTransport | None = 
             response = client.get(f"{API_BASE_URL}/me", headers={"Authorization": f"Bearer {data['access_token']}"})
         if response.status_code == 200:
             profile = response.json()
-            data["account"] = {"id": str(profile.get("id") or ""), "display_name": str(profile.get("display_name") or "")}
+            data["account"] = {
+                "id": str(profile.get("id") or ""),
+                "display_name": str(profile.get("display_name") or ""),
+                "product": str(profile.get("product") or ""),
+            }
             token_store.save(data)
     except (httpx.HTTPError, ValueError):
         logger.debug("Spotify account binding unavailable; metadata stays empty")

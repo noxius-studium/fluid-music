@@ -374,6 +374,51 @@ function youTubeWatchCapability(namespace) {
   return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
 }
 
+function classifySpotifyFailure(value) {
+  // Distinct remediation per official Web API status semantics; unknown stays
+  // unknown. Connect control errors are never evidence about local audio.
+  const status = Number(value?.statusCode ?? value?.status_code)
+  const text = safeText(value?.message).toLowerCase()
+  let reason = 'undetermined'
+  if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
+  else if (status === 429) reason = 'rate-limited'
+  else if (status === 403) reason = 'forbidden'
+  else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
+  else if (status === 404) reason = 'not-found'
+  else if (status >= 500 && status <= 599) reason = 'transient'
+  const matrix = {
+    'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
+    'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
+    'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
+    'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
+    'transient': { action: 'retry', retryable: true, message: 'Spotify had a temporary problem.', remedy: 'Retry in a moment.' },
+    'undetermined': { action: 'diagnose', retryable: false, message: 'Spotify request failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+  }
+  return { reason, ...matrix[reason] }
+}
+function spotifyLocalPlaybackCapability(signals) {
+  // Official Web Playback SDK requirements: Premium account, encrypted-media
+  // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's
+  // prior written approval for commercial use. Connect remote control is NOT
+  // decoded in-plugin audio. Without owner-side audio proof the best honest
+  // state is 'eligible-unproven' — never a silent full-audio certification.
+  const product = safeText(signals?.product).toLowerCase()
+  if (product && product !== 'premium') {
+    return { state: 'ineligible-account', reasons: ['Spotify Web Playback SDK requires a Premium account.'], localAudio: false }
+  }
+  if (signals?.checked && (!signals.sdkPresent || !signals.emeSupported)) {
+    const reasons = []
+    if (!signals.sdkPresent) reasons.push('The Spotify Web Playback SDK is not available in this runtime.')
+    if (!signals.emeSupported) reasons.push('Encrypted-media (Widevine) support was not detected in this runtime.')
+    return { state: 'unsupported-runtime', reasons, localAudio: false }
+  }
+  if (signals?.checked && signals.sdkPresent && signals.emeSupported && product === 'premium') {
+    return { state: 'eligible-unproven', reasons: ['Account and runtime checks pass; actual in-plugin audio still needs owner Desktop proof and provider approval.'], localAudio: null }
+  }
+  return { state: 'unverified', reasons: ['Local playback capability has not been checked on this runtime.'], localAudio: null }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },

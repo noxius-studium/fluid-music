@@ -1,6 +1,7 @@
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
-    devices = useValue(controller.spotifyDevices)
+    devices = useValue(controller.spotifyDevices),
+    localCap = useValue(controller.spotifyLocalCapability)
   const [clientId, setClientId] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
@@ -33,6 +34,12 @@ function SpotifyConnection({ controller }) {
         h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
         auth.authenticated ? 'Connected' : auth.state,
       ),
+    ),
+    h(
+      'div',
+      { className: 'fluid-local-playback' },
+      h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
     auth.needsClientId &&
       h(

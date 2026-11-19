@@ -35,6 +35,8 @@ function createController(ctx, hostCapabilities = {}) {
   const spotify = atom({ connected: false, title: '', subtitle: '', playing: false })
   const spotifyAuth = atom({ state: 'loading', authenticated: false, needsClientId: false, detail: '' })
   const spotifyDevices = atom([])
+  const spotifyFailure = atom(null)
+  const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
   const progress = atom({ positionMs: 0, durationMs: 0 })
@@ -396,6 +398,7 @@ function createController(ctx, hostCapabilities = {}) {
         repeat: safeText(state.repeat_state, 'off')
       }
       spotify.set(snapshot)
+      spotifyFailure.set(null)
       shuffle.set(snapshot.shuffle)
       repeat.set(['off', 'context', 'track'].includes(snapshot.repeat) ? snapshot.repeat : 'off')
       const fingerprint = `${snapshot.playing}:${snapshot.uri}:${snapshot.device}`
@@ -422,6 +425,7 @@ function createController(ctx, hostCapabilities = {}) {
       }
       return snapshot
     } catch (error) {
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (token === transition && current()?.source === 'spotify') {
         status.set('error')
         message.set(error?.message || 'Spotify Connect state could not be confirmed.')
@@ -469,6 +473,7 @@ function createController(ctx, hostCapabilities = {}) {
       }
       spotifyDevices.set([])
       clearSpotifyDeviceSelection()
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (isSpotifyAuthFailure(error)) {
         spotifyAuth.set({ state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication has expired. Reconnect to continue.' })
       }
@@ -1282,6 +1287,32 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  async function assessSpotifyLocalPlayback() {
+    let product = ''
+    try {
+      const data = await request('/spotify/local-capability')
+      product = safeText(data?.account_product)
+    } catch { product = '' }
+    let sdkPresent = false
+    let emeSupported = false
+    let checked = false
+    try {
+      if (typeof window !== 'undefined') {
+        sdkPresent = typeof window.Spotify?.Player === 'function'
+        if (typeof navigator !== 'undefined' && typeof navigator.requestMediaKeySystemAccess === 'function') {
+          try {
+            await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }] }])
+            emeSupported = true
+          } catch { emeSupported = false }
+        }
+        checked = true
+      }
+    } catch { checked = false }
+    const capability = spotifyLocalPlaybackCapability({ product, sdkPresent, emeSupported, checked })
+    spotifyLocalCapability.set(capability)
+    return capability
+  }
+
   function retryYouTube() {
     const item = current()
     if (!item || item.source !== 'youtube') return Promise.resolve(false)
@@ -1426,7 +1457,7 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
