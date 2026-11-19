@@ -514,6 +514,23 @@ def test_router_level_radio_click_reports_directory_failure_sanitized(api: Any, 
     assert response.json() == {"ok": False, "error": "Radio Browser click registration failed"}
 
 
+def test_router_level_local_root_removal_keeps_audio_files(api: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    music = tmp_path / "Music"
+    track = music / "Keep.mp3"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"ID3-labelled-fixture")
+    database = tmp_path / "state" / "library.sqlite3"
+    monkeypatch.setattr(api, "_local_library", lambda: api.LocalLibrary(database))
+    added = run(request(app_for(api), "POST", "/local/roots", json={"path": str(music)}))
+    assert added.json()["ok"] is True
+    root_id = added.json()["data"]["root"]["id"]
+    removed = run(request(app_for(api), "DELETE", f"/local/roots/{root_id}"))
+    assert removed.json() == {"ok": True, "data": {"removed": True}}
+    assert track.read_bytes() == b"ID3-labelled-fixture", "removing an index root never deletes audio"
+    tracks = run(request(app_for(api), "GET", "/local/tracks"))
+    assert tracks.json()["data"]["total"] == 0
+
+
 def test_local_library_persists_roots_tracks_and_identity_across_moves(api: Any, tmp_path: Path):
     music = tmp_path / "Music"
     album = music / "Artist" / "Album"
