@@ -7,6 +7,9 @@ function createController(ctx, hostCapabilities = {}) {
   const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
   let youtubeEngine = 'embed'
   let watchAttempts = 0
+  // The active YouTube surface registers its real command channel here; the
+  // shared transport drives it instead of provider-specific copies.
+  let youtubeCommandSink = null
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
   const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
@@ -639,7 +642,7 @@ function createController(ctx, hostCapabilities = {}) {
       youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
-      message.set('YouTube transport is in the FluidMusic player pane.')
+      message.set('YouTube is loading in the FluidMusic player pane.')
       youtubeHistoryRecorded = false
       return
     }
@@ -704,8 +707,9 @@ function createController(ctx, hostCapabilities = {}) {
         return
       }
       if (item.source === 'youtube') {
-        message.set('YouTube transport is in the FluidMusic player pane.')
-        if (token === transition) status.set('paused')
+        const playing = Boolean(youtube.get().playing)
+        const sent = youtubeCommandSink ? youtubeCommandSink(playing ? 'pauseVideo' : 'playVideo', []) : false
+        if (!sent && token === transition) message.set('The YouTube player is not ready yet. Open the player pane or retry.')
         return
       }
       const pause = status.get() === 'playing'
@@ -763,6 +767,12 @@ function createController(ctx, hostCapabilities = {}) {
     if (item?.source === 'local' && audioSource === 'local' && audio) {
       audio.currentTime = target / 1000
       progress.set({ positionMs: target, durationMs })
+      return
+    }
+    if (item?.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('seekTo', [Math.round(target / 1000)]) : false
+      if (sent) progress.set({ positionMs: target, durationMs })
+      else message.set('The YouTube player is not ready yet. Open the player pane or retry.')
       return
     }
     if (item?.source === 'spotify') {
@@ -890,6 +900,7 @@ function createController(ctx, hostCapabilities = {}) {
         void spotifyRequest('/volume', { method: 'PUT', body }).catch(error => { if (version === volumeVersion) message.set(error?.message || 'Spotify volume could not be changed.') })
       }, 180)
     }
+    if (current()?.source === 'youtube' && youtubeCommandSink) youtubeCommandSink('setVolume', [Math.round(next * 100)])
 
     persist()
   }
@@ -1230,6 +1241,10 @@ function createController(ctx, hostCapabilities = {}) {
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
 
+  function setYouTubeCommandSink(sink) {
+    youtubeCommandSink = typeof sink === 'function' ? sink : null
+  }
+
   function reportYouTubeState(state) {
     // Embed bridge adapter: surface relay reports bind to the exact selected
     // occurrence and the current transition generation; stale or foreign
@@ -1476,7 +1491,7 @@ function createController(ctx, hostCapabilities = {}) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,

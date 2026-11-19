@@ -891,9 +891,10 @@ test('YouTube queue items require credential-free HTTPS watch URLs and persist s
   assert.equal(valid.url, 'https://youtu.be/abcdefghijk?t=12')
   assert.equal(valid.title, 'Night set')
   for (const url of ['http://www.youtube.com/watch?v=abcdefghijk', 'https://user:pass@www.youtube.com/watch?v=abcdefghijk', 'https://youtube.com.evil.example/watch?v=abcdefghijk', 'https://www.youtube.com/', 'https://youtu.be/not-valid']) assert.equal(pure.normalizeQueueItem({ source: 'youtube', url }), null, url)
-  // Embed architecture: controller-level transport is honestly unavailable for
-  // YouTube; the integrated player surface owns embed controls (FM-04/FM-12).
-  assert.deepEqual(pure.mediaCapabilities(valid), { play: false, previous: false, next: false, seek: false, volume: false, shuffle: false, repeat: false, device: false })
+  // FM-12: YouTube joins the ONE shared transport vocabulary; commands flow
+  // through the registered surface sink (embed bridge / owned watch handle),
+  // never provider REST or internal audio. URL/metadata safety is unchanged.
+  assert.deepEqual(pure.mediaCapabilities(valid), { play: true, previous: true, next: true, seek: true, volume: true, shuffle: false, repeat: false, device: false })
 })
 
 test('YouTube resolve results enqueue safe restart-safe metadata without handles or auto-play', async () => {
@@ -1062,7 +1063,7 @@ test('YouTube controller transport never mutates media, issues provider commands
     assert.equal(calls.filter(call => call.method !== 'GET').length, 0, 'embed media is never driven through provider REST commands')
     assert.equal(previewCalls.length, 0)
     assert.equal(harness.audio.elements.length, 0, 'no internal audio engine is created for YouTube')
-    assert.match(c.message.get(), /YouTube transport is in the FluidMusic player pane/)
+    assert.match(c.message.get(), /YouTube player is not ready/, 'without a registered surface the shared transport is honestly not-ready, never a fake action')
   } finally { harness.restore() }
 })
 

@@ -149,11 +149,11 @@ function shouldShowNext(item) {
 function mediaCapabilities(item) {
   const source = item?.source
   return {
-    play: source === 'spotify' || source === 'radio' || source === 'local',
-    previous: source === 'spotify' || source === 'local',
-    next: source === 'spotify' || source === 'local',
-    seek: source === 'spotify' || source === 'local',
-    volume: source === 'spotify' || source === 'radio' || source === 'local',
+    play: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
+    previous: source === 'spotify' || source === 'local' || source === 'youtube',
+    next: source === 'spotify' || source === 'local' || source === 'youtube',
+    seek: source === 'spotify' || source === 'local' || source === 'youtube',
+    volume: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
     shuffle: source === 'spotify',
     repeat: source === 'spotify',
     device: source === 'spotify'

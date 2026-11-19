@@ -178,11 +178,11 @@ function shouldShowNext(item) {
 function mediaCapabilities(item) {
   const source = item?.source
   return {
-    play: source === 'spotify' || source === 'radio' || source === 'local',
-    previous: source === 'spotify' || source === 'local',
-    next: source === 'spotify' || source === 'local',
-    seek: source === 'spotify' || source === 'local',
-    volume: source === 'spotify' || source === 'radio' || source === 'local',
+    play: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
+    previous: source === 'spotify' || source === 'local' || source === 'youtube',
+    next: source === 'spotify' || source === 'local' || source === 'youtube',
+    seek: source === 'spotify' || source === 'local' || source === 'youtube',
+    volume: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
     shuffle: source === 'spotify',
     repeat: source === 'spotify',
     device: source === 'spotify'
@@ -477,7 +477,7 @@ const CSS = `
 .fluid-input,.fluid-select,.fluid-textarea{width:100%;min-width:0;border:1px solid var(--fm-line);border-radius:6px;background:var(--ui-bg-secondary);color:var(--ui-text-primary);padding:10px 12px}.fluid-input::placeholder,.fluid-textarea::placeholder{color:var(--ui-text-tertiary)}.fluid-textarea{min-height:90px;resize:vertical}.fluid-searchbar{display:flex;align-items:center;gap:10px;margin:18px 0}.fluid-searchbar>.fluid-input{flex:1}.fluid-field{display:flex;flex-direction:column;gap:8px;font-size:12px;margin:18px 0}.fluid-field small{color:var(--ui-text-secondary)}.fluid-filter{max-width:300px}.fluid-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:18px}.fluid-media-tile{min-width:0;padding:0 0 12px}.fluid-tile-art{aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border:1px solid var(--fm-line);border-radius:8px;overflow:hidden;margin-bottom:12px}.fluid-tile-art>svg{width:36px;height:36px;color:var(--ui-accent)}.fluid-tile-title{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:13px}.fluid-tile-detail{display:block;color:var(--ui-text-secondary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:11px;margin:4px 0 10px}
 .fluid-track-list{border-top:1px solid var(--fm-line)}.fluid-track-row{display:grid;grid-template-columns:24px 40px minmax(0,1fr) 52px 40px auto;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--fm-line);min-width:0}.fluid-track-row:hover{background:var(--fm-soft)}.fluid-track-row[data-missing=true] .fluid-row-title{color:var(--ui-text-tertiary)}.fluid-track-number,.fluid-track-duration,.fluid-row-index{font-size:10px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.fluid-source-tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--ui-text-secondary)}.fluid-mini-cover{width:40px;height:40px;border-radius:5px;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center}.fluid-row-copy{min-width:0}.fluid-row-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;font-weight:550}.fluid-row-detail{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ui-text-secondary);margin-top:4px}.fluid-queue-row{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center}.fluid-queue-row[data-current=true]{background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent)}.fluid-track-link{border:0;background:transparent;color:inherit;text-align:left;min-width:0;cursor:pointer;padding:0}.fluid-track-link:disabled{cursor:not-allowed}.fluid-mini-cover img,.fluid-tile-art img,.fluid-now-cover img,.fluid-library-cover img,.fluid-mini-art img{width:100%;height:100%;object-fit:cover}
 .fluid-playlist-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:28px}.fluid-playlist-browser{border-right:1px solid var(--fm-line);padding-right:20px;min-width:0}.fluid-playlist-list{display:flex;flex-direction:column;gap:5px;max-height:55vh;overflow:auto}.fluid-playlist-button{display:flex;align-items:center;gap:12px;border:1px solid transparent;border-radius:6px;background:transparent;color:inherit;text-align:left;cursor:pointer;padding:12px;min-width:0}.fluid-playlist-button:hover{background:var(--fm-soft)}.fluid-playlist-button[data-active=true]{background:var(--fm-soft);border-color:var(--fm-line)}.fluid-playlist-button>svg{flex:none;color:var(--ui-accent)}.fluid-playlist-button strong{display:block;font-size:12px;overflow-wrap:anywhere}.fluid-playlist-button span span{display:block;font-size:10px;color:var(--ui-text-secondary)}.fluid-playlist-editor{min-width:0}.fluid-playlist-heading{display:flex;gap:20px;align-items:center;padding:8px 0 22px;border-bottom:1px solid var(--fm-line)}.fluid-playlist-heading .fluid-collection-icon{width:80px;height:80px}.fluid-library-title{font-size:clamp(24px,3cqw,38px);letter-spacing:-.045em;line-height:1.1;margin:0;overflow-wrap:anywhere}.fluid-library-facts{font-size:11px;color:var(--ui-text-secondary);margin:10px 0 0}.fluid-playlist-toolbar{display:flex;flex-direction:column;gap:12px;padding:20px 0}.fluid-editor-filters{display:flex;gap:12px;align-items:center;margin:6px 0 18px}.fluid-selection-bar{display:flex;gap:10px;align-items:center;background:var(--fm-soft);padding:10px;margin-bottom:12px}.fluid-library-hero{display:flex;gap:24px;align-items:center;border-bottom:1px solid var(--fm-line);padding:0 0 24px;margin-bottom:24px}.fluid-library-cover{width:140px;aspect-ratio:1;flex:none;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center;border-radius:8px}.fluid-device-list{display:grid;gap:8px}.fluid-device{display:flex;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--fm-line);min-width:0}.fluid-device-copy{flex:1;min-width:0}.fluid-device-copy strong{font-size:12px;display:block;overflow-wrap:anywhere}.fluid-device-copy span{font-size:11px;color:var(--ui-text-secondary)}.fluid-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.fluid-switch-row{display:flex;gap:12px;align-items:flex-start;margin:16px 0;cursor:pointer}.fluid-switch-row strong{display:block;font-size:12px}.fluid-switch-row small{display:block;font-size:11px;color:var(--ui-text-secondary);margin-top:5px}.fluid-switch-row input{margin-top:4px;accent-color:var(--ui-accent)}.fluid-boundaries dt{font-weight:650;margin:16px 0 4px}.fluid-boundaries dd{margin:0;color:var(--ui-text-secondary);font-size:12px}.fluid-settings-grid hr{border:0;border-top:1px solid var(--fm-line);margin:22px 0}
-.fluid-player-controls{display:flex;gap:12px;align-items:center;justify-content:center}.fluid-player-progress{display:grid;grid-template-columns:36px minmax(0,1fr) 36px;gap:10px;align-items:center;font:10px/1.5 var(--font-mono,monospace);color:var(--ui-text-secondary);margin-top:8px}.fluid-player-progress>span:last-child{text-align:right}.fluid-range{height:16px;width:100%;min-width:0;accent-color:var(--ui-accent);cursor:pointer;margin:0}.fluid-player-hint{font-size:10px;color:var(--ui-text-tertiary);text-align:center;margin:8px 0 0}.fluid-volume{display:flex;align-items:center;gap:6px;width:170px;max-width:100%}.fluid-volume-value{font:10px var(--font-mono,monospace);color:var(--ui-text-secondary);min-width:30px;text-align:right}.fluid-volume-compact{width:118px}.fluid-volume-compact .fluid-range{width:60px;flex:none}.fluid-volume-compact .fluid-volume-value{font-size:9px;min-width:25px}
+.fluid-player-controls{display:flex;gap:12px;align-items:center;justify-content:center}.fluid-player-progress{display:grid;grid-template-columns:36px minmax(0,1fr) 36px;gap:10px;align-items:center;font:10px/1.5 var(--font-mono,monospace);color:var(--ui-text-secondary);margin-top:8px}.fluid-player-progress>span:last-child{text-align:right}.fluid-range{height:16px;width:100%;min-width:0;accent-color:var(--ui-accent);cursor:pointer;margin:0}.fluid-player-hint{font-size:10px;color:var(--ui-text-tertiary);text-align:center;margin:8px 0 0}.fluid-volume{display:flex;align-items:center;gap:6px;width:170px;max-width:100%}.fluid-volume-value{font:10px var(--font-mono,monospace);color:var(--ui-text-secondary);min-width:30px;text-align:right}.fluid-volume-compact{width:150px}.fluid-volume-compact .fluid-range{width:auto;flex:1;min-width:70px}.fluid-volume-compact .fluid-volume-value{font-size:9px;min-width:25px}
 .fluid-dialog{position:fixed;inset:0;margin:auto;height:fit-content;width:min(560px,calc(100vw - 32px));max-height:85vh;overflow:auto;border:1px solid var(--fm-line);border-radius:12px;background:var(--ui-bg-elevated,var(--ui-bg-secondary));background:rgb(from var(--ui-bg-elevated,var(--ui-bg-secondary)) r g b / 1);color:var(--ui-text-primary);padding:24px;box-shadow:0 24px 90px color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.fluid-dialog::backdrop{background:color-mix(in srgb,var(--ui-bg-primary) 65%,transparent);backdrop-filter:blur(4px)}.fluid-dialog-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center;margin-top:24px}.fluid-segmented{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--fm-line);padding-bottom:10px}.fluid-segmented button{border:0;border-radius:5px;padding:8px 12px;background:transparent;color:var(--ui-text-secondary);cursor:pointer}.fluid-segmented button[aria-pressed=true]{background:var(--fm-soft);color:var(--ui-text-primary)}.fluid-picker-list{max-height:340px;overflow:auto}.fluid-picker-row{display:grid;grid-template-columns:20px 40px minmax(0,1fr);gap:12px;align-items:center;padding:10px;border-bottom:1px solid var(--fm-line);cursor:pointer}.fluid-picker-row:hover{background:var(--fm-soft)}.fluid-log-list{display:grid;gap:8px;margin-top:18px}.fluid-log-row{display:grid;grid-template-columns:75px 50px minmax(80px,.6fr) minmax(0,1fr);gap:12px;padding:14px;border:1px solid var(--fm-line);border-radius:6px;font:10px/1.6 var(--font-mono,monospace)}.fluid-log-row[data-level=error]{border-left:3px solid var(--ui-accent)}.fluid-log-row time,.fluid-log-level{color:var(--ui-text-tertiary)}.fluid-log-row pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ui-text-secondary)}
 .fluid-mini-player{container:mini / inline-size;height:100%;overflow:auto;padding:18px;min-width:0}.fluid-mini-art{width:min(100%,200px);aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border-radius:8px;overflow:hidden;margin:0 auto 18px}.fluid-mini-art>svg{width:48px;height:48px;color:var(--ui-accent)}.fluid-mini-title{font-size:20px;letter-spacing:-.035em;line-height:1.2;text-align:center;margin:0;overflow-wrap:anywhere}.fluid-mini-subtitle{font-size:12px;text-align:center;color:var(--ui-text-secondary);margin:8px 0 18px;overflow-wrap:anywhere}.fluid-mini-player>.fluid-volume{margin:18px auto}.fluid-mini-player .fluid-notice{margin-top:14px}
 .fluid-save-source{display:flex;align-items:center;gap:12px;margin:18px 0}.fluid-save-destinations{border:0;min-width:0;margin:20px 0}.fluid-save-choice{width:100%;border:1px solid var(--fm-line);margin:6px 0}.fluid-save-choice[aria-pressed=true]{border-color:var(--ui-accent);background:var(--fm-soft)}.fluid-save-destinations legend{font-size:12px;font-weight:650;margin-bottom:8px}.fluid-save-destinations .fluid-playlist-list{max-height:220px}.fluid-queue-context{padding:20px 12px 24px 24px;border-left:2px solid var(--ui-accent);background:var(--fm-panel);margin:0 0 18px 14px}.fluid-queue-row>.fluid-row-actions{flex-wrap:wrap;justify-content:flex-end}
@@ -501,9 +501,9 @@ const CSS = `
 .fluid-secondary-tabs{display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--fm-line);margin-bottom:14px}
 .fluid-compact-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0}.fluid-panel-pad{padding:14px}.fluid-section-head{margin-bottom:10px}.fluid-searchbar{margin:10px 0}.fluid-history-time{font-size:9px;color:var(--ui-text-tertiary);white-space:nowrap}.fluid-youtube-results{margin-top:12px}.fluid-secondary-tabs button{flex:none;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-secondary);padding:9px 12px;cursor:pointer}.fluid-secondary-tabs button[aria-selected=true]{color:var(--fm-ink);border-bottom-color:var(--fm-violet)}
 .fluid-titlebar{position:relative;display:flex;align-items:center;gap:2px;width:210px;max-width:210px;height:22px;overflow:visible}.fluid-titlebar-summary{display:flex;align-items:center;gap:4px;flex:1 1 auto;min-width:0;max-width:176px;height:20px;padding:2px 5px!important;overflow:hidden}.fluid-titlebar>button:not(.fluid-titlebar-summary){flex:none}.fluid-titlebar-source{display:none}.fluid-titlebar-title{display:block;min-width:0;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:1}.fluid-title-popover{position:absolute;z-index:1000;right:0;top:calc(100% + 8px);width:min(390px,calc(100vw - 24px));max-height:min(680px,calc(100vh - 72px));overflow:auto;padding:18px;border:1px solid var(--fm-line);border-radius:8px;background:var(--ui-bg-elevated,var(--ui-bg-secondary));color:var(--fm-ink);box-shadow:8px 16px 46px color-mix(in srgb,var(--ui-text-primary) 16%,transparent)}.fluid-popover-now{display:grid;grid-template-columns:76px minmax(0,1fr);gap:14px;align-items:center}.fluid-orbit-small{width:76px;min-width:76px;padding:7px}.fluid-popover-title{display:block;font-size:17px;line-height:1.2;margin:7px 0 2px}.fluid-title-popover .fluid-player-controls{justify-content:flex-start;margin:16px 0}.fluid-title-popover .fluid-volume{margin:12px 0}.fluid-popover-upnext{margin-top:14px;border-top:1px solid var(--fm-line)}.fluid-popover-upnext h3{font-size:12px}.fluid-source-shortcuts,.fluid-mini-links{display:flex;gap:7px;flex-wrap:wrap;margin-top:16px}.fluid-youtube-title{display:block;margin:8px 0 16px}.fluid-youtube-compact{padding:0}.fluid-settings-grid{align-items:start}
-.fluid-mini-player{background:transparent;color:var(--fm-ink)}.fluid-mini-player:not(.fluid-youtube-player){display:grid;grid-template-rows:minmax(0,1fr) 40px;height:100%;padding:6px 8px;overflow:hidden}.fluid-mini-body{min-height:0;overflow:hidden}.fluid-mini-body>.fluid-mini-summary{margin:0}.fluid-mini-body>.fluid-player-progress{margin:7px 0 0}.fluid-mini-body>.fluid-player-hint{margin:6px 0 0}.fluid-mini-body>.fluid-notice{margin:6px 0 0;padding:7px 8px;font-size:10px}.fluid-mini-controls{display:grid;grid-template-columns:auto minmax(90px,1fr) auto;align-items:center;gap:9px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-mini-controls .fluid-player-controls{justify-self:start;gap:5px}.fluid-mini-controls>.fluid-volume,.fluid-mini-controls>.fluid-mini-volume{width:auto;min-width:55px;margin:0}.fluid-mini-controls .fluid-volume-compact .fluid-range,.fluid-mini-controls .fluid-mini-volume .fluid-range{width:90px}.fluid-mini-controls>.fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:4px;margin:0}.fluid-mini-controls>.fluid-mini-links button{padding-inline:7px}.fluid-mini-art{border-radius:50%}.fluid-mini-links{justify-content:center}.fluid-youtube-player{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 40px;gap:6px;height:100%;padding:6px 8px;overflow:hidden}.fluid-youtube-frame-wrap{min-width:0;min-height:0;height:100%;overflow:hidden;display:grid;place-items:stretch}.fluid-youtube-frame{display:block;width:100%;height:100%;min-height:0;border:1px solid var(--fm-line);border-radius:5px;background:var(--ui-bg-secondary)}.fluid-youtube-frame-loading{display:grid;place-content:center;text-align:center;color:var(--ui-text-secondary);font-size:12px}.fluid-youtube-side{min-width:0;min-height:0;overflow:hidden;padding:3px 2px}.fluid-youtube-summary{margin:0}.fluid-youtube-summary .fluid-mini-title,.fluid-youtube-summary .fluid-mini-subtitle{text-align:left}.fluid-youtube-summary .fluid-mini-title{font-size:14px;line-height:1.18;margin-top:5px}.fluid-youtube-summary .fluid-mini-subtitle{font-size:10px;line-height:1.35;margin:5px 0 0}.fluid-youtube-side .fluid-notice{margin:8px 0 0;padding:7px 8px;font-size:10px}.fluid-youtube-controls{grid-column:1/-1;display:grid;grid-template-columns:1fr minmax(110px,.7fr) 1fr;align-items:center;gap:10px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-youtube-controls .fluid-player-controls{justify-self:start;gap:6px}.fluid-mini-volume{display:flex;align-items:center;gap:7px;min-width:0}.fluid-youtube-controls .fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:5px;margin:0}
-@container mini (max-width:360px){.fluid-mini-controls{grid-template-columns:auto minmax(70px,1fr) auto}.fluid-mini-controls .fluid-mini-links button{padding-inline:7px}}
-@container mini (max-width:280px){.fluid-mini-controls{grid-template-columns:auto minmax(50px,1fr) auto}.fluid-mini-controls .fluid-volume-value{display:none}.fluid-mini-controls>.fluid-mini-links button{padding-inline:6px}}
+.fluid-mini-player{background:transparent;color:var(--fm-ink)}.fluid-mini-player:not(.fluid-youtube-player){display:grid;grid-template-rows:minmax(0,1fr) 40px;height:100%;padding:6px 8px;overflow:hidden}.fluid-mini-body{min-height:0;overflow:hidden}.fluid-mini-body>.fluid-mini-summary{margin:0}.fluid-mini-body>.fluid-player-progress{margin:7px 0 0}.fluid-mini-body>.fluid-player-hint{margin:6px 0 0}.fluid-mini-body>.fluid-notice{margin:6px 0 0;padding:7px 8px;font-size:10px}.fluid-mini-controls{display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:9px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-mini-controls .fluid-player-controls{justify-self:start;gap:5px}.fluid-mini-controls>.fluid-volume,.fluid-mini-controls>.fluid-mini-volume{width:auto;min-width:150px;margin:0}.fluid-mini-controls .fluid-volume-compact .fluid-range,.fluid-mini-controls .fluid-mini-volume .fluid-range{width:auto;flex:1;min-width:70px}.fluid-mini-controls>.fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:4px;margin:0}.fluid-mini-controls>.fluid-mini-links button{padding-inline:7px}.fluid-mini-art{border-radius:50%}.fluid-mini-links{justify-content:center}.fluid-youtube-player{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 40px;gap:6px;height:100%;padding:6px 8px;overflow:hidden}.fluid-youtube-frame-wrap{min-width:0;min-height:0;height:100%;overflow:hidden;display:grid;place-items:stretch}.fluid-youtube-frame{display:block;width:100%;height:100%;min-height:0;border:1px solid var(--fm-line);border-radius:5px;background:var(--ui-bg-secondary)}.fluid-youtube-frame-loading{display:grid;place-content:center;text-align:center;color:var(--ui-text-secondary);font-size:12px}.fluid-youtube-side{min-width:0;min-height:0;overflow:hidden;padding:3px 2px}.fluid-youtube-summary{margin:0}.fluid-youtube-summary .fluid-mini-title,.fluid-youtube-summary .fluid-mini-subtitle{text-align:left}.fluid-youtube-summary .fluid-mini-title{font-size:14px;line-height:1.18;margin-top:5px}.fluid-youtube-summary .fluid-mini-subtitle{font-size:10px;line-height:1.35;margin:5px 0 0}.fluid-youtube-side .fluid-notice{margin:8px 0 0;padding:7px 8px;font-size:10px}.fluid-youtube-controls{grid-column:1/-1;display:grid;grid-template-columns:1fr minmax(110px,.7fr) 1fr;align-items:center;gap:10px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-youtube-controls .fluid-player-controls{justify-self:start;gap:6px}.fluid-mini-volume{display:flex;align-items:center;gap:7px;min-width:0}.fluid-youtube-controls .fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:5px;margin:0}
+@container mini (max-width:360px){.fluid-mini-controls{grid-template-columns:auto 1fr;grid-template-areas:"controls links" "volume volume"}.fluid-mini-controls>.fluid-player-controls{grid-area:controls}.fluid-mini-controls>.fluid-volume{grid-area:volume;width:100%;min-width:0}.fluid-mini-controls>.fluid-mini-links{grid-area:links}.fluid-mini-controls .fluid-mini-links button{padding-inline:7px}}
+@container mini (max-width:280px){.fluid-mini-controls .fluid-volume-value{display:none}.fluid-mini-controls>.fluid-mini-links button{padding-inline:6px}}
 @container fluid (max-width:980px){.fluid-now-band{grid-template-columns:96px minmax(0,1fr)}.fluid-up-next{grid-column:1/-1;border-left:0;border-top:1px solid var(--fm-line);padding:8px 0}.fluid-orbit{width:96px;min-width:96px}}
 @container fluid (max-width:720px){.fluid-topbar{gap:10px;padding:0 8px}.fluid-wordmark span{display:none}.fluid-primary-nav{flex:1;justify-content:space-between}.fluid-primary-nav .fluid-nav-button{padding:5px 7px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);gap:12px;min-height:0}.fluid-orbit{width:72px;min-width:72px;padding:6px}.fluid-now-title{font-size:22px}.fluid-content{padding:12px 10px 24px}.fluid-page-head{margin-top:12px}.fluid-track-row{grid-template-columns:20px 36px minmax(0,1fr);}.fluid-track-row>.fluid-row-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.fluid-track-row>.fluid-source-tag,.fluid-track-row>.fluid-track-duration{display:none}}
 @container fluid (max-width:460px){.fluid-topbar{height:auto;min-height:42px}.fluid-primary-nav .fluid-nav-button{font-size:11px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);padding-top:10px}.fluid-orbit{width:72px;min-width:72px}.fluid-up-next{grid-column:1/-1}.fluid-now-main .fluid-volume{width:100%}.fluid-page-title{font-size:20px}.fluid-log-row{grid-template-columns:1fr}.fluid-log-row pre{grid-column:1}.fluid-titlebar-source{display:none}}
@@ -546,6 +546,9 @@ function createController(ctx, hostCapabilities = {}) {
   const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
   let youtubeEngine = 'embed'
   let watchAttempts = 0
+  // The active YouTube surface registers its real command channel here; the
+  // shared transport drives it instead of provider-specific copies.
+  let youtubeCommandSink = null
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
   const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
@@ -1178,7 +1181,7 @@ function createController(ctx, hostCapabilities = {}) {
       youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
-      message.set('YouTube transport is in the FluidMusic player pane.')
+      message.set('YouTube is loading in the FluidMusic player pane.')
       youtubeHistoryRecorded = false
       return
     }
@@ -1243,8 +1246,9 @@ function createController(ctx, hostCapabilities = {}) {
         return
       }
       if (item.source === 'youtube') {
-        message.set('YouTube transport is in the FluidMusic player pane.')
-        if (token === transition) status.set('paused')
+        const playing = Boolean(youtube.get().playing)
+        const sent = youtubeCommandSink ? youtubeCommandSink(playing ? 'pauseVideo' : 'playVideo', []) : false
+        if (!sent && token === transition) message.set('The YouTube player is not ready yet. Open the player pane or retry.')
         return
       }
       const pause = status.get() === 'playing'
@@ -1302,6 +1306,12 @@ function createController(ctx, hostCapabilities = {}) {
     if (item?.source === 'local' && audioSource === 'local' && audio) {
       audio.currentTime = target / 1000
       progress.set({ positionMs: target, durationMs })
+      return
+    }
+    if (item?.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('seekTo', [Math.round(target / 1000)]) : false
+      if (sent) progress.set({ positionMs: target, durationMs })
+      else message.set('The YouTube player is not ready yet. Open the player pane or retry.')
       return
     }
     if (item?.source === 'spotify') {
@@ -1429,6 +1439,7 @@ function createController(ctx, hostCapabilities = {}) {
         void spotifyRequest('/volume', { method: 'PUT', body }).catch(error => { if (version === volumeVersion) message.set(error?.message || 'Spotify volume could not be changed.') })
       }, 180)
     }
+    if (current()?.source === 'youtube' && youtubeCommandSink) youtubeCommandSink('setVolume', [Math.round(next * 100)])
 
     persist()
   }
@@ -1769,6 +1780,10 @@ function createController(ctx, hostCapabilities = {}) {
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
 
+  function setYouTubeCommandSink(sink) {
+    youtubeCommandSink = typeof sink === 'function' ? sink : null
+  }
+
   function reportYouTubeState(state) {
     // Embed bridge adapter: surface relay reports bind to the exact selected
     // occurrence and the current transition generation; stale or foreign
@@ -2015,7 +2030,7 @@ function createController(ctx, hostCapabilities = {}) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
@@ -4188,20 +4203,16 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
     : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
 }
 
-function MiniControlBar({ controller, playing, onToggle, onVolumeChange, disabled = false }) {
-  const volume = useValue(controller.volume)
-  const changeVolume = event => {
-    const next = clampVolume(event.target.value)
-    controller.setVolume(next)
-    onVolumeChange?.(next)
-  }
+function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
+  // One shared control vocabulary for every provider: the same Transport
+  // actions and the same VolumeControl as the main bottom anchor.
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
     h('div', { className: 'fluid-player-controls' },
       h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
       h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
       h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
     ),
-    h('label', { className: 'fluid-mini-volume' }, h(Icon, { kind: volume === 0 ? 'mute' : 'volume' }), h('input', { className: 'fluid-range', type: 'range', min: 0, max: 1, step: .01, value: volume, onChange: changeVolume, 'aria-label': 'Volume' })),
+    h(VolumeControl, { controller, compact: true }),
     h('div', { className: 'fluid-mini-links' },
       h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Queue'),
       h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
@@ -4246,15 +4257,15 @@ function YouTubeTransport({ controller, frameRef, item }) {
       controller.reportYouTubeState({ ...parsed, engine: 'embed' })
     }
     window.addEventListener('message', receive)
+    controller.setYouTubeCommandSink(send)
     const handshake = setInterval(() => {
       const frame = frameRef.current
       const origin = embedFrameOrigin(frame?.src)
       if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
     }, 500)
-    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake) }
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake); controller.setYouTubeCommandSink(null) }
   }, [videoId, frameRef])
-  const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
-  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: () => void controller.toggle() })
 }
 
 function OwnedWatchSurface({ controller, item, capability, controlRef }) {
@@ -4262,13 +4273,22 @@ function OwnedWatchSurface({ controller, item, capability, controlRef }) {
   // youTubeWatchCapability). The host owns the persistent isolated session,
   // genuine provider login and the control bridge; the plugin never injects
   // scripts into an opaque origin and never borrows the app preview partition.
-  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null }, [])
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null; controller.setYouTubeCommandSink(null) }, [])
+  const attachControl = handle => {
+    controlRef.current = handle
+    controller.setYouTubeCommandSink(handle ? (func, args = []) => {
+      if (func === 'playVideo') { handle.play?.(); return true }
+      if (func === 'pauseVideo') { handle.pause?.(); return true }
+      if (func === 'setVolume') { handle.setVolume?.((Number(args[0]) || 0) / 100); return true }
+      return false
+    } : null)
+  }
   const View = capability?.OwnedMediaView
   if (typeof View !== 'function') {
     return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
   }
   return h(View, {
-    ref: controlRef,
+    ref: attachControl,
     src: item.url,
     sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
     title: item.title || 'YouTube video',
@@ -4305,7 +4325,7 @@ function MiniPlayer({ controller }) {
       youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       watching
-        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => { const handle = watchControlRef.current; if (handle) (youtubeState.playing ? handle.pause() : handle.play()) }, onVolumeChange: next => watchControlRef.current?.setVolume(next) })
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => void controller.toggle() })
         : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),

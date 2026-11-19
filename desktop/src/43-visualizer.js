@@ -39,20 +39,16 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
     : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
 }
 
-function MiniControlBar({ controller, playing, onToggle, onVolumeChange, disabled = false }) {
-  const volume = useValue(controller.volume)
-  const changeVolume = event => {
-    const next = clampVolume(event.target.value)
-    controller.setVolume(next)
-    onVolumeChange?.(next)
-  }
+function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
+  // One shared control vocabulary for every provider: the same Transport
+  // actions and the same VolumeControl as the main bottom anchor.
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
     h('div', { className: 'fluid-player-controls' },
       h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
       h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
       h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
     ),
-    h('label', { className: 'fluid-mini-volume' }, h(Icon, { kind: volume === 0 ? 'mute' : 'volume' }), h('input', { className: 'fluid-range', type: 'range', min: 0, max: 1, step: .01, value: volume, onChange: changeVolume, 'aria-label': 'Volume' })),
+    h(VolumeControl, { controller, compact: true }),
     h('div', { className: 'fluid-mini-links' },
       h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Queue'),
       h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
@@ -97,15 +93,15 @@ function YouTubeTransport({ controller, frameRef, item }) {
       controller.reportYouTubeState({ ...parsed, engine: 'embed' })
     }
     window.addEventListener('message', receive)
+    controller.setYouTubeCommandSink(send)
     const handshake = setInterval(() => {
       const frame = frameRef.current
       const origin = embedFrameOrigin(frame?.src)
       if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
     }, 500)
-    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake) }
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake); controller.setYouTubeCommandSink(null) }
   }, [videoId, frameRef])
-  const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
-  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: () => void controller.toggle() })
 }
 
 function OwnedWatchSurface({ controller, item, capability, controlRef }) {
@@ -113,13 +109,22 @@ function OwnedWatchSurface({ controller, item, capability, controlRef }) {
   // youTubeWatchCapability). The host owns the persistent isolated session,
   // genuine provider login and the control bridge; the plugin never injects
   // scripts into an opaque origin and never borrows the app preview partition.
-  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null }, [])
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null; controller.setYouTubeCommandSink(null) }, [])
+  const attachControl = handle => {
+    controlRef.current = handle
+    controller.setYouTubeCommandSink(handle ? (func, args = []) => {
+      if (func === 'playVideo') { handle.play?.(); return true }
+      if (func === 'pauseVideo') { handle.pause?.(); return true }
+      if (func === 'setVolume') { handle.setVolume?.((Number(args[0]) || 0) / 100); return true }
+      return false
+    } : null)
+  }
   const View = capability?.OwnedMediaView
   if (typeof View !== 'function') {
     return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
   }
   return h(View, {
-    ref: controlRef,
+    ref: attachControl,
     src: item.url,
     sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
     title: item.title || 'YouTube video',
@@ -156,7 +161,7 @@ function MiniPlayer({ controller }) {
       youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       watching
-        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => { const handle = watchControlRef.current; if (handle) (youtubeState.playing ? handle.pause() : handle.play()) }, onVolumeChange: next => watchControlRef.current?.setVolume(next) })
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => void controller.toggle() })
         : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
