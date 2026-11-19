@@ -487,6 +487,33 @@ def test_router_level_radio_search_uses_fixed_directory_and_filters_unsafe_strea
     assert calls[0][1]["follow_redirects"] is False
 
 
+def test_router_level_radio_click_validates_uuid_and_never_proxies_the_stream(api: Any, monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_get(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append((url, kwargs))
+        return FakeResponse({"url": "https://untrusted.example/redirected.mp3"})
+
+    monkeypatch.setattr(api.httpx, "get", fake_get)
+    bad = run(request(app_for(api), "POST", "/radio/click/not-a-uuid"))
+    assert bad.json() == {"ok": False, "error": "stationuuid must be a UUID"}
+    assert calls == [], "an invalid id never reaches the directory"
+    good = run(request(app_for(api), "POST", "/radio/click/B30B1E1E-6E7E-4A4E-9876-A5BB13BE0C60"))
+    assert good.json() == {"ok": True, "data": {"stationuuid": "b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60", "clicked": True}}
+    assert calls[0][0] == f"{api.RADIO_BROWSER_CLICK_BASE_URL}/b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60"
+    assert calls[0][1]["follow_redirects"] is False, "the 302 stream destination is untrusted and never followed/proxied"
+    assert "url" not in good.json()["data"], "the response never leaks the untrusted stream destination"
+
+
+def test_router_level_radio_click_reports_directory_failure_sanitized(api: Any, monkeypatch: pytest.MonkeyPatch):
+    def fake_get(url: str, **kwargs: Any) -> FakeResponse:
+        raise httpx.HTTPError("connection reset")
+
+    monkeypatch.setattr(api.httpx, "get", fake_get)
+    response = run(request(app_for(api), "POST", "/radio/click/b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60"))
+    assert response.json() == {"ok": False, "error": "Radio Browser click registration failed"}
+
+
 def test_local_library_persists_roots_tracks_and_identity_across_moves(api: Any, tmp_path: Path):
     music = tmp_path / "Music"
     album = music / "Artist" / "Album"

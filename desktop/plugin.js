@@ -834,6 +834,14 @@ function createController(ctx, hostCapabilities = {}) {
     if (!item || item.source !== 'radio' || disposed || token !== transition) return
     const generation = radioGeneration
     let historyRecorded = false
+    // Radio Browser directory etiquette: register one click per play attempt
+    // for directory stations (canonical UUID ids). Presets and custom streams
+    // are not directory entries. Fire-and-forget and failure-tolerant: this
+    // never gates playback and never proxies the stream itself.
+    const stationId = safeText(item.id)
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stationId)) {
+      void ctx.rest(`/radio/click/${encodeURIComponent(stationId)}`, { method: 'POST' }).catch(() => {})
+    }
     const element = new Audio()
     audio = element
     audioSource = 'radio'
@@ -842,11 +850,22 @@ function createController(ctx, hostCapabilities = {}) {
     progress.set({ positionMs: 0, durationMs: 0 })
     status.set('loading')
     const isCurrent = () => !disposed && generation === radioGeneration && element === audio
-    const finishFailure = () => {
+    const finishFailure = (detail = '') => {
       if (!isCurrent()) return
 
       status.set('error')
-      message.set('This HTTPS radio stream could not connect. Choose another station or retry.')
+      message.set(detail || 'This HTTPS radio stream could not connect. Choose another station or retry.')
+    }
+    // Report the REAL failure boundary from the media element instead of one
+    // generic notice: network reachability, decode/codec support, and
+    // unsupported format-or-origin (the honest codec/CORS boundary) differ.
+    const reportMediaError = () => {
+      const code = Number(element.error?.code) || 0
+      const detail = code === 2 ? 'The radio stream could not be reached (network boundary). Check the connection, then retry or choose another station.'
+        : code === 3 ? 'This radio stream could not be decoded here (codec boundary). Try another station or format.'
+        : code === 4 ? 'This stream is not playable here — its format or origin is unsupported (codec/CORS boundary). Try another station.'
+        : ''
+      finishFailure(detail)
     }
     radioTimeout = setTimeout(finishFailure, 15000)
     element.addEventListener('playing', () => {
@@ -858,8 +877,8 @@ function createController(ctx, hostCapabilities = {}) {
       if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('pause', () => { if (isCurrent() && !element.ended && status.get() === 'playing') status.set('paused') })
-    element.addEventListener('error', finishFailure)
-    element.addEventListener('ended', finishFailure)
+    element.addEventListener('error', reportMediaError)
+    element.addEventListener('ended', () => finishFailure('The live stream ended unexpectedly. Retry to reconnect.'))
     element.src = item.streamUrl
     try {
       await element.play()
