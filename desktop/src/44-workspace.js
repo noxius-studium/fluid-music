@@ -48,14 +48,13 @@ function YouTubeControls({ controller, compact = false }) {
 
 function HistoryPage({ controller }) {
   const entries = useValue(controller.history)
-  const [busy, setBusy] = useState(false)
+  const total = useValue(controller.historyTotal)
+  const [confirmClear, setConfirmClear] = useState(false)
   useEffect(() => { void controller.refreshHistory().catch(() => {}) }, [controller])
-  const clear = async () => {
-    setBusy(true)
-    try { await controller.clearHistory() } finally { setBusy(false) }
-  }
   return h('section', {},
-    h('div', { className: 'fluid-compact-toolbar' }, h('p', { className: 'fluid-muted' }, `${entries.length} recent play${entries.length === 1 ? '' : 's'}`), h(WorkspaceButton, { disabled: busy || !entries.length, onClick: clear }, busy ? 'Clearing…' : 'Clear history')),
+    h('div', { className: 'fluid-compact-toolbar' },
+      h('p', { className: 'fluid-muted' }, `${entries.length}${total > entries.length ? ` of ${total}` : ''} recent play${entries.length === 1 ? '' : 's'}`),
+      h(WorkspaceButton, { disabled: !entries.length, onClick: () => setConfirmClear(true) }, 'Clear history')),
     entries.length ? h('div', { className: 'fluid-track-list' }, entries.map((entry, at) => h(TrackRow, {
       controller,
       item: entry.item,
@@ -65,6 +64,11 @@ function HistoryPage({ controller }) {
       onPlay: () => controller.add(entry.item, true),
       extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
     }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
+    confirmClear && h(Confirm, {
+      title: 'Clear history',
+      action: () => controller.clearHistory(),
+      onClose: () => setConfirmClear(false),
+    }, `This removes ${entries.length} recorded play${entries.length === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
   )
 }
 

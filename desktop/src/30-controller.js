@@ -37,6 +37,7 @@ function createController(ctx) {
   const sessionTracks = atom([])
   const localRoots = atom([])
   const history = atom([])
+  const historyTotal = atom(0)
   const shuffle = atom(false)
   const repeat = atom('off')
   const spotifyAutoplay = atom(Boolean(ctx.storage.get('spotifyAutoplay', false)))
@@ -60,6 +61,7 @@ function createController(ctx) {
   let spotifyProgressAnchor = null
   let spotifyQueueGuard = null
   let youtubeQueueGuard = null
+  let youtubeHistoryRecorded = false
   let transition = 0
   let transitionChain = Promise.resolve()
   let lastHistory = { key: '', at: 0 }
@@ -165,11 +167,13 @@ function createController(ctx) {
       return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
     }).filter(Boolean)
     history.set(entries)
+    historyTotal.set(Math.max(0, Number(data?.total) || 0))
     return entries
   }
   const clearHistory = async () => {
     await request('/history', { method: 'DELETE' })
     history.set([])
+    historyTotal.set(0)
   }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
@@ -623,7 +627,7 @@ function createController(ctx) {
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
       message.set('YouTube transport is in the FluidMusic player pane.')
-      recordHistory(item)
+      youtubeHistoryRecorded = false
       return
     }
     if (item.source === 'spotify') {
@@ -771,7 +775,13 @@ function createController(ctx) {
   }
 
   function add(item, play = false) {
-    const normalized = normalizeQueueItem(item)
+    let normalized = normalizeQueueItem(item)
+    if (normalized?.source === 'local' && normalized.localTrackId && !normalized.objectUrl) {
+      // Durable history/queue references carry only the library ID; replay
+      // revalidates availability against the CURRENT indexed library.
+      const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+      if (linked) normalized = normalizeQueueItem({ ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs, unavailable: linked.unavailable })
+    }
     if (!normalized) {
       message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.')
       return false
@@ -1226,6 +1236,10 @@ function createController(ctx) {
     youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
     progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
     status.set(state.playing ? 'playing' : 'paused')
+    if (state.playing && !youtubeHistoryRecorded) {
+      youtubeHistoryRecorded = true
+      recordHistory(item)
+    }
     if (state.ended) requestYouTubeQueueAdvance()
     return true
   }
@@ -1367,7 +1381,7 @@ function createController(ctx) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, shuffle, repeat, spotifyAutoplay, youtube,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,

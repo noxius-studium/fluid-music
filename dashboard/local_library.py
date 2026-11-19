@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 
@@ -153,7 +154,24 @@ class LocalLibrary:
             raise ValueError("history item is missing a valid identity or title")
         subtitle = str(value.get("subtitle") or "").strip()[:300]
         artwork = str(value.get("artwork") or "").strip()[:2_048]
+        if not artwork.startswith("https://"):
+            artwork = ""
         payload = dict(value)
+        # History is durable profile-local metadata: never persist private
+        # filesystem references, session handles, credentials or capability URLs.
+        for field in ("objectUrl", "filePath", "playbackUrls", "path", "localPath"):
+            payload.pop(field, None)
+        for key in list(payload):
+            if any(marker in key.lower() for marker in ("token", "secret", "credential", "capability", "password")):
+                payload.pop(key)
+        if source == "youtube":
+            parsed = urlparse(str(payload.get("url") or ""))
+            if parsed.scheme != "https" or parsed.username or parsed.password or parsed.hostname not in {"www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"}:
+                raise ValueError("history item has an unsafe YouTube reference")
+        if source == "radio":
+            parsed = urlparse(str(payload.get("streamUrl") or ""))
+            if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
+                raise ValueError("history item has an unsafe radio reference")
         payload["id"] = media_key
         payload["source"] = source
         payload["title"] = title

@@ -74,7 +74,7 @@ test('adding a YouTube result to Up Next is selection, not confirmed playback or
   } finally { harness.restore() }
 })
 
-test('playing a YouTube result carries the real title to the shared player and history safely', async () => {
+test('playing a YouTube result carries the real title to the shared player; history records on confirmed playback', async () => {
   const harness = makeController()
   try {
     const c = harness.controller
@@ -84,12 +84,15 @@ test('playing a YouTube result carries the real title to the shared player and h
     assert.equal(c.current().title, 'Night set — live')
     assert.equal(c.youtube.get().title, 'Night set — live')
     assert.equal(c.youtube.get().subtitle, 'Night Channel')
+    assert.equal(harness.calls.filter(call => call.path === '/history' && call.method === 'POST').length, 0, 'selection alone is not a played event (FM-06)')
+    c.reportYouTubeState({ kind: 'state', videoId: 'abcdefghijk', playerState: 1, playing: true, ended: false, positionMs: 1000, durationMs: 3600000 })
+    await harness.flush()
     const posts = harness.calls.filter(call => call.path === '/history' && call.method === 'POST')
-    assert.equal(posts.length, 1, 'exactly one played event')
+    assert.equal(posts.length, 1, 'exactly one played event on confirmed playback')
     assert.equal(posts[0].body.item.title, 'Night set — live')
     assert.equal(posts[0].body.item.id, 'youtube:abcdefghijk')
     assert.ok(!JSON.stringify(posts[0].body).includes('127.0.0.1'), 'no capability URL in history')
-    assert.equal(c.status.get(), 'paused', 'embed owns actual playback; no fake playing claim')
+    assert.equal(c.status.get(), 'playing', 'confirmed embed playback is reflected honestly')
   } finally { harness.restore() }
 })
 
