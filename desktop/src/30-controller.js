@@ -1243,8 +1243,10 @@ function createController(ctx, hostCapabilities = {}) {
     if (!stale.length) return
     let changed = false
     for (const item of stale) {
+      if (disposed) return
       try {
         const data = await request('/youtube/resolve', { method: 'POST', body: { url: item.url } })
+        if (disposed) return
         const resolved = normalizeQueueItem(data?.item)
         if (!resolved) continue
         queue.set(queue.get().map(value => value.id === item.id ? resolved : value))
@@ -1252,7 +1254,7 @@ function createController(ctx, hostCapabilities = {}) {
         changed = true
       } catch { /* Old queue labels remain usable when metadata is temporarily unavailable. */ }
     }
-    if (changed) persist()
+    if (changed && !disposed) persist()
   }
 
   const spotifyTrack = track => normalizeQueueItem({
@@ -1261,7 +1263,7 @@ function createController(ctx, hostCapabilities = {}) {
   })
 
   function setYouTubeCommandSink(sink) {
-    youtubeCommandSink = typeof sink === 'function' ? sink : null
+    youtubeCommandSink = !disposed && typeof sink === 'function' ? sink : null
   }
 
   function reportYouTubeState(state) {
@@ -1502,6 +1504,7 @@ function createController(ctx, hostCapabilities = {}) {
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
+    youtubeCommandSink = null
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
 
   })
