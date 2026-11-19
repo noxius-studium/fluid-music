@@ -1,8 +1,11 @@
 function youtubeEmbedUrl(item) {
   const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
-  return /^[A-Za-z0-9_-]{11}$/.test(videoId)
-    ? `https://www.youtube-nocookie.com/embed/${videoId}?controls=1&enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fwww.youtube.com`
-    : ''
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return ''
+  const params = new URLSearchParams({ controls: '1', enablejsapi: '1', playsinline: '1', rel: '0' })
+  // The origin parameter must describe the ACTUAL embedding page, never a
+  // guessed foreign origin; opaque origins omit it rather than lie.
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) && location.origin && location.origin !== 'null') params.set('origin', location.origin)
+  return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`
 }
 
 function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
@@ -36,7 +39,7 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
     : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
 }
 
-function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
+function MiniControlBar({ controller, playing, onToggle, onVolumeChange, disabled = false }) {
   const volume = useValue(controller.volume)
   const changeVolume = event => {
     const next = clampVolume(event.target.value)
@@ -46,7 +49,7 @@ function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
     h('div', { className: 'fluid-player-controls' },
       h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
-      h(WorkspaceButton, { primary: true, onClick: onToggle, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
+      h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
       h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
     ),
     h('label', { className: 'fluid-mini-volume' }, h(Icon, { kind: volume === 0 ? 'mute' : 'volume' }), h('input', { className: 'fluid-range', type: 'range', min: 0, max: 1, step: .01, value: volume, onChange: changeVolume, 'aria-label': 'Volume' })),
@@ -59,28 +62,50 @@ function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
 
 function YouTubeTransport({ controller, frameRef, item }) {
   const [playing, setPlaying] = useState(false)
+  const [ready, setReady] = useState(false)
+  const readyRef = useRef(false)
+  const videoId = safeText(item?.id).replace(/^youtube:/, '')
+  // Commands are bound to actual player readiness and the frame's real origin;
+  // an issued message is an acknowledgement request, not proof of playback.
   const send = (func, args = []) => {
-    frameRef.current?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func, args: args.length ? args : '', id: 'fluid-music', channel: 'fluid-music' }), '*')
+    const frame = frameRef.current
+    const origin = embedFrameOrigin(frame?.src)
+    const message = youTubeCommandMessage(func, args)
+    if (!readyRef.current || !frame?.contentWindow || !origin || !message) return false
+    frame.contentWindow.postMessage(message, origin)
+    return true
   }
   useEffect(() => {
     setPlaying(false)
+    setReady(false)
+    readyRef.current = false
+    let live = true
     const receive = event => {
-      if (event.source !== frameRef.current?.contentWindow) return
-      let data = event.data
-      try { if (typeof data === 'string') data = JSON.parse(data) } catch { return }
-      const state = Number(data?.info?.playerState)
-      if (state === 1) setPlaying(true)
-      if ([0, 2, 5].includes(state)) setPlaying(false)
+      const frame = frameRef.current
+      if (!live || !frame || event.source !== frame.contentWindow) return
+      const origin = embedFrameOrigin(frame.src)
+      if (!origin || event.origin !== origin) return
+      const parsed = parseYouTubePlayerMessage(event.data, videoId)
+      if (!parsed) return
+      if (parsed.kind === 'ready') {
+        readyRef.current = true
+        setReady(true)
+        send('setVolume', [Math.round(clampVolume(controller.volume.get()) * 100)])
+        return
+      }
+      setPlaying(parsed.playing)
+      controller.reportYouTubeState(parsed)
     }
     window.addEventListener('message', receive)
-    const listening = setInterval(() => frameRef.current?.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' }), '*'), 500)
-    return () => { window.removeEventListener('message', receive); clearInterval(listening) }
-  }, [item?.id, frameRef])
-  const toggle = () => {
-    send(playing ? 'pauseVideo' : 'playVideo')
-    setTimeout(() => send(playing ? 'pauseVideo' : 'playVideo'), 250)
-  }
-  return h(MiniControlBar, { controller, playing, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+    const handshake = setInterval(() => {
+      const frame = frameRef.current
+      const origin = embedFrameOrigin(frame?.src)
+      if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
+    }, 500)
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake) }
+  }, [videoId, frameRef])
+  const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
 }
 
 function MiniPlayer({ controller }) {

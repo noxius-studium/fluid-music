@@ -291,6 +291,46 @@ function normalizeSpotifyDevices(value) {
 }
 
 
+const YOUTUBE_COMMAND_FUNCS = ['playVideo', 'pauseVideo', 'seekTo', 'setVolume', 'mute', 'unMute', 'stopVideo']
+function youTubeCommandMessage(func, args = []) {
+  if (!YOUTUBE_COMMAND_FUNCS.includes(func)) return null
+  return JSON.stringify({ event: 'command', func, args: Array.isArray(args) ? args : [], id: 'fluid-music', channel: 'fluid-music' })
+}
+function youTubeListeningMessage() {
+  return JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' })
+}
+function embedFrameOrigin(src) {
+  try {
+    const url = new URL(safeText(src))
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : ''
+  } catch {
+    return ''
+  }
+}
+function parseYouTubePlayerMessage(value, expectedVideoId = '') {
+  let data = value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { return null }
+  }
+  if (!data || typeof data !== 'object') return null
+  const info = data.info && typeof data.info === 'object' ? data.info : null
+  if (data.event === 'onReady') return { kind: 'ready', videoId: safeText(info?.videoData?.video_id) }
+  if (data.event !== 'infoDelivery' || !info) return null
+  const videoId = safeText(info.videoData?.video_id)
+  if (expectedVideoId && videoId && videoId !== expectedVideoId) return null
+  const playerState = Number(info.playerState)
+  if (!Number.isInteger(playerState) || playerState < -1 || playerState > 5) return null
+  return {
+    kind: 'state',
+    videoId,
+    playerState,
+    playing: playerState === 1,
+    ended: playerState === 0,
+    positionMs: Math.max(0, Number(info.currentTime) || 0) * 1000,
+    durationMs: Math.max(0, Number(info.duration) || 0) * 1000
+  }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },
@@ -991,7 +1031,7 @@ function createController(ctx) {
       youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
-      message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+      message.set('YouTube transport is in the FluidMusic player pane.')
       recordHistory(item)
       return
     }
@@ -1056,7 +1096,7 @@ function createController(ctx) {
         return
       }
       if (item.source === 'youtube') {
-        message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+        message.set('YouTube transport is in the FluidMusic player pane.')
         if (token === transition) status.set('paused')
         return
       }
@@ -1576,6 +1616,29 @@ function createController(ctx) {
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
 
+  function reportYouTubeState(state) {
+    // Embed bridge adapter: surface relay reports bind to the exact selected
+    // occurrence and the current transition generation; stale or foreign
+    // reports are ignored, and completion advances the queue exactly once.
+    if (!state || typeof state !== 'object' || disposed) return false
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
+    if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.kind === 'ready') {
+      youtube.set({ ...youtube.get(), status: 'ready', error: '' })
+      return true
+    }
+    if (state.kind !== 'state') return false
+    const guard = youtubeQueueGuard
+    if (guard && guard.token !== transition) return false
+    youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
+    progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    status.set(state.playing ? 'playing' : 'paused')
+    if (state.ended) requestYouTubeQueueAdvance()
+    return true
+  }
+
   async function searchSpotify(query) {
     const data = await spotifyRequest(`/search?q=${encodeURIComponent(query)}&type=track&limit=10&offset=0`)
     const tracks = data?.tracks?.items || []
@@ -1715,7 +1778,7 @@ function createController(ctx) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
@@ -3827,9 +3890,12 @@ function QueuePage({ controller }) {
 }
 function youtubeEmbedUrl(item) {
   const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
-  return /^[A-Za-z0-9_-]{11}$/.test(videoId)
-    ? `https://www.youtube-nocookie.com/embed/${videoId}?controls=1&enablejsapi=1&playsinline=1&rel=0&origin=https%3A%2F%2Fwww.youtube.com`
-    : ''
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return ''
+  const params = new URLSearchParams({ controls: '1', enablejsapi: '1', playsinline: '1', rel: '0' })
+  // The origin parameter must describe the ACTUAL embedding page, never a
+  // guessed foreign origin; opaque origins omit it rather than lie.
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) && location.origin && location.origin !== 'null') params.set('origin', location.origin)
+  return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`
 }
 
 function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
@@ -3863,7 +3929,7 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
     : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
 }
 
-function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
+function MiniControlBar({ controller, playing, onToggle, onVolumeChange, disabled = false }) {
   const volume = useValue(controller.volume)
   const changeVolume = event => {
     const next = clampVolume(event.target.value)
@@ -3873,7 +3939,7 @@ function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
     h('div', { className: 'fluid-player-controls' },
       h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
-      h(WorkspaceButton, { primary: true, onClick: onToggle, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
+      h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
       h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
     ),
     h('label', { className: 'fluid-mini-volume' }, h(Icon, { kind: volume === 0 ? 'mute' : 'volume' }), h('input', { className: 'fluid-range', type: 'range', min: 0, max: 1, step: .01, value: volume, onChange: changeVolume, 'aria-label': 'Volume' })),
@@ -3886,28 +3952,50 @@ function MiniControlBar({ controller, playing, onToggle, onVolumeChange }) {
 
 function YouTubeTransport({ controller, frameRef, item }) {
   const [playing, setPlaying] = useState(false)
+  const [ready, setReady] = useState(false)
+  const readyRef = useRef(false)
+  const videoId = safeText(item?.id).replace(/^youtube:/, '')
+  // Commands are bound to actual player readiness and the frame's real origin;
+  // an issued message is an acknowledgement request, not proof of playback.
   const send = (func, args = []) => {
-    frameRef.current?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func, args: args.length ? args : '', id: 'fluid-music', channel: 'fluid-music' }), '*')
+    const frame = frameRef.current
+    const origin = embedFrameOrigin(frame?.src)
+    const message = youTubeCommandMessage(func, args)
+    if (!readyRef.current || !frame?.contentWindow || !origin || !message) return false
+    frame.contentWindow.postMessage(message, origin)
+    return true
   }
   useEffect(() => {
     setPlaying(false)
+    setReady(false)
+    readyRef.current = false
+    let live = true
     const receive = event => {
-      if (event.source !== frameRef.current?.contentWindow) return
-      let data = event.data
-      try { if (typeof data === 'string') data = JSON.parse(data) } catch { return }
-      const state = Number(data?.info?.playerState)
-      if (state === 1) setPlaying(true)
-      if ([0, 2, 5].includes(state)) setPlaying(false)
+      const frame = frameRef.current
+      if (!live || !frame || event.source !== frame.contentWindow) return
+      const origin = embedFrameOrigin(frame.src)
+      if (!origin || event.origin !== origin) return
+      const parsed = parseYouTubePlayerMessage(event.data, videoId)
+      if (!parsed) return
+      if (parsed.kind === 'ready') {
+        readyRef.current = true
+        setReady(true)
+        send('setVolume', [Math.round(clampVolume(controller.volume.get()) * 100)])
+        return
+      }
+      setPlaying(parsed.playing)
+      controller.reportYouTubeState(parsed)
     }
     window.addEventListener('message', receive)
-    const listening = setInterval(() => frameRef.current?.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' }), '*'), 500)
-    return () => { window.removeEventListener('message', receive); clearInterval(listening) }
-  }, [item?.id, frameRef])
-  const toggle = () => {
-    send(playing ? 'pauseVideo' : 'playVideo')
-    setTimeout(() => send(playing ? 'pauseVideo' : 'playVideo'), 250)
-  }
-  return h(MiniControlBar, { controller, playing, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+    const handshake = setInterval(() => {
+      const frame = frameRef.current
+      const origin = embedFrameOrigin(frame?.src)
+      if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
+    }, 500)
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake) }
+  }, [videoId, frameRef])
+  const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
 }
 
 function MiniPlayer({ controller }) {

@@ -1062,7 +1062,7 @@ test('YouTube controller transport never mutates media, issues provider commands
     assert.equal(calls.filter(call => call.method !== 'GET').length, 0, 'embed media is never driven through provider REST commands')
     assert.equal(previewCalls.length, 0)
     assert.equal(harness.audio.elements.length, 0, 'no internal audio engine is created for YouTube')
-    assert.match(c.message.get(), /embedded YouTube controls/)
+    assert.match(c.message.get(), /YouTube transport is in the FluidMusic player pane/)
   } finally { harness.restore() }
 })
 

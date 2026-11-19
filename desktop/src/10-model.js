@@ -262,6 +262,46 @@ function normalizeSpotifyDevices(value) {
 }
 
 
+const YOUTUBE_COMMAND_FUNCS = ['playVideo', 'pauseVideo', 'seekTo', 'setVolume', 'mute', 'unMute', 'stopVideo']
+function youTubeCommandMessage(func, args = []) {
+  if (!YOUTUBE_COMMAND_FUNCS.includes(func)) return null
+  return JSON.stringify({ event: 'command', func, args: Array.isArray(args) ? args : [], id: 'fluid-music', channel: 'fluid-music' })
+}
+function youTubeListeningMessage() {
+  return JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' })
+}
+function embedFrameOrigin(src) {
+  try {
+    const url = new URL(safeText(src))
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : ''
+  } catch {
+    return ''
+  }
+}
+function parseYouTubePlayerMessage(value, expectedVideoId = '') {
+  let data = value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { return null }
+  }
+  if (!data || typeof data !== 'object') return null
+  const info = data.info && typeof data.info === 'object' ? data.info : null
+  if (data.event === 'onReady') return { kind: 'ready', videoId: safeText(info?.videoData?.video_id) }
+  if (data.event !== 'infoDelivery' || !info) return null
+  const videoId = safeText(info.videoData?.video_id)
+  if (expectedVideoId && videoId && videoId !== expectedVideoId) return null
+  const playerState = Number(info.playerState)
+  if (!Number.isInteger(playerState) || playerState < -1 || playerState > 5) return null
+  return {
+    kind: 'state',
+    videoId,
+    playerState,
+    playing: playerState === 1,
+    ended: playerState === 0,
+    positionMs: Math.max(0, Number(info.currentTime) || 0) * 1000,
+    durationMs: Math.max(0, Number(info.duration) || 0) * 1000
+  }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },

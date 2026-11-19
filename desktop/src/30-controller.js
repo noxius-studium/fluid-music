@@ -622,7 +622,7 @@ function createController(ctx) {
       youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
-      message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+      message.set('YouTube transport is in the FluidMusic player pane.')
       recordHistory(item)
       return
     }
@@ -687,7 +687,7 @@ function createController(ctx) {
         return
       }
       if (item.source === 'youtube') {
-        message.set('Use the embedded YouTube controls in the FluidMusic player pane.')
+        message.set('YouTube transport is in the FluidMusic player pane.')
         if (token === transition) status.set('paused')
         return
       }
@@ -1207,6 +1207,29 @@ function createController(ctx) {
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
 
+  function reportYouTubeState(state) {
+    // Embed bridge adapter: surface relay reports bind to the exact selected
+    // occurrence and the current transition generation; stale or foreign
+    // reports are ignored, and completion advances the queue exactly once.
+    if (!state || typeof state !== 'object' || disposed) return false
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
+    if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.kind === 'ready') {
+      youtube.set({ ...youtube.get(), status: 'ready', error: '' })
+      return true
+    }
+    if (state.kind !== 'state') return false
+    const guard = youtubeQueueGuard
+    if (guard && guard.token !== transition) return false
+    youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
+    progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    status.set(state.playing ? 'playing' : 'paused')
+    if (state.ended) requestYouTubeQueueAdvance()
+    return true
+  }
+
   async function searchSpotify(query) {
     const data = await spotifyRequest(`/search?q=${encodeURIComponent(query)}&type=track&limit=10&offset=0`)
     const tracks = data?.tracks?.items || []
@@ -1346,7 +1369,7 @@ function createController(ctx) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
