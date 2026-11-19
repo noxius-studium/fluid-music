@@ -27,6 +27,8 @@ function createController(ctx, hostCapabilities = {}) {
   const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'browse')))
   const selectedPlaylist = atom(safeText(ctx.storage.get('selectedPlaylist', '')))
   const undoState = atom(null)
+  const queueUndo = atom(null)
+  const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
@@ -574,10 +576,11 @@ function createController(ctx, hostCapabilities = {}) {
       supported.forEach(file => {
         const objectUrl = URL.createObjectURL(file)
         const item = normalizeQueueItem({ source: 'local', id: `session:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, title: file.name.replace(/\.[^.]+$/, ''), subtitle: 'Opened file · this session only', objectUrl, mimeType: file.type })
-        if (item) opened.push(item)
+        if (item) opened.push({ ...item, origin: 'session' })
         else URL.revokeObjectURL(objectUrl)
       })
     } catch (error) { opened.forEach(revokeLocal); throw new Error(userFacingError(error, 'Those files could not be opened.')) }
+    if (opened.length) rememberQueueEdit('Open files')
     const before = queue.get().length
     opened.forEach(item => localRegistry.set(item.id, item))
     sessionTracks.set([...sessionTracks.get(), ...opened])
@@ -816,7 +819,7 @@ function createController(ctx, hostCapabilities = {}) {
     repeat.set(state)
   }
 
-  function add(item, play = false) {
+  function add(item, play = false, origin = '') {
     let normalized = normalizeQueueItem(item)
     if (normalized?.source === 'local' && normalized.localTrackId && !normalized.objectUrl) {
       // Durable history/queue references carry only the library ID; replay
@@ -836,6 +839,8 @@ function createController(ctx, hostCapabilities = {}) {
       localRegistry.set(normalized.id, normalized)
       if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
     }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Add to queue')
     const next = [...queue.get(), normalized]
     queue.set(next)
     if (index.get() === -1) {
@@ -850,6 +855,7 @@ function createController(ctx, hostCapabilities = {}) {
   function remove(at) {
     const items = queue.get()
     if (!Number.isInteger(at) || at < 0 || at >= items.length) return Promise.resolve(false)
+    rememberQueueEdit('Remove from queue')
     if (at !== index.get()) {
       queue.set(items.filter((_, position) => position !== at))
       if (at < index.get()) index.set(index.get() - 1)
@@ -893,6 +899,7 @@ function createController(ctx, hostCapabilities = {}) {
     const items = [...queue.get()]
     const target = at + direction
     if (!Number.isInteger(at) || !Number.isInteger(direction) || at < 0 || at >= items.length || target < 0 || target >= items.length) return
+    rememberQueueEdit('Reorder queue')
     ;[items[at], items[target]] = [items[target], items[at]]
     const currentIndex = index.get()
     queue.set(items)
@@ -936,6 +943,7 @@ function createController(ctx, hostCapabilities = {}) {
   function clearQueue() {
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Clear queue')
       await stopActive(current())
       if (token !== transition) return false
       queue.set([])
@@ -1062,9 +1070,10 @@ function createController(ctx, hostCapabilities = {}) {
     const nextIndex = items.slice(0, startAt).filter(item => !item.unavailable).length
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Play collection')
       await stopActive(current())
       if (token !== transition) return false
-      queue.set(playable.map(item => ({ ...item })))
+      queue.set(playable.map(item => ({ ...item, origin: 'collection' })))
       index.set(nextIndex)
       persist()
       await startSelected(nextIndex, token)
@@ -1077,8 +1086,9 @@ function createController(ctx, hostCapabilities = {}) {
     const items = playlistItems(id)
     const playable = items.filter(item => !item.unavailable)
     if (!playable.length) { message.set('No playable tracks to add. Your queue has not changed.'); return 0 }
+    rememberQueueEdit('Add collection')
     const before = queue.get().length
-    queue.set([...queue.get(), ...playable.map(item => ({ ...item }))])
+    queue.set([...queue.get(), ...playable.map(item => ({ ...item, origin: 'collection' }))])
     if (index.get() < 0) { index.set(before); status.set('paused') }
     persist()
     message.set(`Added ${playable.length} item(s) to the queue.${items.length > playable.length ? ` Skipped ${items.length - playable.length} missing track(s).` : ''}`)
@@ -1508,11 +1518,204 @@ function createController(ctx, hostCapabilities = {}) {
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
 
   })
+
+  // ---- Queue editing, one-step undo and provenance (FM-20) ----
+  function rememberQueueEdit(label) {
+    queueUndo.set({ label, queue: queue.get().map(item => ({ ...item })), index: index.get() })
+  }
+
+  function addNext(item, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (!normalized) { message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.'); return false }
+    if (normalized.source === 'local' && normalized.unavailable) { message.set('That local track is unavailable. Rescan its music folder first.'); return false }
+    if (normalized.source === 'local') {
+      localRegistry.set(normalized.id, normalized)
+      if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
+    }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Play next')
+    const items = queue.get()
+    const at = index.get()
+    const insertAt = at >= 0 && at < items.length ? at + 1 : items.length
+    queue.set([...items.slice(0, insertAt), normalized, ...items.slice(insertAt)])
+    if (index.get() < 0) { index.set(insertAt); status.set('paused') }
+    persist()
+    message.set(`Added “${normalized.title}” to play next.`)
+    return true
+  }
+
+  function removeQueueItems(positions) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size) return false
+    rememberQueueEdit('Remove selected')
+    const at = index.get()
+    const previous = current()
+    const removingCurrent = set.has(at)
+    const nextItems = items.filter((_, p) => !set.has(p))
+    let nextIndex = -1
+    if (nextItems.length) {
+      if (!removingCurrent) {
+        nextIndex = at - [...set].filter(p => p < at).length
+      } else {
+        const after = items.findIndex((_, p) => p > at && !set.has(p))
+        const before = items.map((_, p) => p).filter(p => p < at && !set.has(p)).pop()
+        nextIndex = nextItems.indexOf(items[after >= 0 ? after : before])
+      }
+    }
+    const wasPlaying = ['playing', 'loading'].includes(status.get())
+    return runTransition(async token => {
+      if (token !== transition) return false
+      if (removingCurrent) await stopActive(previous)
+      if (token !== transition) return false
+      queue.set(nextItems)
+      index.set(nextIndex)
+      persist()
+      if (!nextItems.length) { status.set('idle'); message.set(''); return true }
+      if (removingCurrent) {
+        progress.set({ positionMs: 0, durationMs: 0 })
+        spotifyQueueGuard = null
+        spotifyProgressAnchor = null
+        if (wasPlaying) await startSelected(nextIndex, token)
+        else { status.set('paused'); message.set(`Removed ${set.size} item(s). Press play to resume.`) }
+      } else message.set(`Removed ${set.size} item(s) from the queue.`)
+      return true
+    })
+  }
+
+  function moveQueueItems(positions, direction) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size || (direction !== -1 && direction !== 1)) return false
+    if ((direction === -1 && Math.min(...set) === 0) || (direction === 1 && Math.max(...set) === items.length - 1)) return false
+    rememberQueueEdit('Move selected')
+    const next = [...items]
+    const order = [...set].sort((a, b) => direction === -1 ? a - b : b - a)
+    for (const p of order) { const t = p + direction; [next[p], next[t]] = [next[t], next[p]] }
+    const currentItem = items[index.get()]
+    const nextIndex = currentItem ? next.indexOf(currentItem) : index.get()
+    queue.set(next)
+    if (nextIndex >= 0) index.set(nextIndex)
+    persist()
+    return true
+  }
+
+  function clearUpcoming() {
+    const items = queue.get()
+    const at = index.get()
+    if (at < 0 || at >= items.length - 1) return false
+    rememberQueueEdit('Clear upcoming')
+    queue.set(items.slice(0, at + 1))
+    persist()
+    message.set('Cleared everything after the current item. The current item keeps playing.')
+    return true
+  }
+
+  function undoQueueEdit() {
+    const saved = queueUndo.get()
+    if (!saved) return false
+    queueUndo.set(null)
+    const previous = current()
+    const restored = saved.queue[saved.index] || null
+    queue.set(saved.queue)
+    index.set(saved.index)
+    persist()
+    const sameOccurrence = previous && restored && previous.id === restored.id && previous.source === restored.source
+    if (sameOccurrence) { message.set(`Undone: ${saved.label}.`); return true }
+    if (!previous) {
+      status.set(saved.queue.length ? 'paused' : 'idle')
+      message.set(`Undone: ${saved.label}.`)
+      return true
+    }
+    // The edit changed which occurrence is current: stop the engine the edit
+    // started and pause honestly. Undo never auto-resumes playback.
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(previous)
+      if (token === transition) { status.set(saved.queue.length ? 'paused' : 'idle'); message.set(`Undone: ${saved.label}. Press play to resume.`) }
+      return true
+    })
+  }
+
+  // ---- Resumable listening sessions (FM-20): safe-reference snapshots ----
+  const persistSessions = () => ctx.storage.set('listeningSessions', listeningSessions.get())
+
+  function saveListeningSession(name) {
+    const queued = queue.get()
+    // Session-only opened files have no durable reference: skip them honestly
+    // instead of persisting dead unavailable entries.
+    const durable = queued.filter(item => item && !(item.source === 'local' && !item.localTrackId))
+    const items = durable.map(serializePlaylistItem).filter(Boolean)
+    const skipped = queued.length - items.length
+    if (!items.length) { message.set('There are no durable items to save. Index session-only files first.'); return null }
+    const session = { id: makeId('session', Date.now().toString(36)), name: safeText(name, 'Listening session').slice(0, 120), createdAt: new Date().toISOString(), items }
+    listeningSessions.set([session, ...listeningSessions.get()].slice(0, 50))
+    persistSessions()
+    message.set(`Saved “${session.name}” (${items.length} item(s)${skipped ? `, ${skipped} session-only skipped` : ''}).`)
+    return session
+  }
+
+  function listeningSessionPreview(id) {
+    const session = listeningSessions.get().find(entry => entry.id === id)
+    if (!session) return null
+    const rows = session.items.map(reference => {
+      const normalized = normalizeQueueItem(reference)
+      if (!normalized) return { item: reference, available: false, reason: 'Unsupported reference' }
+      if (normalized.source === 'local') {
+        const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+        if (!linked || linked.unavailable) return { item: normalized, available: false, reason: 'Missing local file · rescan its folder' }
+        return { item: { ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs }, available: true }
+      }
+      return { item: normalized, available: true }
+    })
+    return { session, rows, unavailable: rows.filter(row => !row.available) }
+  }
+
+  function restoreListeningSession(id, mode) {
+    const preview = listeningSessionPreview(id)
+    if (!preview) return false
+    const playable = preview.rows.filter(row => row.available).map(row => row.item)
+    if (!playable.length) { message.set('Nothing in this session is currently available. Rescan local folders or reconnect providers, then try again.'); return false }
+    const skipped = preview.rows.length - playable.length
+    if (mode === 'append') {
+      rememberQueueEdit('Append session')
+      const before = queue.get().length
+      queue.set([...queue.get(), ...playable])
+      if (index.get() < 0) { index.set(before); status.set('paused') }
+      persist()
+      message.set(`Appended ${playable.length} item(s)${skipped ? `; ${skipped} unavailable skipped` : ''}. Press play to listen.`)
+      return true
+    }
+    rememberQueueEdit('Restore session')
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(current())
+      if (token !== transition) return false
+      queue.set(playable)
+      index.set(0)
+      status.set('paused')
+      persist()
+      message.set(`Restored “${preview.session.name}” (${playable.length} item(s)${skipped ? `, ${skipped} unavailable skipped` : ''}). Press play to listen.`)
+      return true
+    })
+  }
+
+  function deleteListeningSession(id) {
+    const before = listeningSessions.get()
+    const next = before.filter(entry => entry.id !== id)
+    if (next.length === before.length) return false
+    listeningSessions.set(next)
+    persistSessions()
+    return true
+  }
+
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
+    queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
+    listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,

@@ -273,6 +273,23 @@ function normalizePlaylistState(value) {
   }
 }
 
+const QUEUE_ORIGINS = { search: 'From search', history: 'From history', collection: 'From collection', provider: 'From provider', library: 'From local library', session: 'Opened this session' }
+function queueOriginLabel(origin) {
+  return QUEUE_ORIGINS[origin] || ''
+}
+function normalizeListeningSessions(value) {
+  // Listening sessions are durable snapshots of SAFE references only. Stored
+  // data is re-serialized on load so blob handles, raw paths or capability
+  // URLs can never survive into a restored session, and bounds are enforced.
+  const list = Array.isArray(value) ? value : []
+  return list.slice(0, 50).map(entry => {
+    if (!entry || typeof entry !== 'object') return null
+    const items = (Array.isArray(entry.items) ? entry.items : []).map(serializePlaylistItem).filter(item => item && !(item.source === 'local' && !item.localTrackId)).slice(0, 500)
+    if (!items.length) return null
+    return { id: safeText(entry.id, makeId('session', 'restored')), name: safeText(entry.name, 'Listening session').slice(0, 120), createdAt: safeText(entry.createdAt), items }
+  }).filter(Boolean)
+}
+
 function normalizeSpotifyAuth(value) {
   const root = value?.data || value || {}
   const data = root.auth || root.spotify || root
@@ -524,6 +541,11 @@ const CSS = `
 @container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
 @container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
 @container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
+.fluid-queue-origin{display:block;font-size:9px;color:var(--ui-text-tertiary);letter-spacing:.04em;margin-top:2px;text-transform:uppercase}
+.fluid-queue-row[data-selectable=true]{grid-template-columns:20px 40px minmax(0,1fr) auto}
+.fluid-queue-row input[type=checkbox]{accent-color:var(--ui-accent);width:16px;height:16px;margin:0}
+.fluid-session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center;min-width:0}
+@container fluid (max-width:580px){.fluid-queue-row[data-selectable=true]{grid-template-columns:18px 32px minmax(0,1fr)}.fluid-queue-row[data-selectable=true]>.fluid-row-actions{grid-column:3}.fluid-session-row{grid-template-columns:1fr}.fluid-session-row>.fluid-row-actions{justify-content:flex-start;flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-titlebar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `
 
@@ -583,6 +605,8 @@ function createController(ctx, hostCapabilities = {}) {
   const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'browse')))
   const selectedPlaylist = atom(safeText(ctx.storage.get('selectedPlaylist', '')))
   const undoState = atom(null)
+  const queueUndo = atom(null)
+  const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
@@ -1130,10 +1154,11 @@ function createController(ctx, hostCapabilities = {}) {
       supported.forEach(file => {
         const objectUrl = URL.createObjectURL(file)
         const item = normalizeQueueItem({ source: 'local', id: `session:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, title: file.name.replace(/\.[^.]+$/, ''), subtitle: 'Opened file · this session only', objectUrl, mimeType: file.type })
-        if (item) opened.push(item)
+        if (item) opened.push({ ...item, origin: 'session' })
         else URL.revokeObjectURL(objectUrl)
       })
     } catch (error) { opened.forEach(revokeLocal); throw new Error(userFacingError(error, 'Those files could not be opened.')) }
+    if (opened.length) rememberQueueEdit('Open files')
     const before = queue.get().length
     opened.forEach(item => localRegistry.set(item.id, item))
     sessionTracks.set([...sessionTracks.get(), ...opened])
@@ -1372,7 +1397,7 @@ function createController(ctx, hostCapabilities = {}) {
     repeat.set(state)
   }
 
-  function add(item, play = false) {
+  function add(item, play = false, origin = '') {
     let normalized = normalizeQueueItem(item)
     if (normalized?.source === 'local' && normalized.localTrackId && !normalized.objectUrl) {
       // Durable history/queue references carry only the library ID; replay
@@ -1392,6 +1417,8 @@ function createController(ctx, hostCapabilities = {}) {
       localRegistry.set(normalized.id, normalized)
       if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
     }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Add to queue')
     const next = [...queue.get(), normalized]
     queue.set(next)
     if (index.get() === -1) {
@@ -1406,6 +1433,7 @@ function createController(ctx, hostCapabilities = {}) {
   function remove(at) {
     const items = queue.get()
     if (!Number.isInteger(at) || at < 0 || at >= items.length) return Promise.resolve(false)
+    rememberQueueEdit('Remove from queue')
     if (at !== index.get()) {
       queue.set(items.filter((_, position) => position !== at))
       if (at < index.get()) index.set(index.get() - 1)
@@ -1449,6 +1477,7 @@ function createController(ctx, hostCapabilities = {}) {
     const items = [...queue.get()]
     const target = at + direction
     if (!Number.isInteger(at) || !Number.isInteger(direction) || at < 0 || at >= items.length || target < 0 || target >= items.length) return
+    rememberQueueEdit('Reorder queue')
     ;[items[at], items[target]] = [items[target], items[at]]
     const currentIndex = index.get()
     queue.set(items)
@@ -1492,6 +1521,7 @@ function createController(ctx, hostCapabilities = {}) {
   function clearQueue() {
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Clear queue')
       await stopActive(current())
       if (token !== transition) return false
       queue.set([])
@@ -1618,9 +1648,10 @@ function createController(ctx, hostCapabilities = {}) {
     const nextIndex = items.slice(0, startAt).filter(item => !item.unavailable).length
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Play collection')
       await stopActive(current())
       if (token !== transition) return false
-      queue.set(playable.map(item => ({ ...item })))
+      queue.set(playable.map(item => ({ ...item, origin: 'collection' })))
       index.set(nextIndex)
       persist()
       await startSelected(nextIndex, token)
@@ -1633,8 +1664,9 @@ function createController(ctx, hostCapabilities = {}) {
     const items = playlistItems(id)
     const playable = items.filter(item => !item.unavailable)
     if (!playable.length) { message.set('No playable tracks to add. Your queue has not changed.'); return 0 }
+    rememberQueueEdit('Add collection')
     const before = queue.get().length
-    queue.set([...queue.get(), ...playable.map(item => ({ ...item }))])
+    queue.set([...queue.get(), ...playable.map(item => ({ ...item, origin: 'collection' }))])
     if (index.get() < 0) { index.set(before); status.set('paused') }
     persist()
     message.set(`Added ${playable.length} item(s) to the queue.${items.length > playable.length ? ` Skipped ${items.length - playable.length} missing track(s).` : ''}`)
@@ -2064,11 +2096,204 @@ function createController(ctx, hostCapabilities = {}) {
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
 
   })
+
+  // ---- Queue editing, one-step undo and provenance (FM-20) ----
+  function rememberQueueEdit(label) {
+    queueUndo.set({ label, queue: queue.get().map(item => ({ ...item })), index: index.get() })
+  }
+
+  function addNext(item, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (!normalized) { message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.'); return false }
+    if (normalized.source === 'local' && normalized.unavailable) { message.set('That local track is unavailable. Rescan its music folder first.'); return false }
+    if (normalized.source === 'local') {
+      localRegistry.set(normalized.id, normalized)
+      if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
+    }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Play next')
+    const items = queue.get()
+    const at = index.get()
+    const insertAt = at >= 0 && at < items.length ? at + 1 : items.length
+    queue.set([...items.slice(0, insertAt), normalized, ...items.slice(insertAt)])
+    if (index.get() < 0) { index.set(insertAt); status.set('paused') }
+    persist()
+    message.set(`Added “${normalized.title}” to play next.`)
+    return true
+  }
+
+  function removeQueueItems(positions) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size) return false
+    rememberQueueEdit('Remove selected')
+    const at = index.get()
+    const previous = current()
+    const removingCurrent = set.has(at)
+    const nextItems = items.filter((_, p) => !set.has(p))
+    let nextIndex = -1
+    if (nextItems.length) {
+      if (!removingCurrent) {
+        nextIndex = at - [...set].filter(p => p < at).length
+      } else {
+        const after = items.findIndex((_, p) => p > at && !set.has(p))
+        const before = items.map((_, p) => p).filter(p => p < at && !set.has(p)).pop()
+        nextIndex = nextItems.indexOf(items[after >= 0 ? after : before])
+      }
+    }
+    const wasPlaying = ['playing', 'loading'].includes(status.get())
+    return runTransition(async token => {
+      if (token !== transition) return false
+      if (removingCurrent) await stopActive(previous)
+      if (token !== transition) return false
+      queue.set(nextItems)
+      index.set(nextIndex)
+      persist()
+      if (!nextItems.length) { status.set('idle'); message.set(''); return true }
+      if (removingCurrent) {
+        progress.set({ positionMs: 0, durationMs: 0 })
+        spotifyQueueGuard = null
+        spotifyProgressAnchor = null
+        if (wasPlaying) await startSelected(nextIndex, token)
+        else { status.set('paused'); message.set(`Removed ${set.size} item(s). Press play to resume.`) }
+      } else message.set(`Removed ${set.size} item(s) from the queue.`)
+      return true
+    })
+  }
+
+  function moveQueueItems(positions, direction) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size || (direction !== -1 && direction !== 1)) return false
+    if ((direction === -1 && Math.min(...set) === 0) || (direction === 1 && Math.max(...set) === items.length - 1)) return false
+    rememberQueueEdit('Move selected')
+    const next = [...items]
+    const order = [...set].sort((a, b) => direction === -1 ? a - b : b - a)
+    for (const p of order) { const t = p + direction; [next[p], next[t]] = [next[t], next[p]] }
+    const currentItem = items[index.get()]
+    const nextIndex = currentItem ? next.indexOf(currentItem) : index.get()
+    queue.set(next)
+    if (nextIndex >= 0) index.set(nextIndex)
+    persist()
+    return true
+  }
+
+  function clearUpcoming() {
+    const items = queue.get()
+    const at = index.get()
+    if (at < 0 || at >= items.length - 1) return false
+    rememberQueueEdit('Clear upcoming')
+    queue.set(items.slice(0, at + 1))
+    persist()
+    message.set('Cleared everything after the current item. The current item keeps playing.')
+    return true
+  }
+
+  function undoQueueEdit() {
+    const saved = queueUndo.get()
+    if (!saved) return false
+    queueUndo.set(null)
+    const previous = current()
+    const restored = saved.queue[saved.index] || null
+    queue.set(saved.queue)
+    index.set(saved.index)
+    persist()
+    const sameOccurrence = previous && restored && previous.id === restored.id && previous.source === restored.source
+    if (sameOccurrence) { message.set(`Undone: ${saved.label}.`); return true }
+    if (!previous) {
+      status.set(saved.queue.length ? 'paused' : 'idle')
+      message.set(`Undone: ${saved.label}.`)
+      return true
+    }
+    // The edit changed which occurrence is current: stop the engine the edit
+    // started and pause honestly. Undo never auto-resumes playback.
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(previous)
+      if (token === transition) { status.set(saved.queue.length ? 'paused' : 'idle'); message.set(`Undone: ${saved.label}. Press play to resume.`) }
+      return true
+    })
+  }
+
+  // ---- Resumable listening sessions (FM-20): safe-reference snapshots ----
+  const persistSessions = () => ctx.storage.set('listeningSessions', listeningSessions.get())
+
+  function saveListeningSession(name) {
+    const queued = queue.get()
+    // Session-only opened files have no durable reference: skip them honestly
+    // instead of persisting dead unavailable entries.
+    const durable = queued.filter(item => item && !(item.source === 'local' && !item.localTrackId))
+    const items = durable.map(serializePlaylistItem).filter(Boolean)
+    const skipped = queued.length - items.length
+    if (!items.length) { message.set('There are no durable items to save. Index session-only files first.'); return null }
+    const session = { id: makeId('session', Date.now().toString(36)), name: safeText(name, 'Listening session').slice(0, 120), createdAt: new Date().toISOString(), items }
+    listeningSessions.set([session, ...listeningSessions.get()].slice(0, 50))
+    persistSessions()
+    message.set(`Saved “${session.name}” (${items.length} item(s)${skipped ? `, ${skipped} session-only skipped` : ''}).`)
+    return session
+  }
+
+  function listeningSessionPreview(id) {
+    const session = listeningSessions.get().find(entry => entry.id === id)
+    if (!session) return null
+    const rows = session.items.map(reference => {
+      const normalized = normalizeQueueItem(reference)
+      if (!normalized) return { item: reference, available: false, reason: 'Unsupported reference' }
+      if (normalized.source === 'local') {
+        const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+        if (!linked || linked.unavailable) return { item: normalized, available: false, reason: 'Missing local file · rescan its folder' }
+        return { item: { ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs }, available: true }
+      }
+      return { item: normalized, available: true }
+    })
+    return { session, rows, unavailable: rows.filter(row => !row.available) }
+  }
+
+  function restoreListeningSession(id, mode) {
+    const preview = listeningSessionPreview(id)
+    if (!preview) return false
+    const playable = preview.rows.filter(row => row.available).map(row => row.item)
+    if (!playable.length) { message.set('Nothing in this session is currently available. Rescan local folders or reconnect providers, then try again.'); return false }
+    const skipped = preview.rows.length - playable.length
+    if (mode === 'append') {
+      rememberQueueEdit('Append session')
+      const before = queue.get().length
+      queue.set([...queue.get(), ...playable])
+      if (index.get() < 0) { index.set(before); status.set('paused') }
+      persist()
+      message.set(`Appended ${playable.length} item(s)${skipped ? `; ${skipped} unavailable skipped` : ''}. Press play to listen.`)
+      return true
+    }
+    rememberQueueEdit('Restore session')
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(current())
+      if (token !== transition) return false
+      queue.set(playable)
+      index.set(0)
+      status.set('paused')
+      persist()
+      message.set(`Restored “${preview.session.name}” (${playable.length} item(s)${skipped ? `, ${skipped} unavailable skipped` : ''}). Press play to listen.`)
+      return true
+    })
+  }
+
+  function deleteListeningSession(id) {
+    const before = listeningSessions.get()
+    const next = before.filter(entry => entry.id !== id)
+    if (next.length === before.length) return false
+    listeningSessions.set(next)
+    persistSessions()
+    return true
+  }
+
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
+    queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
+    listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
@@ -2412,6 +2637,7 @@ function TrackRow({
   checked,
   onSelect,
   hideSave = false,
+  origin = '',
 }) {
   return h(
     'div',
@@ -2449,7 +2675,7 @@ function TrackRow({
         kind: 'play',
         label: `Play ${item.title}`,
         disabled: item.unavailable,
-        onClick: onPlay || (() => controller.add(item, true)),
+        onClick: onPlay || (() => controller.add(item, true, origin)),
       }),
       h(Action, {
         compact: true,
@@ -2457,8 +2683,15 @@ function TrackRow({
         label: `Add ${item.title} to queue`,
         disabled: item.unavailable,
         onClick: () => {
-          if (controller.add(item)) controller.message.set(`Added “${item.title}” to the queue.`)
+          if (controller.add(item, false, origin)) controller.message.set(`Added “${item.title}” to the queue.`)
         },
+      }),
+      h(Action, {
+        compact: true,
+        kind: 'forward',
+        label: `Play ${item.title} next`,
+        disabled: item.unavailable,
+        onClick: () => controller.addNext(item, origin),
       }),
       !hideSave && h(AddToPlaylist, { controller, item }),
       extraActions,
@@ -2661,6 +2894,7 @@ function QueuePlaylistTracks({ controller, item }) {
       { className: 'fluid-track-list' },
       tracks.map((track) =>
         h(TrackRow, {
+          origin: 'provider',
           controller,
           item: track,
           at: track.contextPosition,
@@ -2682,7 +2916,7 @@ function QueuePlaylistTracks({ controller, item }) {
       h(WorkspaceButton, { disabled: busy, onClick: () => void load(true) }, 'Load more songs'),
   )
 }
-function QueueEntry({ controller, item, at, current, status, length }) {
+function QueueEntry({ controller, item, at, current, status, length, selectable, checked, onSelect }) {
   const collection = /^spotify:playlist:/.test(item.uri || '')
   const [expanded, setExpanded] = useState(collection && at === current)
   return h(
@@ -2690,7 +2924,13 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     { className: 'fluid-queue-entry' },
     h(
       'div',
-      { className: 'fluid-queue-row', 'data-current': at === current },
+      { className: 'fluid-queue-row', 'data-current': at === current, 'data-selectable': selectable ? 'true' : undefined },
+      selectable && h('input', {
+        type: 'checkbox',
+        checked,
+        onChange: onSelect,
+        'aria-label': `Select ${item.title} (position ${at + 1})`,
+      }),
       h(Artwork, { item, className: 'fluid-mini-cover' }),
       h(
         'button',
@@ -2706,6 +2946,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
           { className: 'fluid-row-detail' },
           `${at === current ? `${status === 'playing' ? 'Playing' : 'Selected'} · ` : ''}${collection ? 'Spotify playlist · choose a song below' : item.unavailable ? 'Missing file' : item.subtitle || sourceLabel(item)}`,
         ),
+        item.origin && queueOriginLabel(item.origin) && h('span', { className: 'fluid-queue-origin' }, queueOriginLabel(item.origin)),
       ),
       h(
         'div',
@@ -2752,7 +2993,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     collection && expanded && h(QueuePlaylistTracks, { controller, item }),
   )
 }
-function QueueList({ controller }) {
+function QueueList({ controller, selected, onSelect }) {
   const queue = useValue(controller.queue),
     current = useValue(controller.index),
     status = useValue(controller.status)
@@ -2769,6 +3010,9 @@ function QueueList({ controller }) {
             current,
             status,
             length: queue.length,
+            selectable: Boolean(selected),
+            checked: Boolean(selected?.has(at)),
+            onSelect: () => onSelect?.(at),
           }),
         ),
       )
@@ -2989,7 +3233,7 @@ function SearchPage({ controller }) {
                 'div',
                 { className: 'fluid-track-list' },
                 results.tracks.map((item, at) =>
-                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at }),
+                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'search' }),
                 ),
               ),
             ),
@@ -3152,7 +3396,7 @@ function SpotifyLibraryPage({ controller }) {
             ? h(
                 'div',
                 { className: 'fluid-track-list' },
-                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at })),
+                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'provider' })),
               )
             : h(
                 'div',
@@ -3241,6 +3485,7 @@ function RadioPage({ controller }) {
           controller,
           item,
           at,
+          origin: 'search',
           extraActions: h(Action, {
             compact: true,
             kind: 'heart',
@@ -3450,10 +3695,11 @@ function LocalPage({ controller }) {
               item,
               at,
               key: item.id,
+              origin: 'session',
               onPlay: () => {
                 const queued = controller.queue.get().findIndex((row) => row.id === item.id)
                 if (queued >= 0) void controller.playAt(queued)
-                else controller.add(item, true)
+                else controller.add(item, true, 'session')
               },
             }),
           ),
@@ -3563,7 +3809,7 @@ function LocalPage({ controller }) {
         ? h(
             'div',
             { className: 'fluid-track-list' },
-            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id })),
+            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id, origin: 'library' })),
           )
         : h(
             Empty,
@@ -3969,6 +4215,7 @@ function PlaylistEditor({ controller, playlist }) {
               selectable: true,
               checked: selected.has(at),
               hideSave: true,
+              origin: 'collection',
               onSelect: () =>
                 setSelected((previous) => {
                   const next = new Set(previous)
@@ -4041,7 +4288,7 @@ function LegacyPlaylist({ controller, playlist }) {
     h('div', { className: 'fluid-playlist-heading' }, h('div', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })), h('div', {}, h('span', { className: 'fluid-source-chip' }, 'Legacy mix · read only'), h('h2', { className: 'fluid-library-title' }, playlist.name), h('p', { className: 'fluid-muted' }, playlist.description || 'Preserved from FluidMusic v3.'))),
     h('p', { className: 'fluid-notice' }, 'This mixed collection is preserved without rewriting it. You can play, enqueue, or export it; new FluidMusic collections are local-only.'),
     h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { primary: true, disabled: !items.length, onClick: () => void controller.playPlaylist(playlist.id) }, 'Play legacy mix'), h(WorkspaceButton, { disabled: !items.length, onClick: () => controller.enqueuePlaylist(playlist.id) }, 'Add to Up Next'), h(WorkspaceButton, { onClick: () => downloadPlaylist(controller, playlist.id) }, 'Export')),
-    h('div', { className: 'fluid-track-list' }, items.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, onPlay: () => void controller.playPlaylist(playlist.id, at), extraActions: null }))),
+    h('div', { className: 'fluid-track-list' }, items.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'collection', onPlay: () => void controller.playPlaylist(playlist.id, at), extraActions: null }))),
   )
 }
 function PlaylistsPage({ controller }) {
@@ -4173,7 +4420,26 @@ function PlaylistsPage({ controller }) {
 }
 function QueuePage({ controller }) {
   const queue = useValue(controller.queue),
-    [clear, setClear] = useState(false)
+    current = useValue(controller.index),
+    undo = useValue(controller.queueUndo),
+    sessions = useValue(controller.listeningSessions),
+    [selected, setSelected] = useState(new Set()),
+    [clear, setClear] = useState(false),
+    [clearUpcoming, setClearUpcoming] = useState(false),
+    [saving, setSaving] = useState(false),
+    [sessionName, setSessionName] = useState(''),
+    [restoring, setRestoring] = useState(''),
+    [deleting, setDeleting] = useState('')
+  // Queue edits shift positions: drop any stale selection (PlaylistEditor pattern).
+  useEffect(() => setSelected(new Set()), [queue])
+  const toggleSelect = (at) => setSelected((previous) => {
+    const next = new Set(previous)
+    if (next.has(at)) next.delete(at)
+    else next.add(at)
+    return next
+  })
+  const clearSelection = () => setSelected(new Set())
+  const preview = restoring ? controller.listeningSessionPreview(restoring) : null
   return h(
     'div',
     {},
@@ -4184,7 +4450,9 @@ function QueuePage({ controller }) {
       actions: h(
         'div',
         { className: 'fluid-actions' },
-
+        h(WorkspaceButton, { disabled: !undo, onClick: () => { controller.undoQueueEdit(); clearSelection() } }, undo ? `Undo: ${undo.label}` : 'Undo'),
+        h(WorkspaceButton, { disabled: !(current >= 0 && current < queue.length - 1), onClick: () => setClearUpcoming(true) }, 'Clear upcoming'),
+        h(WorkspaceButton, { disabled: !queue.length, onClick: () => { setSessionName(''); setSaving(true) } }, 'Save session'),
         h(
           WorkspaceButton,
           { danger: true, disabled: !queue.length, onClick: () => setClear(true) },
@@ -4192,13 +4460,90 @@ function QueuePage({ controller }) {
         ),
       ),
     }),
-    h(QueueList, { controller }),
-
+    selected.size > 0 && h(
+      'div',
+      { className: 'fluid-selection-bar', role: 'toolbar', 'aria-label': 'Selected queue items' },
+      h('span', {}, `${selected.size} selected`),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], -1); clearSelection() } }, 'Move up'),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], 1); clearSelection() } }, 'Move down'),
+      h(WorkspaceButton, { danger: true, onClick: () => { void controller.removeQueueItems([...selected]); clearSelection() } }, 'Remove selected'),
+      h(WorkspaceButton, { onClick: clearSelection }, 'Clear selection'),
+    ),
+    h(QueueList, { controller, selected, onSelect: toggleSelect }),
+    h(
+      'section',
+      { className: 'fluid-result-section', 'aria-label': 'Listening sessions' },
+      h('div', { className: 'fluid-section-head' },
+        h('div', {},
+          h('h2', { className: 'fluid-section-title' }, 'Listening sessions'),
+          h('p', { className: 'fluid-section-copy' }, 'Named snapshots of safe source references and order. Restore previews unavailable items and never starts playback automatically.')),
+        h('span', { className: 'fluid-muted' }, `${sessions.length}/50`)),
+      sessions.length
+        ? h('div', { className: 'fluid-track-list' }, sessions.map((session) => h(
+            'div',
+            { className: 'fluid-session-row', key: session.id },
+            h('div', { className: 'fluid-row-copy' },
+              h('span', { className: 'fluid-row-title', title: session.name }, session.name),
+              h('span', { className: 'fluid-row-detail' }, `${session.items.length} item(s)${session.createdAt ? ` · saved ${new Date(session.createdAt).toLocaleDateString()}` : ''}`)),
+            h('div', { className: 'fluid-row-actions' },
+              h(WorkspaceButton, { onClick: () => setRestoring(session.id) }, 'Restore…'),
+              h(Action, { compact: true, kind: 'trash', label: `Delete session ${session.name}`, onClick: () => setDeleting(session.id) })),
+          )))
+        : h('p', { className: 'fluid-muted' }, 'No saved sessions yet. Use “Save session” to snapshot the current queue.'),
+    ),
     clear &&
       h(
         Confirm,
         { title: 'Clear queue', onClose: () => setClear(false), action: () => controller.clearQueue() },
-        'Stop playback and clear this session’s queue? Your saved playlists and files are not changed.',
+        'Stop playback and clear this session’s queue? Your saved playlists, sessions and files are not changed.',
+      ),
+    clearUpcoming &&
+      h(
+        Confirm,
+        { title: 'Clear upcoming', onClose: () => setClearUpcoming(false), action: () => controller.clearUpcoming() },
+        'Remove everything after the current item? The current item keeps playing; saved playlists and sessions are not changed.',
+      ),
+    saving &&
+      h(
+        Modal,
+        { title: 'Save listening session', onClose: () => setSaving(false) },
+        h('form', {
+          onSubmit: (event) => {
+            event.preventDefault()
+            if (controller.saveListeningSession(sessionName)) { setSaving(false); setSessionName('') }
+          },
+        },
+          h('label', { className: 'fluid-field' }, 'Session name',
+            h('input', { className: 'fluid-input', value: sessionName, onChange: (event) => setSessionName(event.target.value), placeholder: 'Late night drive', 'aria-label': 'Session name' })),
+          h('p', { className: 'fluid-muted' }, 'Stores safe source references and order only — no files, handles or credentials. Session-only opened files are skipped.'),
+          h('div', { className: 'fluid-dialog-actions' },
+            h(WorkspaceButton, { onClick: () => setSaving(false) }, 'Cancel'),
+            h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save session')),
+        ),
+      ),
+    preview &&
+      h(
+        Modal,
+        { title: `Restore “${preview.session.name}”`, onClose: () => setRestoring('') },
+        h('p', { className: 'fluid-muted' }, `${preview.rows.length - preview.unavailable.length} of ${preview.rows.length} item(s) available right now.`),
+        preview.unavailable.length > 0 && h('div', { className: 'fluid-track-list' }, preview.unavailable.map((row, at) => h(
+          'div',
+          { className: 'fluid-queue-row', key: `${row.item?.id || 'unknown'}-${at}` },
+          h('div', { className: 'fluid-row-copy' },
+            h('span', { className: 'fluid-row-title' }, row.item?.title || 'Unknown item'),
+            h('span', { className: 'fluid-row-detail' }, row.reason)),
+        ))),
+        h('p', { className: 'fluid-muted' }, 'Unavailable items are skipped. Restoring loads the queue paused — press play when you are ready.'),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setRestoring('') }, 'Cancel'),
+          h(WorkspaceButton, { onClick: () => { controller.restoreListeningSession(preview.session.id, 'append'); setRestoring(''); clearSelection() } }, 'Append to queue'),
+          h(WorkspaceButton, { primary: true, onClick: () => { void controller.restoreListeningSession(preview.session.id, 'replace'); setRestoring(''); clearSelection() } }, 'Replace queue')),
+      ),
+    deleting &&
+      h(
+        Confirm,
+        { title: 'Delete session', onClose: () => setDeleting(''), action: () => controller.deleteListeningSession(deleting) },
+        'Delete this saved listening session? Your queue, collections and files are not changed.',
       ),
   )
 }
@@ -4440,7 +4785,7 @@ function MiniPlayer({ controller }) {
     ),
     error && h('p', { className: 'fluid-error', role: 'alert' }, error),
     searched && !busy && !error && results.length === 0 && h('p', { className: 'fluid-muted', role: 'status' }, 'No videos found. Try different words or paste a watch URL.'),
-    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, onPlay: () => controller.addYouTubeItem(item, true) }))),
+    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'search', onPlay: () => controller.addYouTubeItem(item, true) }))),
   )
 }
 
@@ -4459,7 +4804,8 @@ function HistoryPage({ controller }) {
       at,
       key: entry.id,
       hideSave: true,
-      onPlay: () => controller.add(entry.item, true),
+      origin: 'history',
+      onPlay: () => controller.add(entry.item, true, 'history'),
       extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
     }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
     confirmClear && h(Confirm, {

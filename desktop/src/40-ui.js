@@ -333,6 +333,7 @@ function TrackRow({
   checked,
   onSelect,
   hideSave = false,
+  origin = '',
 }) {
   return h(
     'div',
@@ -370,7 +371,7 @@ function TrackRow({
         kind: 'play',
         label: `Play ${item.title}`,
         disabled: item.unavailable,
-        onClick: onPlay || (() => controller.add(item, true)),
+        onClick: onPlay || (() => controller.add(item, true, origin)),
       }),
       h(Action, {
         compact: true,
@@ -378,8 +379,15 @@ function TrackRow({
         label: `Add ${item.title} to queue`,
         disabled: item.unavailable,
         onClick: () => {
-          if (controller.add(item)) controller.message.set(`Added “${item.title}” to the queue.`)
+          if (controller.add(item, false, origin)) controller.message.set(`Added “${item.title}” to the queue.`)
         },
+      }),
+      h(Action, {
+        compact: true,
+        kind: 'forward',
+        label: `Play ${item.title} next`,
+        disabled: item.unavailable,
+        onClick: () => controller.addNext(item, origin),
       }),
       !hideSave && h(AddToPlaylist, { controller, item }),
       extraActions,
@@ -582,6 +590,7 @@ function QueuePlaylistTracks({ controller, item }) {
       { className: 'fluid-track-list' },
       tracks.map((track) =>
         h(TrackRow, {
+          origin: 'provider',
           controller,
           item: track,
           at: track.contextPosition,
@@ -603,7 +612,7 @@ function QueuePlaylistTracks({ controller, item }) {
       h(WorkspaceButton, { disabled: busy, onClick: () => void load(true) }, 'Load more songs'),
   )
 }
-function QueueEntry({ controller, item, at, current, status, length }) {
+function QueueEntry({ controller, item, at, current, status, length, selectable, checked, onSelect }) {
   const collection = /^spotify:playlist:/.test(item.uri || '')
   const [expanded, setExpanded] = useState(collection && at === current)
   return h(
@@ -611,7 +620,13 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     { className: 'fluid-queue-entry' },
     h(
       'div',
-      { className: 'fluid-queue-row', 'data-current': at === current },
+      { className: 'fluid-queue-row', 'data-current': at === current, 'data-selectable': selectable ? 'true' : undefined },
+      selectable && h('input', {
+        type: 'checkbox',
+        checked,
+        onChange: onSelect,
+        'aria-label': `Select ${item.title} (position ${at + 1})`,
+      }),
       h(Artwork, { item, className: 'fluid-mini-cover' }),
       h(
         'button',
@@ -627,6 +642,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
           { className: 'fluid-row-detail' },
           `${at === current ? `${status === 'playing' ? 'Playing' : 'Selected'} · ` : ''}${collection ? 'Spotify playlist · choose a song below' : item.unavailable ? 'Missing file' : item.subtitle || sourceLabel(item)}`,
         ),
+        item.origin && queueOriginLabel(item.origin) && h('span', { className: 'fluid-queue-origin' }, queueOriginLabel(item.origin)),
       ),
       h(
         'div',
@@ -673,7 +689,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     collection && expanded && h(QueuePlaylistTracks, { controller, item }),
   )
 }
-function QueueList({ controller }) {
+function QueueList({ controller, selected, onSelect }) {
   const queue = useValue(controller.queue),
     current = useValue(controller.index),
     status = useValue(controller.status)
@@ -690,6 +706,9 @@ function QueueList({ controller }) {
             current,
             status,
             length: queue.length,
+            selectable: Boolean(selected),
+            checked: Boolean(selected?.has(at)),
+            onSelect: () => onSelect?.(at),
           }),
         ),
       )

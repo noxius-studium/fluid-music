@@ -244,6 +244,23 @@ function normalizePlaylistState(value) {
   }
 }
 
+const QUEUE_ORIGINS = { search: 'From search', history: 'From history', collection: 'From collection', provider: 'From provider', library: 'From local library', session: 'Opened this session' }
+function queueOriginLabel(origin) {
+  return QUEUE_ORIGINS[origin] || ''
+}
+function normalizeListeningSessions(value) {
+  // Listening sessions are durable snapshots of SAFE references only. Stored
+  // data is re-serialized on load so blob handles, raw paths or capability
+  // URLs can never survive into a restored session, and bounds are enforced.
+  const list = Array.isArray(value) ? value : []
+  return list.slice(0, 50).map(entry => {
+    if (!entry || typeof entry !== 'object') return null
+    const items = (Array.isArray(entry.items) ? entry.items : []).map(serializePlaylistItem).filter(item => item && !(item.source === 'local' && !item.localTrackId)).slice(0, 500)
+    if (!items.length) return null
+    return { id: safeText(entry.id, makeId('session', 'restored')), name: safeText(entry.name, 'Listening session').slice(0, 120), createdAt: safeText(entry.createdAt), items }
+  }).filter(Boolean)
+}
+
 function normalizeSpotifyAuth(value) {
   const root = value?.data || value || {}
   const data = root.auth || root.spotify || root

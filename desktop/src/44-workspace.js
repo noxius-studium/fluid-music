@@ -42,7 +42,7 @@ function YouTubeControls({ controller, compact = false }) {
     ),
     error && h('p', { className: 'fluid-error', role: 'alert' }, error),
     searched && !busy && !error && results.length === 0 && h('p', { className: 'fluid-muted', role: 'status' }, 'No videos found. Try different words or paste a watch URL.'),
-    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, onPlay: () => controller.addYouTubeItem(item, true) }))),
+    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'search', onPlay: () => controller.addYouTubeItem(item, true) }))),
   )
 }
 
@@ -61,7 +61,8 @@ function HistoryPage({ controller }) {
       at,
       key: entry.id,
       hideSave: true,
-      onPlay: () => controller.add(entry.item, true),
+      origin: 'history',
+      onPlay: () => controller.add(entry.item, true, 'history'),
       extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
     }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
     confirmClear && h(Confirm, {

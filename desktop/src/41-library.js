@@ -209,7 +209,7 @@ function SearchPage({ controller }) {
                 'div',
                 { className: 'fluid-track-list' },
                 results.tracks.map((item, at) =>
-                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at }),
+                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'search' }),
                 ),
               ),
             ),
@@ -372,7 +372,7 @@ function SpotifyLibraryPage({ controller }) {
             ? h(
                 'div',
                 { className: 'fluid-track-list' },
-                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at })),
+                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'provider' })),
               )
             : h(
                 'div',
@@ -461,6 +461,7 @@ function RadioPage({ controller }) {
           controller,
           item,
           at,
+          origin: 'search',
           extraActions: h(Action, {
             compact: true,
             kind: 'heart',
@@ -670,10 +671,11 @@ function LocalPage({ controller }) {
               item,
               at,
               key: item.id,
+              origin: 'session',
               onPlay: () => {
                 const queued = controller.queue.get().findIndex((row) => row.id === item.id)
                 if (queued >= 0) void controller.playAt(queued)
-                else controller.add(item, true)
+                else controller.add(item, true, 'session')
               },
             }),
           ),
@@ -783,7 +785,7 @@ function LocalPage({ controller }) {
         ? h(
             'div',
             { className: 'fluid-track-list' },
-            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id })),
+            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id, origin: 'library' })),
           )
         : h(
             Empty,
