@@ -382,6 +382,7 @@ function classifySpotifyFailure(value) {
   let reason = 'undetermined'
   if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
   else if (status === 429) reason = 'rate-limited'
+  else if (status === 403 && /scope/.test(text)) reason = 'insufficient-scope'
   else if (status === 403) reason = 'forbidden'
   else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
   else if (status === 404) reason = 'not-found'
@@ -389,6 +390,7 @@ function classifySpotifyFailure(value) {
   const matrix = {
     'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
     'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'insufficient-scope': { action: 'reconnect', retryable: false, message: 'Spotify sign-in is missing a permission this action needs.', remedy: 'Reconnect Spotify to grant the required scopes.' },
     'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
     'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
     'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
@@ -397,6 +399,17 @@ function classifySpotifyFailure(value) {
   }
   return { reason, ...matrix[reason] }
 }
+function spotifyEntryUnavailableReason(track) {
+  if (!track || typeof track !== 'object') return 'Removed or unavailable on Spotify.'
+  if (track.is_local) return 'Local file — not synced to Spotify streaming.'
+  const restriction = safeText(track?.restrictions?.reason)
+  if (restriction === 'market') return 'Not available in your market.'
+  if (restriction === 'product') return 'Requires a different Spotify subscription.'
+  if (restriction === 'explicit') return 'Blocked by explicit-content settings.'
+  if (track.is_playable === false) return 'Not playable on your account right now.'
+  return 'Unavailable on Spotify.'
+}
+
 function spotifyLocalPlaybackCapability(signals) {
   // Official Web Playback SDK requirements: Premium account, encrypted-media
   // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's

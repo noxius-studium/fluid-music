@@ -353,7 +353,7 @@ function TrackRow({
       h(
         'span',
         { className: 'fluid-row-detail', title: item.subtitle },
-        item.unavailable ? 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
+        item.unavailable ? item.unavailableReason || 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
       ),
     ),
     h('span', { className: 'fluid-source-tag' }, item.source),
@@ -528,7 +528,7 @@ function QueuePlaylistTracks({ controller, item }) {
     try {
       const page = await controller.loadSpotifyPlaylist(item, more ? offset : 0)
       if (token !== request.current) return
-      setTracks((previous) => (more ? [...previous, ...page.tracks] : page.tracks))
+      setTracks((previous) => (more ? [...previous, ...(page.rows || page.tracks)] : (page.rows || page.tracks)))
       setTotal(page.total)
       setNext(page.next)
       setOffset(page.nextOffset)
@@ -561,7 +561,7 @@ function QueuePlaylistTracks({ controller, item }) {
         h(
           'p',
           { className: 'fluid-section-copy' },
-          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unsupported entries skipped` : ''}. Play starts at that position in Spotify.`,
+          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unavailable entries listed honestly` : ''}. Play starts at that position in Spotify.`,
         ),
       ),
       h(WorkspaceButton, { disabled: busy, onClick: () => void load() }, 'Refresh tracks'),
@@ -585,7 +585,7 @@ function QueuePlaylistTracks({ controller, item }) {
           controller,
           item: track,
           at: track.contextPosition,
-          key: `${track.uri}-${track.contextPosition}`,
+          key: `${track.uri || track.id}-${track.contextPosition}`,
           onPlay: () => void controller.playSpotifyPlaylistTrack(item, track),
         }),
       ),
@@ -593,10 +593,10 @@ function QueuePlaylistTracks({ controller, item }) {
     busy && h('p', { className: 'fluid-muted', role: 'status' }, 'Loading songs…'),
     !busy &&
       !error &&
-      !tracks.length &&
+      !tracks.some((track) => !track.unavailable) &&
       h(
         Empty,
-        { title: 'No supported songs found' },
+        { title: 'No playable songs found' },
         'Spotify may restrict this playlist or contain unavailable entries.',
       ),
     next &&

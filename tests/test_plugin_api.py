@@ -283,7 +283,7 @@ def test_spotify_library_and_seek_routes_shape_validated_upstream_requests(api: 
     assert calls == [
         (api._spotify_request, ("PUT", "/me/player/seek"), {"params": {"position_ms": 12_345, "device_id": "phone-1"}}),
         (api._spotify_request, ("GET", "/me/playlists"), {"params": {"limit": 12, "offset": 24}}),
-        (api._spotify_request, ("GET", "/playlists/3cEYpjA9oz9GiPac4AsH4n/items"), {"params": {"limit": 25, "offset": 50}}),
+        (api._spotify_request, ("GET", "/playlists/3cEYpjA9oz9GiPac4AsH4n/tracks"), {"params": {"limit": 25, "offset": 50}}),
         (api._spotify_request, ("GET", "/search"), {"params": {"q": "night drive", "type": "track,album,artist,playlist", "limit": 10, "offset": 20}}),
     ]
 

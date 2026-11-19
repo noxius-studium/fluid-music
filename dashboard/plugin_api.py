@@ -798,7 +798,7 @@ async def playlist_tracks(playlist_id: str, limit: int = 50, offset: int = 0) ->
         return await _call(
             _spotify_request,
             "GET",
-            f"/playlists/{safe_id}/items",
+            f"/playlists/{safe_id}/tracks",
             params={"limit": _bounded_int(limit, 50, 1, 50), "offset": _bounded_int(offset, 0, 0, 100_000)},
         )
     except ValueError as exc:

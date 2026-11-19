@@ -411,6 +411,7 @@ function classifySpotifyFailure(value) {
   let reason = 'undetermined'
   if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
   else if (status === 429) reason = 'rate-limited'
+  else if (status === 403 && /scope/.test(text)) reason = 'insufficient-scope'
   else if (status === 403) reason = 'forbidden'
   else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
   else if (status === 404) reason = 'not-found'
@@ -418,6 +419,7 @@ function classifySpotifyFailure(value) {
   const matrix = {
     'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
     'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'insufficient-scope': { action: 'reconnect', retryable: false, message: 'Spotify sign-in is missing a permission this action needs.', remedy: 'Reconnect Spotify to grant the required scopes.' },
     'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
     'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
     'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
@@ -426,6 +428,17 @@ function classifySpotifyFailure(value) {
   }
   return { reason, ...matrix[reason] }
 }
+function spotifyEntryUnavailableReason(track) {
+  if (!track || typeof track !== 'object') return 'Removed or unavailable on Spotify.'
+  if (track.is_local) return 'Local file — not synced to Spotify streaming.'
+  const restriction = safeText(track?.restrictions?.reason)
+  if (restriction === 'market') return 'Not available in your market.'
+  if (restriction === 'product') return 'Requires a different Spotify subscription.'
+  if (restriction === 'explicit') return 'Blocked by explicit-content settings.'
+  if (track.is_playable === false) return 'Not playable on your account right now.'
+  return 'Unavailable on Spotify.'
+}
+
 function spotifyLocalPlaybackCapability(signals) {
   // Official Web Playback SDK requirements: Premium account, encrypted-media
   // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's
@@ -1858,7 +1871,8 @@ function createController(ctx, hostCapabilities = {}) {
     const albums = (data?.albums?.items || []).map(album => normalizeQueueItem({ source: 'spotify', id: album.id, title: album.name, subtitle: (album.artists || []).map(artist => artist.name).join(', '), uri: album.uri, artwork: album.images?.[0]?.url, kind: 'album' })).filter(Boolean)
     const spotifyPlaylists = (data?.playlists?.items || []).filter(Boolean).map(playlist => normalizeQueueItem({ source: 'spotify', id: playlist.id, title: playlist.name, subtitle: playlist.owner?.display_name || 'Spotify playlist', uri: playlist.uri, artwork: playlist.images?.[0]?.url, kind: 'playlist' })).filter(Boolean)
     const artists = (data?.artists?.items || []).map(artist => ({ id: safeText(artist.id), source: 'spotify', kind: 'artist', title: safeText(artist.name, 'Artist'), subtitle: `${Number(artist.followers?.total || 0).toLocaleString()} followers`, artwork: safeText(artist.images?.[0]?.url), uri: safeText(artist.uri), genres: Array.isArray(artist.genres) ? artist.genres.slice(0, 3) : [] }))
-    return { tracks, albums, playlists: spotifyPlaylists, artists }
+    const cursors = { tracks: Boolean(data?.tracks?.next), albums: Boolean(data?.albums?.next), playlists: Boolean(data?.playlists?.next), artists: Boolean(data?.artists?.next) }
+    return { tracks, albums, playlists: spotifyPlaylists, artists, cursors, offset: Math.max(0, Number(offset) || 0) }
   }
 
   async function loadSpotifyPlaylists(offset = 0) {
@@ -1873,17 +1887,33 @@ function createController(ctx, hostCapabilities = {}) {
     const start = Math.max(0, Math.floor(Number(offset) || 0))
     const data = await spotifyRequest(`/playlists/${encodeURIComponent(id)}/tracks?limit=50&offset=${start}`)
     if (!Array.isArray(data?.items)) throw new Error('Spotify did not return playlist tracks. Retry or reconnect Spotify.')
-    const tracks = data.items.map((entry, at) => {
-      const track = spotifyTrack(entry?.track || entry?.item || entry)
-      if (!track) return null
-      return { ...track, contextUri: `spotify:playlist:${id}`, contextPosition: start + at }
-    }).filter(Boolean)
+    const tracks = [], unavailable = []
+    data.items.forEach((entry, at) => {
+      // An explicit null track/item means removed/unavailable — never fall
+      // back to the wrapper object itself.
+      const raw = entry && typeof entry === 'object' && ('track' in entry || 'item' in entry) ? (entry.track ?? entry.item) : entry
+      const position = start + at
+      const contextUri = `spotify:playlist:${id}`
+      const track = spotifyTrack(raw)
+      if (!track || raw?.is_playable === false || raw?.is_local) {
+        // Unknown/unavailable/restricted entries stay visible at their exact
+        // occurrence position — never silently dropped, never playable.
+        unavailable.push({ ...(track || {}), source: 'spotify', kind: 'unavailable', unavailable: true, playable: false, id: track?.id || `unavailable:${id}:${position}`, title: track?.title || 'Unavailable track', unavailableReason: spotifyEntryUnavailableReason(raw), contextUri, contextPosition: position })
+        return
+      }
+      tracks.push({ ...track, relinked: Boolean(raw?.linked_from), subtitle: raw?.linked_from ? `${track.subtitle} · relinked by Spotify` : track.subtitle, contextUri, contextPosition: position })
+    })
+    const rows = [...tracks, ...unavailable].sort((a, b) => a.contextPosition - b.contextPosition)
     const total = Number.isFinite(data.total) ? Math.max(0, data.total) : start + data.items.length
     const nextOffset = start + data.items.length
-    return { playlist, tracks, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: data.items.length - tracks.length }
+    return { playlist, tracks, unavailable, rows, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: unavailable.length }
   }
 
   function playSpotifyPlaylistTrack(queueItem, track) {
+    if (track?.unavailable || track?.playable === false) {
+      message.set(track?.unavailableReason || 'That entry is unavailable on Spotify.')
+      return Promise.resolve(false)
+    }
     if (!/^spotify:playlist:[A-Za-z0-9]+$/.test(queueItem?.uri || '') || track?.contextUri !== queueItem.uri || !Number.isInteger(track.contextPosition) || track.contextPosition < 0 || track.contextPosition > 10000) {
       message.set('Refresh this Spotify playlist before choosing the track.')
       return Promise.resolve(false)
@@ -2348,7 +2378,7 @@ function TrackRow({
       h(
         'span',
         { className: 'fluid-row-detail', title: item.subtitle },
-        item.unavailable ? 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
+        item.unavailable ? item.unavailableReason || 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
       ),
     ),
     h('span', { className: 'fluid-source-tag' }, item.source),
@@ -2523,7 +2553,7 @@ function QueuePlaylistTracks({ controller, item }) {
     try {
       const page = await controller.loadSpotifyPlaylist(item, more ? offset : 0)
       if (token !== request.current) return
-      setTracks((previous) => (more ? [...previous, ...page.tracks] : page.tracks))
+      setTracks((previous) => (more ? [...previous, ...(page.rows || page.tracks)] : (page.rows || page.tracks)))
       setTotal(page.total)
       setNext(page.next)
       setOffset(page.nextOffset)
@@ -2556,7 +2586,7 @@ function QueuePlaylistTracks({ controller, item }) {
         h(
           'p',
           { className: 'fluid-section-copy' },
-          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unsupported entries skipped` : ''}. Play starts at that position in Spotify.`,
+          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unavailable entries listed honestly` : ''}. Play starts at that position in Spotify.`,
         ),
       ),
       h(WorkspaceButton, { disabled: busy, onClick: () => void load() }, 'Refresh tracks'),
@@ -2580,7 +2610,7 @@ function QueuePlaylistTracks({ controller, item }) {
           controller,
           item: track,
           at: track.contextPosition,
-          key: `${track.uri}-${track.contextPosition}`,
+          key: `${track.uri || track.id}-${track.contextPosition}`,
           onPlay: () => void controller.playSpotifyPlaylistTrack(item, track),
         }),
       ),
@@ -2588,10 +2618,10 @@ function QueuePlaylistTracks({ controller, item }) {
     busy && h('p', { className: 'fluid-muted', role: 'status' }, 'Loading songs…'),
     !busy &&
       !error &&
-      !tracks.length &&
+      !tracks.some((track) => !track.unavailable) &&
       h(
         Empty,
-        { title: 'No supported songs found' },
+        { title: 'No playable songs found' },
         'Spotify may restrict this playlist or contain unavailable entries.',
       ),
     next &&
@@ -2831,7 +2861,9 @@ function SearchPage({ controller }) {
     [results, setResults] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [searched, setSearched] = useState('')
+    [searched, setSearched] = useState(''),
+    [offset, setOffset] = useState(0),
+    [next, setNext] = useState(false)
   const request = useRef(0)
   useEffect(
     () => () => {
@@ -2839,18 +2871,25 @@ function SearchPage({ controller }) {
     },
     [],
   )
-  const search = async (event) => {
+  const search = async (event, more = false) => {
     event?.preventDefault()
-    if (busy || query.trim().length < 2 || !auth.authenticated) return
+    const term = more ? searched : query.trim()
+    if (busy || term.length < 2 || !auth.authenticated) return
     const token = ++request.current,
-      term = query.trim()
+      start = more ? offset : 0
     setBusy(true)
     setError('')
     try {
-      const data = await controller.searchSpotifyCatalog(term)
+      const data = await controller.searchSpotifyCatalog(term, start)
       if (token === request.current) {
-        setResults(data)
+        setResults((previous) =>
+          more && previous
+            ? { tracks: [...previous.tracks, ...data.tracks], albums: [...previous.albums, ...data.albums], playlists: [...previous.playlists, ...data.playlists], artists: [...previous.artists, ...data.artists] }
+            : data,
+        )
         setSearched(term)
+        setOffset(start + 10)
+        setNext(Boolean(data.cursors && Object.values(data.cursors).some(Boolean)))
       }
     } catch (reason) {
       if (token === request.current) setError(userFacingError(reason))
@@ -2909,11 +2948,11 @@ function SearchPage({ controller }) {
                 h(
                   'div',
                   { className: 'fluid-grid' },
-                  results[kind].map((item) =>
+                  results[kind].map((item, at) =>
                     kind === 'artists'
                       ? h(
                           'article',
-                          { className: 'fluid-media-tile', key: item.id },
+                          { className: 'fluid-media-tile', key: `${item.id}-${at}` },
                           h(Artwork, { item }),
                           h('strong', { className: 'fluid-tile-title' }, item.title),
                           h(
@@ -2932,11 +2971,17 @@ function SearchPage({ controller }) {
                             'Search this artist',
                           ),
                         )
-                      : h(MediaTile, { controller, item, key: item.id }),
+                      : h(MediaTile, { controller, item, key: `${item.id}-${at}` }),
                   ),
                 ),
               ),
           ),
+          next &&
+            h(
+              'div',
+              { className: 'fluid-load-more' },
+              h(WorkspaceButton, { disabled: busy, onClick: () => void search(null, true) }, busy ? 'Loading…' : 'Load more results'),
+            ),
         )
       : auth.authenticated &&
           h(
@@ -2972,7 +3017,7 @@ function SpotifyLibraryPage({ controller }) {
         ? await controller.loadSpotifyPlaylist(playlist, start)
         : await controller.loadSpotifyPlaylists(start)
       if (token !== request.current) return
-      if (playlist) setDetail((previous) => (more ? [...previous, ...data.tracks] : data.tracks))
+      if (playlist) setDetail((previous) => (more ? [...previous, ...(data.rows || data.tracks)] : (data.rows || data.tracks)))
       else setLibrary((previous) => (more ? [...previous, ...data.items] : data.items))
       setNext(data.next)
       setOffset(playlist ? data.nextOffset : start + 50)

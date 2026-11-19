@@ -135,7 +135,9 @@ function SearchPage({ controller }) {
     [results, setResults] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [searched, setSearched] = useState('')
+    [searched, setSearched] = useState(''),
+    [offset, setOffset] = useState(0),
+    [next, setNext] = useState(false)
   const request = useRef(0)
   useEffect(
     () => () => {
@@ -143,18 +145,25 @@ function SearchPage({ controller }) {
     },
     [],
   )
-  const search = async (event) => {
+  const search = async (event, more = false) => {
     event?.preventDefault()
-    if (busy || query.trim().length < 2 || !auth.authenticated) return
+    const term = more ? searched : query.trim()
+    if (busy || term.length < 2 || !auth.authenticated) return
     const token = ++request.current,
-      term = query.trim()
+      start = more ? offset : 0
     setBusy(true)
     setError('')
     try {
-      const data = await controller.searchSpotifyCatalog(term)
+      const data = await controller.searchSpotifyCatalog(term, start)
       if (token === request.current) {
-        setResults(data)
+        setResults((previous) =>
+          more && previous
+            ? { tracks: [...previous.tracks, ...data.tracks], albums: [...previous.albums, ...data.albums], playlists: [...previous.playlists, ...data.playlists], artists: [...previous.artists, ...data.artists] }
+            : data,
+        )
         setSearched(term)
+        setOffset(start + 10)
+        setNext(Boolean(data.cursors && Object.values(data.cursors).some(Boolean)))
       }
     } catch (reason) {
       if (token === request.current) setError(userFacingError(reason))
@@ -213,11 +222,11 @@ function SearchPage({ controller }) {
                 h(
                   'div',
                   { className: 'fluid-grid' },
-                  results[kind].map((item) =>
+                  results[kind].map((item, at) =>
                     kind === 'artists'
                       ? h(
                           'article',
-                          { className: 'fluid-media-tile', key: item.id },
+                          { className: 'fluid-media-tile', key: `${item.id}-${at}` },
                           h(Artwork, { item }),
                           h('strong', { className: 'fluid-tile-title' }, item.title),
                           h(
@@ -236,11 +245,17 @@ function SearchPage({ controller }) {
                             'Search this artist',
                           ),
                         )
-                      : h(MediaTile, { controller, item, key: item.id }),
+                      : h(MediaTile, { controller, item, key: `${item.id}-${at}` }),
                   ),
                 ),
               ),
           ),
+          next &&
+            h(
+              'div',
+              { className: 'fluid-load-more' },
+              h(WorkspaceButton, { disabled: busy, onClick: () => void search(null, true) }, busy ? 'Loading…' : 'Load more results'),
+            ),
         )
       : auth.authenticated &&
           h(
@@ -276,7 +291,7 @@ function SpotifyLibraryPage({ controller }) {
         ? await controller.loadSpotifyPlaylist(playlist, start)
         : await controller.loadSpotifyPlaylists(start)
       if (token !== request.current) return
-      if (playlist) setDetail((previous) => (more ? [...previous, ...data.tracks] : data.tracks))
+      if (playlist) setDetail((previous) => (more ? [...previous, ...(data.rows || data.tracks)] : (data.rows || data.tracks)))
       else setLibrary((previous) => (more ? [...previous, ...data.items] : data.items))
       setNext(data.next)
       setOffset(playlist ? data.nextOffset : start + 50)

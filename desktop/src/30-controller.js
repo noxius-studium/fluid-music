@@ -1332,7 +1332,8 @@ function createController(ctx, hostCapabilities = {}) {
     const albums = (data?.albums?.items || []).map(album => normalizeQueueItem({ source: 'spotify', id: album.id, title: album.name, subtitle: (album.artists || []).map(artist => artist.name).join(', '), uri: album.uri, artwork: album.images?.[0]?.url, kind: 'album' })).filter(Boolean)
     const spotifyPlaylists = (data?.playlists?.items || []).filter(Boolean).map(playlist => normalizeQueueItem({ source: 'spotify', id: playlist.id, title: playlist.name, subtitle: playlist.owner?.display_name || 'Spotify playlist', uri: playlist.uri, artwork: playlist.images?.[0]?.url, kind: 'playlist' })).filter(Boolean)
     const artists = (data?.artists?.items || []).map(artist => ({ id: safeText(artist.id), source: 'spotify', kind: 'artist', title: safeText(artist.name, 'Artist'), subtitle: `${Number(artist.followers?.total || 0).toLocaleString()} followers`, artwork: safeText(artist.images?.[0]?.url), uri: safeText(artist.uri), genres: Array.isArray(artist.genres) ? artist.genres.slice(0, 3) : [] }))
-    return { tracks, albums, playlists: spotifyPlaylists, artists }
+    const cursors = { tracks: Boolean(data?.tracks?.next), albums: Boolean(data?.albums?.next), playlists: Boolean(data?.playlists?.next), artists: Boolean(data?.artists?.next) }
+    return { tracks, albums, playlists: spotifyPlaylists, artists, cursors, offset: Math.max(0, Number(offset) || 0) }
   }
 
   async function loadSpotifyPlaylists(offset = 0) {
@@ -1347,17 +1348,33 @@ function createController(ctx, hostCapabilities = {}) {
     const start = Math.max(0, Math.floor(Number(offset) || 0))
     const data = await spotifyRequest(`/playlists/${encodeURIComponent(id)}/tracks?limit=50&offset=${start}`)
     if (!Array.isArray(data?.items)) throw new Error('Spotify did not return playlist tracks. Retry or reconnect Spotify.')
-    const tracks = data.items.map((entry, at) => {
-      const track = spotifyTrack(entry?.track || entry?.item || entry)
-      if (!track) return null
-      return { ...track, contextUri: `spotify:playlist:${id}`, contextPosition: start + at }
-    }).filter(Boolean)
+    const tracks = [], unavailable = []
+    data.items.forEach((entry, at) => {
+      // An explicit null track/item means removed/unavailable — never fall
+      // back to the wrapper object itself.
+      const raw = entry && typeof entry === 'object' && ('track' in entry || 'item' in entry) ? (entry.track ?? entry.item) : entry
+      const position = start + at
+      const contextUri = `spotify:playlist:${id}`
+      const track = spotifyTrack(raw)
+      if (!track || raw?.is_playable === false || raw?.is_local) {
+        // Unknown/unavailable/restricted entries stay visible at their exact
+        // occurrence position — never silently dropped, never playable.
+        unavailable.push({ ...(track || {}), source: 'spotify', kind: 'unavailable', unavailable: true, playable: false, id: track?.id || `unavailable:${id}:${position}`, title: track?.title || 'Unavailable track', unavailableReason: spotifyEntryUnavailableReason(raw), contextUri, contextPosition: position })
+        return
+      }
+      tracks.push({ ...track, relinked: Boolean(raw?.linked_from), subtitle: raw?.linked_from ? `${track.subtitle} · relinked by Spotify` : track.subtitle, contextUri, contextPosition: position })
+    })
+    const rows = [...tracks, ...unavailable].sort((a, b) => a.contextPosition - b.contextPosition)
     const total = Number.isFinite(data.total) ? Math.max(0, data.total) : start + data.items.length
     const nextOffset = start + data.items.length
-    return { playlist, tracks, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: data.items.length - tracks.length }
+    return { playlist, tracks, unavailable, rows, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: unavailable.length }
   }
 
   function playSpotifyPlaylistTrack(queueItem, track) {
+    if (track?.unavailable || track?.playable === false) {
+      message.set(track?.unavailableReason || 'That entry is unavailable on Spotify.')
+      return Promise.resolve(false)
+    }
     if (!/^spotify:playlist:[A-Za-z0-9]+$/.test(queueItem?.uri || '') || track?.contextUri !== queueItem.uri || !Number.isInteger(track.contextPosition) || track.contextPosition < 0 || track.contextPosition > 10000) {
       message.set('Refresh this Spotify playlist before choosing the track.')
       return Promise.resolve(false)
