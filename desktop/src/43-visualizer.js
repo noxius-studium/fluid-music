@@ -93,7 +93,7 @@ function YouTubeTransport({ controller, frameRef, item }) {
         send('setVolume', [Math.round(clampVolume(controller.volume.get()) * 100)])
         return
       }
-      setPlaying(parsed.playing)
+      if (parsed.kind === 'state') setPlaying(parsed.playing)
       controller.reportYouTubeState(parsed)
     }
     window.addEventListener('message', receive)
@@ -114,6 +114,7 @@ function MiniPlayer({ controller }) {
   const spotify = useValue(controller.spotify)
   const status = useValue(controller.status)
   const progress = useValue(controller.progress)
+  const youtubeState = useValue(controller.youtube)
   const item = queue[at]
   const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title
@@ -126,9 +127,13 @@ function MiniPlayer({ controller }) {
       'section',
       { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
       h('div', { className: 'fluid-youtube-frame-wrap' },
-        h(EmbeddedYouTubeFrame, { controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
       ),
+      youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
+      youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
+        youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )
   }
   return h(

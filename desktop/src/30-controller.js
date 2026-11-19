@@ -623,7 +623,7 @@ function createController(ctx) {
     }
     if (item.source === 'youtube') {
       armYouTubeQueueGuard(item, token)
-      youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', item })
+      youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
       message.set('YouTube transport is in the FluidMusic player pane.')
@@ -1227,12 +1227,18 @@ function createController(ctx) {
     const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
     if (state.videoId && state.videoId !== expectedVideoId) return false
     if (state.kind === 'ready') {
-      youtube.set({ ...youtube.get(), status: 'ready', error: '' })
+      youtube.set({ ...youtube.get(), status: 'ready', error: '', reason: '' })
+      return true
+    }
+    const guard = youtubeQueueGuard
+    if (guard && guard.token !== transition) return false
+    if (state.kind === 'error' || state.kind === 'autoplay-blocked') {
+      const failure = classifyYouTubeFailure(state.kind === 'error' ? { kind: 'player-error', errorCode: state.errorCode } : { kind: 'autoplay-blocked' })
+      youtube.set({ ...youtube.get(), status: failure.reason === 'autoplay-blocked' ? 'paused' : 'error', reason: failure.reason, error: failure.message, action: failure.action, retryable: failure.retryable, fallbackEligible: failure.fallbackEligible })
+      if (failure.message) message.set(`${failure.message} ${failure.remedy}`.trim())
       return true
     }
     if (state.kind !== 'state') return false
-    const guard = youtubeQueueGuard
-    if (guard && guard.token !== transition) return false
     youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
     progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
     status.set(state.playing ? 'playing' : 'paused')
@@ -1242,6 +1248,13 @@ function createController(ctx) {
     }
     if (state.ended) requestYouTubeQueueAdvance()
     return true
+  }
+
+  function retryYouTube() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return Promise.resolve(false)
+    youtube.set({ ...youtube.get(), status: 'loading', error: '', reason: '', reloadToken: (Number(youtube.get().reloadToken) || 0) + 1 })
+    return playAt(index.get()).then(() => true)
   }
 
   async function searchSpotify(query) {
@@ -1383,7 +1396,7 @@ function createController(ctx) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,

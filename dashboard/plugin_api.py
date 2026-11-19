@@ -850,6 +850,26 @@ def _youtube_item(info: Any) -> dict[str, Any] | None:
     }
 
 
+def _youtube_provider_error(exc: Exception) -> dict[str, str]:
+    """Classify ONLY explicit provider signals; anything else stays undetermined.
+
+    Never label an unknown failure removed/private/unavailable, and never echo
+    raw provider text (it can contain URLs, IDs or account hints).
+    """
+    text = str(exc).lower()
+    if "private video" in text:
+        return {"error_code": "private-video", "error": "This video is private."}
+    if "video unavailable" in text or "has been removed" in text or "no longer available" in text:
+        return {"error_code": "content-unavailable", "error": "This video is unavailable."}
+    if "sign in" in text or "age-restricted" in text or "age restricted" in text or "confirm your age" in text:
+        return {"error_code": "consent-required", "error": "This video requires YouTube sign-in or age confirmation."}
+    if "429" in text or "too many requests" in text or "quota" in text:
+        return {"error_code": "rate-limited", "error": "YouTube is rate-limiting requests. Wait a moment and retry."}
+    if "timed out" in text or "timeout" in text or "urlopen" in text or "connection" in text or "network" in text:
+        return {"error_code": "network-error", "error": "YouTube could not be reached. Check the connection and retry."}
+    return {"error_code": "undetermined", "error": "YouTube metadata could not be loaded."}
+
+
 def _youtube_extract(target: str, *, flat: bool) -> Any:
     from yt_dlp import YoutubeDL
     options = {
@@ -888,9 +908,9 @@ async def youtube_search(q: str, limit: int = 12) -> dict[str, Any]:
         return {"ok": True, "data": {"items": items[:bounded_limit]}}
     except ValueError as exc:
         return _error(str(exc))
-    except Exception:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+    except Exception as exc:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
         logger.warning("YouTube search failed", exc_info=True)
-        return _error("YouTube search is temporarily unavailable")
+        return {"ok": False, **_youtube_provider_error(exc)}
 
 
 @router.post("/youtube/resolve")
@@ -905,9 +925,9 @@ async def youtube_resolve(request: Request) -> dict[str, Any]:
         return {"ok": True, "data": {"item": item}}
     except ValueError as exc:
         return _error(str(exc))
-    except Exception:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+    except Exception as exc:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
         logger.warning("YouTube metadata lookup failed", exc_info=True)
-        return _error("YouTube video details could not be loaded")
+        return {"ok": False, **_youtube_provider_error(exc)}
 
 
 @router.get("/history")

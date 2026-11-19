@@ -286,6 +286,11 @@ function parseYouTubePlayerMessage(value, expectedVideoId = '') {
   if (!data || typeof data !== 'object') return null
   const info = data.info && typeof data.info === 'object' ? data.info : null
   if (data.event === 'onReady') return { kind: 'ready', videoId: safeText(info?.videoData?.video_id) }
+  if (data.event === 'onError') {
+    const errorCode = Number(data.info)
+    return Number.isInteger(errorCode) && errorCode >= 0 ? { kind: 'error', errorCode } : null
+  }
+  if (data.event === 'onAutoplayBlocked') return { kind: 'autoplay-blocked' }
   if (data.event !== 'infoDelivery' || !info) return null
   const videoId = safeText(info.videoData?.video_id)
   if (expectedVideoId && videoId && videoId !== expectedVideoId) return null
@@ -300,6 +305,54 @@ function parseYouTubePlayerMessage(value, expectedVideoId = '') {
     positionMs: Math.max(0, Number(info.currentTime) || 0) * 1000,
     durationMs: Math.max(0, Number(info.duration) || 0) * 1000
   }
+}
+
+const YOUTUBE_FAILURES = {
+  'invalid-video-id': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'That YouTube link or video ID is invalid.', remedy: 'Check the URL or choose another video.' },
+  'html5-player-failure': { action: 'retry', retryable: true, fallbackEligible: true, contentAvailable: null, message: 'The YouTube player failed to start this video.', remedy: 'Retry once; if it keeps failing, use Skip or another video.' },
+  'video-not-found': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video was removed or is not found.', remedy: 'Skip it or choose another video.' },
+  'embed-denied-by-owner': { action: 'fallback', retryable: false, fallbackEligible: true, contentAvailable: null, message: "This video's owner disabled embedding.", remedy: 'Use Skip, or try the first-party watch fallback when available.' },
+  'missing-referer-identification': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube rejected the player identification (Referer/origin).', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'autoplay-blocked': { action: 'interact', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The browser blocked autoplay.', remedy: 'Press play in the FluidMusic player to start.' },
+  'wrong-video-state': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player is showing a different video than selected.', remedy: 'Retry to reload the selected video.' },
+  'origin-mismatch': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player origin does not match the embedded frame.', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'player-not-ready': { action: 'wait', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The YouTube player is not ready yet.', remedy: 'Wait for the player to finish loading.' },
+  'stale-generation': { action: 'ignore', retryable: false, fallbackEligible: false, contentAvailable: null, message: '', remedy: '' },
+  'content-unavailable': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is unavailable.', remedy: 'Skip it or choose another video.' },
+  'private-video': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is private.', remedy: 'Skip it; private videos cannot be played.' },
+  'consent-required': { action: 'sign-in', retryable: false, fallbackEligible: true, contentAvailable: null, message: 'This video requires YouTube sign-in or age confirmation.', remedy: 'Sign in on the first-party watch surface when available, or skip.' },
+  'rate-limited': { action: 'wait', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+  'network-error': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube could not be reached.', remedy: 'Check the connection and retry.' },
+  'undetermined': { action: 'diagnose', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'YouTube playback failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+}
+function classifyYouTubeFailure(signal) {
+  // Documented IFrame API semantics (PROVIDER_RESEARCH): 2 invalid ID,
+  // 5 HTML5 failure, 100 removed/not found, 101/150 owner embed denial,
+  // 153 missing Referer/API-client identification. Unknown stays unknown —
+  // an iframe that did not start is NOT evidence of removed/private content.
+  let reason = 'undetermined'
+  if (signal && typeof signal === 'object') {
+    if (signal.kind === 'player-error') {
+      const code = Number(signal.errorCode)
+      reason = code === 2 ? 'invalid-video-id'
+        : code === 5 ? 'html5-player-failure'
+        : code === 100 ? 'video-not-found'
+        : code === 101 || code === 150 ? 'embed-denied-by-owner'
+        : code === 153 ? 'missing-referer-identification'
+        : 'undetermined'
+    } else if (signal.kind === 'autoplay-blocked') {
+      reason = 'autoplay-blocked'
+    } else if (signal.kind === 'bridge') {
+      reason = signal.reason === 'wrong-video' ? 'wrong-video-state'
+        : signal.reason === 'wrong-origin' ? 'origin-mismatch'
+        : signal.reason === 'not-ready' ? 'player-not-ready'
+        : signal.reason === 'stale-generation' ? 'stale-generation'
+        : 'undetermined'
+    } else if (signal.kind === 'provider' && YOUTUBE_FAILURES[signal.code]) {
+      reason = signal.code
+    }
+  }
+  return { reason, ...YOUTUBE_FAILURES[reason] }
 }
 
 const RADIO_PRESETS = [

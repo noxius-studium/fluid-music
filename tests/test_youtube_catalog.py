@@ -105,7 +105,8 @@ def test_search_provider_failure_is_sanitized(api: Any, monkeypatch: pytest.Monk
     response = run(request(api, "GET", "/youtube/search?q=night"))
     body = response.json()
     assert body["ok"] is False
-    assert body["error"] == "YouTube search is temporarily unavailable"
+    assert body["error_code"] == "rate-limited"  # explicit quota signal classified precisely (FM-07)
+    assert body["error"] == "YouTube is rate-limiting requests. Wait a moment and retry."
     assert "secret" not in response.text
     assert "internal.example" not in response.text
     assert "Traceback" not in response.text
@@ -174,6 +175,7 @@ def test_resolve_provider_failure_is_sanitized(api: Any, monkeypatch: pytest.Mon
     response = run(request(api, "POST", "/youtube/resolve", json={"url": "https://youtu.be/abcdefghijk"}))
     body = response.json()
     assert body["ok"] is False
-    assert body["error"] == "YouTube video details could not be loaded"
+    assert body["error_code"] == "private-video"  # explicit private signal wins (FM-07)
+    assert body["error"] == "This video is private."
     assert "secret" not in response.text
     assert "internal.example" not in response.text
