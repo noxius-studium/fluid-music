@@ -2951,6 +2951,7 @@ function SearchPage({ controller }) {
   return h(
     'div',
     {},
+    h('p', { className: 'fluid-section-copy fluid-spotify-discovery' }, 'Play Spotify results now or add them to your temporary Up Next queue. FluidMusic collections are local-only; your Spotify playlists stay on Spotify.'),
     h(
       'form',
       { className: 'fluid-searchbar', onSubmit: search },
