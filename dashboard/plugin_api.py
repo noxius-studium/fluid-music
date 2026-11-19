@@ -931,16 +931,29 @@ async def youtube_resolve(request: Request) -> dict[str, Any]:
 
 
 @router.get("/history")
-async def playback_history(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+async def playback_history(
+    limit: int = 100,
+    offset: int = 0,
+    query: str = "",
+    source: str = "",
+    since: str = "",
+    until: str = "",
+) -> dict[str, Any]:
     try:
         result = await anyio.to_thread.run_sync(
             lambda: _local_library().list_history(
                 limit=_bounded_int(limit, 100, 1, 500),
                 offset=_bounded_int(offset, 0, 0, 1_000_000),
+                query=query,
+                source=source,
+                since=since,
+                until=until,
             )
         )
         return {"ok": True, "data": result}
-    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
         return _error("Playback history could not be loaded")
 
 
@@ -963,6 +976,122 @@ async def playback_history_clear() -> dict[str, Any]:
         return {"ok": True, "data": {"removed": removed}}
     except (OSError, RuntimeError, sqlite3.Error):
         return _error("Playback history could not be cleared")
+
+
+@router.delete("/history/{entry_id}")
+async def playback_history_remove(entry_id: int) -> dict[str, Any]:
+    try:
+        removed = await anyio.to_thread.run_sync(lambda: _local_library().delete_history_entry(entry_id))
+        return {"ok": True, "data": {"removed": removed}}
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("That history entry could not be removed")
+
+
+@router.get("/history/retention")
+async def history_retention_get() -> dict[str, Any]:
+    try:
+        days = await anyio.to_thread.run_sync(lambda: _local_library().get_history_retention())
+        return {"ok": True, "data": {"days": days}}
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("History retention could not be loaded")
+
+
+@router.put("/history/retention")
+async def history_retention_set(request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        result = await anyio.to_thread.run_sync(lambda: _local_library().set_history_retention(payload.get("days")))
+        return {"ok": True, "data": result}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("History retention could not be updated")
+
+
+@router.get("/resume")
+async def resume_get(media_key: str = "") -> dict[str, Any]:
+    try:
+        resume = await anyio.to_thread.run_sync(lambda: _local_library().get_resume(media_key))
+        return {"ok": True, "data": {"resume": resume}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Resume position could not be loaded")
+
+
+@router.put("/resume")
+async def resume_save(request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        resume = await anyio.to_thread.run_sync(
+            lambda: _local_library().save_resume(payload.get("media_key"), payload.get("position_ms"), payload.get("duration_ms"))
+        )
+        return {"ok": True, "data": {"resume": resume}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Resume position could not be saved")
+
+
+@router.delete("/resume")
+async def resume_delete(media_key: str = "") -> dict[str, Any]:
+    try:
+        removed = await anyio.to_thread.run_sync(lambda: _local_library().delete_resume(media_key))
+        return {"ok": True, "data": {"removed": removed}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Resume position could not be cleared")
+
+
+@router.get("/bookmarks")
+async def bookmarks_list(media_key: str = "") -> dict[str, Any]:
+    try:
+        items = await anyio.to_thread.run_sync(lambda: _local_library().list_bookmarks(media_key))
+        return {"ok": True, "data": {"items": items}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Bookmarks could not be loaded")
+
+
+@router.post("/bookmarks")
+async def bookmarks_add(request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        bookmark = await anyio.to_thread.run_sync(
+            lambda: _local_library().add_bookmark(payload.get("media_key"), payload.get("position_ms"), payload.get("label", ""))
+        )
+        return {"ok": True, "data": {"bookmark": bookmark}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Bookmark could not be saved")
+
+
+@router.put("/bookmarks/{bookmark_id}")
+async def bookmarks_edit(bookmark_id: int, request: Request) -> dict[str, Any]:
+    try:
+        payload = await _payload(request)
+        bookmark = await anyio.to_thread.run_sync(
+            lambda: _local_library().update_bookmark(bookmark_id, payload.get("position_ms"), payload.get("label"))
+        )
+        if bookmark is None:
+            return _error("That bookmark no longer exists")
+        return {"ok": True, "data": {"bookmark": bookmark}}
+    except ValueError as exc:
+        return _error(str(exc))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Bookmark could not be updated")
+
+
+@router.delete("/bookmarks/{bookmark_id}")
+async def bookmarks_remove(bookmark_id: int) -> dict[str, Any]:
+    try:
+        removed = await anyio.to_thread.run_sync(lambda: _local_library().delete_bookmark(bookmark_id))
+        return {"ok": True, "data": {"removed": removed}}
+    except (OSError, RuntimeError, sqlite3.Error):
+        return _error("Bookmark could not be deleted")
 
 
 @router.get("/local/roots")

@@ -290,6 +290,59 @@ function normalizeListeningSessions(value) {
   }).filter(Boolean)
 }
 
+const LONG_FORM_MIN_MS = 600000
+const SLEEP_PRESETS_MIN = [15, 30, 60]
+const SLEEP_MAX_CUSTOM_MIN = 720
+function isLongFormEligible(item) {
+  // Resume/bookmarks apply to eligible long-form YouTube/local items only.
+  // LIVE radio is never seekable; Spotify Connect position is provider-owned.
+  return Boolean(item && (item.source === 'youtube' || item.source === 'local') && !item.unavailable && Number(item.durationMs) >= LONG_FORM_MIN_MS)
+}
+function mediaKeyFor(item) {
+  if (!item) return ''
+  if (item.source === 'youtube') {
+    const id = safeText(item.id).replace(/^youtube:/, '')
+    return id ? `youtube:${id}` : ''
+  }
+  if (item.source === 'local' && item.localTrackId) return `local:${item.localTrackId}`
+  return ''
+}
+function normalizeResumePosition(value) {
+  if (!value || typeof value !== 'object') return null
+  const mediaKey = safeText(value.media_key ?? value.mediaKey)
+  if (!mediaKey) return null
+  return {
+    mediaKey,
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    durationMs: Math.max(0, Math.min(86400000, Number(value.duration_ms ?? value.durationMs) || 0)),
+  }
+}
+function normalizeBookmark(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = Number(value.id)
+  if (!Number.isInteger(id) || id <= 0) return null
+  return {
+    id,
+    mediaKey: safeText(value.media_key ?? value.mediaKey),
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    label: safeText(value.label).slice(0, 120),
+    createdAt: safeText(value.created_at ?? value.createdAt),
+  }
+}
+function formatPositionMs(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = Math.floor(total % 60)
+  const pad = value => String(value).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+function boundedSleepMinutes(value) {
+  const minutes = Math.round(Number(value))
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > SLEEP_MAX_CUSTOM_MIN) return 0
+  return minutes
+}
+
 function normalizeSpotifyAuth(value) {
   const root = value?.data || value || {}
   const data = root.auth || root.spotify || root
@@ -546,6 +599,16 @@ const CSS = `
 .fluid-queue-row input[type=checkbox]{accent-color:var(--ui-accent);width:16px;height:16px;margin:0}
 .fluid-session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center;min-width:0}
 @container fluid (max-width:580px){.fluid-queue-row[data-selectable=true]{grid-template-columns:18px 32px minmax(0,1fr)}.fluid-queue-row[data-selectable=true]>.fluid-row-actions{grid-column:3}.fluid-session-row{grid-template-columns:1fr}.fluid-session-row>.fluid-row-actions{justify-content:flex-start;flex-wrap:wrap}}
+.fluid-player-extras{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0 2px;border-top:1px solid var(--fm-line);font-size:11px;min-width:0}
+.fluid-resume-offer{display:flex;flex-wrap:wrap;align-items:center;gap:8px;color:var(--ui-text-secondary);min-width:0}
+.fluid-sleep-chip{display:inline-flex;align-items:center;gap:6px;color:var(--ui-text-secondary)}
+.fluid-sleep-chip[data-armed=true]{color:var(--ui-accent)}
+.fluid-bookmark-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--fm-line);min-width:0}
+.fluid-history-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:end}
+.fluid-filter-field{display:flex;flex-direction:column;gap:3px;font-size:10px;color:var(--ui-text-tertiary);min-width:0}
+.fluid-filter-field .fluid-input{min-width:0}
+.fluid-history-pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+@container fluid (max-width:580px){.fluid-player-extras{padding:4px 0 2px}.fluid-history-filters{flex-direction:column;align-items:stretch}.fluid-bookmark-row{grid-template-columns:auto minmax(0,1fr)}.fluid-bookmark-row>.fluid-row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-titlebar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `
 
@@ -568,7 +631,7 @@ function Icon({ kind }) {
     playlist: 'M4 6h10M4 11h10M4 16h7M18 5v11M15.5 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5',
     search: 'M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM16 16l5 5', queue: 'M4 6h12M4 12h12M4 18h8M19 16v6M16 19h6', volume: 'M5 10v4h4l5 4V6l-5 4zM18 9c1 2 1 4 0 6',
     shuffle: 'M4 7h3c4 0 5 10 9 10h4M17 14l3 3-3 3M4 17h3c1.5 0 2.5-1.4 3.4-3M15 7h5M17 4l3 3-3 3', repeat: 'M4 8l3-3 3 3M7 5h9a4 4 0 0 1 4 4v2M20 16l-3 3-3-3M17 19H8a4 4 0 0 1-4-4v-2',
-    trash: 'M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14', logs: 'M5 5h14M5 10h14M5 15h9M5 20h12', settings: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19 13.5l2 1.5-2 3.5-2.4-1a8 8 0 0 1-2.1 1.2L14.2 21h-4.4l-.3-2.3a8 8 0 0 1-2.1-1.2l-2.4 1L3 15l2-1.5a8 8 0 0 1 0-3L3 9l2-3.5 2.4 1a8 8 0 0 1 2.1-1.2L9.8 3h4.4l.3 2.3a8 8 0 0 1 2.1 1.2l2.4-1L21 9l-2 1.5a8 8 0 0 1 0 3z'
+    trash: 'M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14', logs: 'M5 5h14M5 10h14M5 15h9M5 20h12', clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18M12 7v5l3 2', bookmark: 'M7 4h10v16l-5-4-5 4z', edit: 'M4 20l4-1L20 7l-3-3L5 16l-1 4zM14 6l3 3', settings: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19 13.5l2 1.5-2 3.5-2.4-1a8 8 0 0 1-2.1 1.2L14.2 21h-4.4l-.3-2.3a8 8 0 0 1-2.1-1.2l-2.4 1L3 15l2-1.5a8 8 0 0 1 0-3L3 9l2-3.5 2.4 1a8 8 0 0 1 2.1-1.2L9.8 3h4.4l.3 2.3a8 8 0 0 1 2.1 1.2l2.4-1L21 9l-2 1.5a8 8 0 0 1 0 3z'
   }
   return jsx('svg', { viewBox: '0 0 24 24', width: 15, height: 15, fill: kind === 'play' || kind === 'next' || kind === 'previous' ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, children: jsx('path', { d: paths[kind] || paths.music }) })
 }
@@ -607,9 +670,20 @@ function createController(ctx, hostCapabilities = {}) {
   const undoState = atom(null)
   const queueUndo = atom(null)
   const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
+  const resumeOffer = atom(null)
+  const bookmarks = atom([])
+  const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
+  const historyRetention = atom(0)
+  const historyFilters = atom({ query: '', source: '', since: '', until: '' })
+  const historyOffset = atom(0)
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
+  let sleepInterval = null
+  let sleepDeadline = 0
+  let sleepBound = null
+  let sleepEndedFor = null
+  let lastResumeSaveAt = 0
   let spotifyStartedUri = ''
   let localRefreshVersion = 0
   const status = atom('idle')
@@ -751,8 +825,17 @@ function createController(ctx, hostCapabilities = {}) {
       })
       .catch(() => {})
   }
-  const refreshHistory = async () => {
-    const data = await request('/history?limit=500&offset=0')
+  const refreshHistory = async (filters = null, offset = 0) => {
+    if (filters) historyFilters.set({ query: safeText(filters.query), source: safeText(filters.source), since: safeText(filters.since), until: safeText(filters.until) })
+    const active = historyFilters.get()
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0))
+    historyOffset.set(safeOffset)
+    const params = new URLSearchParams({ limit: '50', offset: String(safeOffset) })
+    if (active.query) params.set('query', active.query)
+    if (active.source) params.set('source', active.source)
+    if (active.since) params.set('since', active.since)
+    if (active.until) params.set('until', active.until)
+    const data = await request(`/history?${params.toString()}`)
     const entries = (Array.isArray(data?.items) ? data.items : []).map(entry => {
       const item = normalizeQueueItem(entry?.item)
       return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
@@ -765,6 +848,24 @@ function createController(ctx, hostCapabilities = {}) {
     await request('/history', { method: 'DELETE' })
     history.set([])
     historyTotal.set(0)
+    historyOffset.set(0)
+  }
+  const removeHistoryEntry = async id => {
+    await request(`/history/${Number(id)}`, { method: 'DELETE' })
+    history.set(history.get().filter(entry => entry.id !== Number(id)))
+    historyTotal.set(Math.max(0, historyTotal.get() - 1))
+  }
+  const loadHistoryRetention = async () => {
+    const data = await request('/history/retention')
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    return historyRetention.get()
+  }
+  const setHistoryRetention = async days => {
+    const data = await request('/history/retention', { method: 'PUT', body: { days } })
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    message.set(Number(data?.removed) > 0 ? `Retention updated: ${data.removed} older entry(s) removed.` : 'History retention updated.')
+    await refreshHistory(null, 0).catch(() => {})
+    return historyRetention.get()
   }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
@@ -821,7 +922,10 @@ function createController(ctx, hostCapabilities = {}) {
     progress.set({ positionMs, durationMs: anchor.durationMs })
     const guard = spotifyQueueGuard
     if (anchor.playing && anchor.durationMs > 0 && positionMs >= anchor.durationMs && guard?.expectedUri === anchor.uri) {
-      requestHermesQueueAdvance('projected-end', anchor.uri)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(current())) {
+        finishSleepAtEndOfItem(current())
+        void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+      } else requestHermesQueueAdvance('projected-end', anchor.uri)
     }
   }
 
@@ -950,7 +1054,7 @@ function createController(ctx, hostCapabilities = {}) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       played = true
-
+      sleepEndedFor = null
       status.set('playing')
       message.set('')
       if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
@@ -959,10 +1063,19 @@ function createController(ctx, hostCapabilities = {}) {
       if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
     })
     element.addEventListener('timeupdate', () => {
-      if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+      if (isCurrent()) {
+        progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+        saveResumePosition(false)
+      }
     })
-    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) status.set('paused') })
-    element.addEventListener('ended', () => { if (isCurrent()) void next() })
+    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) { status.set('paused'); saveResumePosition(false) } })
+    element.addEventListener('ended', () => {
+      if (!isCurrent()) return
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) { finishSleepAtEndOfItem(item); return }
+      if (sleepEndedFor === item.id) return
+      void next()
+    })
     element.addEventListener('error', () => {
       if (!isCurrent()) return
       if (!played && sourceIndex + 1 < sources.length) {
@@ -1219,6 +1332,11 @@ function createController(ctx, hostCapabilities = {}) {
   async function startSelected(nextIndex, token, contextPosition = null) {
     const item = queue.get()[nextIndex]
     if (!item || token !== transition || disposed) return
+    const previousItem = current()
+    if (previousItem && previousItem.id !== item.id) saveResumePosition(true)
+    if (sleepBound && (sleepBound.id !== item.id || sleepBound.source !== item.source)) cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.')
+    sleepEndedFor = null
+    void loadResumeContext(item, token)
     index.set(nextIndex)
     persist()
     message.set('')
@@ -1284,6 +1402,7 @@ function createController(ctx, hostCapabilities = {}) {
     return runTransition(async token => {
       if (token !== transition) return
       const item = current()
+      saveResumePosition(true)
       if (!item) { status.set('idle'); return }
 
       if (item.source === 'radio') {
@@ -1879,12 +1998,17 @@ function createController(ctx, hostCapabilities = {}) {
     if (state.kind !== 'state') return false
     youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
     progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    saveResumePosition(false)
     status.set(state.playing ? 'playing' : 'paused')
     if (state.playing && !youtubeHistoryRecorded) {
       youtubeHistoryRecorded = true
       recordHistory(item)
     }
-    if (state.ended) requestYouTubeQueueAdvance()
+    if (state.ended) {
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) finishSleepAtEndOfItem(item)
+      else requestYouTubeQueueAdvance()
+    }
     return true
   }
 
@@ -2083,12 +2207,15 @@ function createController(ctx, hostCapabilities = {}) {
   void refreshSpotifyDevices()
   void refreshLocalLibrary().catch(() => {})
   void refreshHistory().catch(() => {})
+  void loadHistoryRetention().catch(() => {})
   void refreshQueuedYouTubeMetadata()
   ctx.onDispose(() => {
     disposed = true
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
+    clearInterval(sleepInterval)
+    sleepInterval = null
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
@@ -2287,6 +2414,205 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // ---- Long-form resume, bookmarks and source-aware sleep timer (FM-21) ----
+  const monotonicNow = () => (typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now())
+
+  function sleepBoundMatches(item) {
+    return Boolean(sleepBound && item && sleepBound.id === item.id && sleepBound.source === item.source)
+  }
+
+  function loadResumeContext(item, token) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) {
+      if (token === transition && current()?.id === item.id) { resumeOffer.set(null); bookmarks.set([]) }
+      return Promise.resolve()
+    }
+    return Promise.all([
+      request(`/resume?media_key=${encodeURIComponent(key)}`).catch(() => null),
+      request(`/bookmarks?media_key=${encodeURIComponent(key)}`).catch(() => null),
+    ]).then(([resumeData, bookmarkData]) => {
+      if (token !== transition || current()?.id !== item.id) return
+      const saved = normalizeResumePosition(resumeData?.resume)
+      const position = saved && saved.mediaKey === key ? saved.positionMs : 0
+      const duration = saved && saved.mediaKey === key && saved.durationMs > 0 ? saved.durationMs : Number(item.durationMs) || 0
+      // Explicit Resume/Start over only — never an automatic seek on selection.
+      const offerable = position >= 15000 && (duration <= 0 || position < duration - 15000)
+      resumeOffer.set(offerable ? { mediaKey: key, positionMs: position, durationMs: duration, title: item.title } : null)
+      bookmarks.set((Array.isArray(bookmarkData?.items) ? bookmarkData.items : []).map(normalizeBookmark).filter(Boolean))
+    })
+  }
+
+  function saveResumePosition(force = false) {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (!force && monotonicNow() - lastResumeSaveAt < 15000) return
+    const { positionMs, durationMs } = progress.get()
+    if (positionMs < 15000) return
+    if (durationMs > 0 && positionMs >= durationMs - 15000) return
+    lastResumeSaveAt = monotonicNow()
+    void request('/resume', { method: 'PUT', body: { media_key: key, position_ms: Math.round(positionMs), duration_ms: Math.round(durationMs) } }).catch(() => {})
+  }
+
+  function clearResumeOnEnded(item) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (current()?.id === item.id) resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+  }
+
+  function resumeHere() {
+    const offer = resumeOffer.get()
+    if (!offer || mediaKeyFor(current()) !== offer.mediaKey) return false
+    resumeOffer.set(null)
+    void seekTo(offer.positionMs)
+    message.set(`Resumed at ${formatPositionMs(offer.positionMs)}.`)
+    return true
+  }
+
+  function startOver() {
+    const offer = resumeOffer.get()
+    const key = offer && mediaKeyFor(current()) === offer.mediaKey ? offer.mediaKey : mediaKeyFor(current())
+    if (!key) return false
+    resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+    void seekTo(0)
+    message.set('Starting over from the beginning.')
+    return true
+  }
+
+  const sortBookmarks = entries => [...entries].sort((a, b) => a.positionMs - b.positionMs || a.id - b.id)
+
+  function refreshBookmarks() {
+    const key = mediaKeyFor(current())
+    if (!key) { bookmarks.set([]); return Promise.resolve([]) }
+    return request(`/bookmarks?media_key=${encodeURIComponent(key)}`)
+      .then(data => {
+        const items = (Array.isArray(data?.items) ? data.items : []).map(normalizeBookmark).filter(Boolean)
+        if (mediaKeyFor(current()) === key) bookmarks.set(items)
+        return items
+      })
+      .catch(() => [])
+  }
+
+  async function addBookmark(label = '') {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) { message.set('Bookmarks are available for long-form YouTube and local items (10 minutes or longer).'); return null }
+    const positionMs = Math.round(progress.get().positionMs)
+    try {
+      const data = await request('/bookmarks', { method: 'POST', body: { media_key: key, position_ms: positionMs, label } })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark && mediaKeyFor(current()) === key) bookmarks.set(sortBookmarks([...bookmarks.get(), bookmark]))
+      message.set(`Bookmark saved at ${formatPositionMs(positionMs)}.`)
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be saved.')); return null }
+  }
+
+  async function editBookmark(id, changes = {}) {
+    const body = {}
+    if (changes.positionMs !== undefined) body.position_ms = Math.round(Number(changes.positionMs) || 0)
+    if (changes.label !== undefined) body.label = changes.label
+    try {
+      const data = await request(`/bookmarks/${Number(id)}`, { method: 'PUT', body })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark) bookmarks.set(sortBookmarks(bookmarks.get().map(entry => entry.id === bookmark.id ? bookmark : entry)))
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be updated.')); return null }
+  }
+
+  async function deleteBookmark(id) {
+    try {
+      await request(`/bookmarks/${Number(id)}`, { method: 'DELETE' })
+      bookmarks.set(bookmarks.get().filter(entry => entry.id !== Number(id)))
+      return true
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be deleted.')); return false }
+  }
+
+  function jumpToBookmark(id) {
+    const bookmark = bookmarks.get().find(entry => entry.id === Number(id))
+    if (!bookmark) return false
+    void seekTo(bookmark.positionMs)
+    message.set(`Jumped to ${formatPositionMs(bookmark.positionMs)}${bookmark.label ? ` · ${bookmark.label}` : ''}.`)
+    return true
+  }
+
+  function disarmSleepTimer() {
+    if (sleepInterval) { clearInterval(sleepInterval); sleepInterval = null }
+    sleepDeadline = 0
+    sleepBound = null
+    sleepTimer.set({ mode: 'off', remainingMs: 0, label: '' })
+  }
+
+  function cancelSleepTimer(reason = 'Sleep timer cancelled.') {
+    if (sleepTimer.get().mode === 'off') return false
+    disarmSleepTimer()
+    message.set(reason)
+    return true
+  }
+
+  function pauseForSleep() {
+    const item = current()
+    if (!item) return
+    if (item.source === 'radio') { stopInternalAudio(); status.set('paused'); return }
+    if (item.source === 'local') { if (audio) audio.pause(); status.set('paused'); return }
+    if (item.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('pauseVideo', []) : false
+      if (!sent) message.set('The YouTube player is not ready, so the sleep timer could not pause it.')
+      return
+    }
+    if (item.source === 'spotify') void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+  }
+
+  function finishSleepAtEndOfItem(item) {
+    // Consume the advance guards so repeated ended reports can never push the
+    // queue forward after the sleep timer chose to stop at this item.
+    sleepEndedFor = item?.id || null
+    if (youtubeQueueGuard) youtubeQueueGuard.advancing = true
+    spotifyProgressAnchor = null
+    spotifyQueueGuard = null
+    disarmSleepTimer()
+    status.set('paused')
+    message.set('Sleep timer finished at the end of the item. Playback paused.')
+  }
+
+  function sleepTick() {
+    if (disposed) { disarmSleepTimer(); return }
+    const state = sleepTimer.get()
+    if (state.mode !== 'duration') return
+    if (!sleepBoundMatches(current())) { cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.'); return }
+    const remainingMs = Math.max(0, sleepDeadline - monotonicNow())
+    if (remainingMs <= 0) {
+      disarmSleepTimer()
+      pauseForSleep()
+      message.set('Sleep timer finished. Playback paused.')
+      return
+    }
+    sleepTimer.set({ ...state, remainingMs })
+  }
+
+  function armSleepTimer(mode, minutes = 0) {
+    const item = current()
+    if (!item) { message.set('Choose something to play before starting a sleep timer.'); return false }
+    if (mode === 'end-of-item') {
+      if (item.source === 'radio') { message.set('Live radio has no end-of-item. Choose a duration instead.'); return false }
+      disarmSleepTimer()
+      sleepBound = { id: item.id, source: item.source }
+      sleepTimer.set({ mode: 'end-of-item', remainingMs: 0, label: 'End of item' })
+      message.set(`Sleep timer armed: pause at the end of “${item.title}”.`)
+      return true
+    }
+    const bounded = boundedSleepMinutes(minutes)
+    if (!bounded) { message.set(`Choose 1–${SLEEP_MAX_CUSTOM_MIN} minutes for the sleep timer.`); return false }
+    disarmSleepTimer()
+    sleepBound = { id: item.id, source: item.source }
+    sleepDeadline = monotonicNow() + bounded * 60000
+    sleepTimer.set({ mode: 'duration', remainingMs: bounded * 60000, label: `${bounded} min` })
+    sleepInterval = setInterval(sleepTick, 1000)
+    message.set(`Sleep timer armed: pause in ${bounded} minute(s).`)
+    return true
+  }
+
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
@@ -2294,6 +2620,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
@@ -4792,12 +5121,41 @@ function MiniPlayer({ controller }) {
 function HistoryPage({ controller }) {
   const entries = useValue(controller.history)
   const total = useValue(controller.historyTotal)
+  const filters = useValue(controller.historyFilters)
+  const offset = useValue(controller.historyOffset)
+  const retention = useValue(controller.historyRetention)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [removing, setRemoving] = useState(null)
+  const [draft, setDraft] = useState({ query: filters.query, source: filters.source, since: filters.since, until: filters.until })
   useEffect(() => { void controller.refreshHistory().catch(() => {}) }, [controller])
+  const applyFilters = () => { void controller.refreshHistory(draft, 0).catch(() => {}) }
+  const resetFilters = () => {
+    const empty = { query: '', source: '', since: '', until: '' }
+    setDraft(empty)
+    void controller.refreshHistory(empty, 0).catch(() => {})
+  }
+  const pageStart = total ? offset + 1 : 0
+  const pageEnd = offset + entries.length
   return h('section', {},
     h('div', { className: 'fluid-compact-toolbar' },
-      h('p', { className: 'fluid-muted' }, `${entries.length}${total > entries.length ? ` of ${total}` : ''} recent play${entries.length === 1 ? '' : 's'}`),
-      h(WorkspaceButton, { disabled: !entries.length, onClick: () => setConfirmClear(true) }, 'Clear history')),
+      h('p', { className: 'fluid-muted' }, `${total} recorded play${total === 1 ? '' : 's'}${total ? ` · showing ${pageStart}–${pageEnd}` : ''}`),
+      h(WorkspaceButton, { disabled: !total, onClick: () => setConfirmClear(true) }, 'Clear history')),
+    h('form', { className: 'fluid-history-filters', onSubmit: (event) => { event.preventDefault(); applyFilters() } },
+      h('label', { className: 'fluid-filter-field' }, 'Title',
+        h('input', { className: 'fluid-input', type: 'search', value: draft.query, onChange: event => setDraft({ ...draft, query: event.target.value }), placeholder: 'Search titles…', 'aria-label': 'Filter history by title' })),
+      h('label', { className: 'fluid-filter-field' }, 'Source',
+        h('select', { className: 'fluid-input', value: draft.source, onChange: event => setDraft({ ...draft, source: event.target.value }), 'aria-label': 'Filter history by source' },
+          [['', 'All sources'], ['spotify', 'Spotify'], ['radio', 'Radio'], ['local', 'Local'], ['youtube', 'YouTube']].map(([value, label]) => h('option', { key: value, value }, label)))),
+      h('label', { className: 'fluid-filter-field' }, 'Since',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.since, onChange: event => setDraft({ ...draft, since: event.target.value }), 'aria-label': 'Filter history since date' })),
+      h('label', { className: 'fluid-filter-field' }, 'Until',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.until, onChange: event => setDraft({ ...draft, until: event.target.value }), 'aria-label': 'Filter history until date' })),
+      h('div', { className: 'fluid-actions' },
+        h(WorkspaceButton, { type: 'submit' }, 'Apply'),
+        h(WorkspaceButton, { onClick: resetFilters }, 'Reset'))),
+    h('p', { className: 'fluid-muted' }, retention > 0
+      ? `Retention: entries older than ${retention} days are removed automatically. Change this in Settings › Playback.`
+      : 'Retention: keep forever (up to 5000 entries). Change this in Settings › Playback.'),
     entries.length ? h('div', { className: 'fluid-track-list' }, entries.map((entry, at) => h(TrackRow, {
       controller,
       item: entry.item,
@@ -4806,13 +5164,114 @@ function HistoryPage({ controller }) {
       hideSave: true,
       origin: 'history',
       onPlay: () => controller.add(entry.item, true, 'history'),
-      extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+      extraActions: h('div', { className: 'fluid-row-actions' },
+        h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+        h(Action, { compact: true, kind: 'trash', label: `Remove ${entry.item.title} from history`, onClick: () => setRemoving(entry) })),
     }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
+    total > 0 && h('div', { className: 'fluid-history-pager' },
+      h(WorkspaceButton, { disabled: offset <= 0, onClick: () => void controller.refreshHistory(null, Math.max(0, offset - 50)).catch(() => {}) }, 'Back'),
+      h(WorkspaceButton, { disabled: offset + entries.length >= total, onClick: () => void controller.refreshHistory(null, offset + 50).catch(() => {}) }, 'Next'),
+      h('span', { className: 'fluid-muted' }, `Page ${Math.floor(offset / 50) + 1} of ${Math.max(1, Math.ceil(total / 50))}`)),
     confirmClear && h(Confirm, {
       title: 'Clear history',
       action: () => controller.clearHistory(),
       onClose: () => setConfirmClear(false),
-    }, `This removes ${entries.length} recorded play${entries.length === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
+    }, `This removes ${total} recorded play${total === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
+    removing && h(Confirm, {
+      title: 'Remove history entry',
+      action: () => controller.removeHistoryEntry(removing.id),
+      onClose: () => setRemoving(null),
+    }, `Remove “${removing.item.title}” from this profile's listening history? The media itself and provider history are not affected.`),
+  )
+}
+
+function HistoryRetention({ controller }) {
+  const days = useValue(controller.historyRetention)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => { void controller.loadHistoryRetention().catch(() => {}) }, [controller])
+  return h('div', { className: 'fluid-filter-field' },
+    h('strong', {}, 'History retention'),
+    h('small', { className: 'fluid-muted' }, 'How long this profile keeps played-history entries. Media files, queues and provider history are never touched.'),
+    h('select', {
+      className: 'fluid-input', value: String(days), disabled: busy, 'aria-label': 'History retention',
+      onChange: (event) => {
+        setBusy(true)
+        setError('')
+        void controller.setHistoryRetention(Number(event.target.value))
+          .catch(err => setError(err?.message || 'Retention could not be updated.'))
+          .finally(() => setBusy(false))
+      },
+    }, [[0, 'Keep forever'], [30, '30 days'], [90, '90 days'], [365, '1 year']].map(([value, label]) => h('option', { key: value, value: String(value) }, label))),
+    error && h('p', { className: 'fluid-error', role: 'alert' }, error))
+}
+
+function PlayerExtras({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const offer = useValue(controller.resumeOffer)
+  const sleep = useValue(controller.sleepTimer)
+  const bookmarks = useValue(controller.bookmarks)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const eligible = isLongFormEligible(item)
+  const [sleepOpen, setSleepOpen] = useState(false)
+  const [custom, setCustom] = useState('45')
+  const [bookmarksOpen, setBookmarksOpen] = useState(false)
+  const [label, setLabel] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [editLabel, setEditLabel] = useState('')
+  const [editPosition, setEditPosition] = useState('')
+  if (!item && !offer && sleep.mode === 'off') return null
+  return h('div', { className: 'fluid-player-extras' },
+    offer && h('div', { className: 'fluid-resume-offer', role: 'status' },
+      h('span', {}, `Resume “${offer.title}” at ${formatPositionMs(offer.positionMs)}?`),
+      h(WorkspaceButton, { onClick: () => controller.resumeHere() }, 'Resume'),
+      h(WorkspaceButton, { onClick: () => controller.startOver() }, 'Start over')),
+    eligible && h(WorkspaceButton, { onClick: () => { setLabel(''); setBookmarksOpen(true) } }, `Bookmarks${bookmarks.length ? ` · ${bookmarks.length}` : ''}`),
+    h('button', {
+      type: 'button', className: 'fluid-sleep-chip', 'data-armed': sleep.mode !== 'off' ? 'true' : undefined,
+      'aria-label': sleep.mode === 'duration' ? `Sleep timer: ${formatPositionMs(sleep.remainingMs)} remaining. Open sleep timer controls`
+        : sleep.mode === 'end-of-item' ? 'Sleep timer: end of item. Open sleep timer controls' : 'Open sleep timer',
+      onClick: () => setSleepOpen(true),
+    },
+      h(Icon, { kind: 'clock' }),
+      sleep.mode === 'duration' ? `Sleep · ${formatPositionMs(sleep.remainingMs)}` : sleep.mode === 'end-of-item' ? 'Sleep · end of item' : 'Sleep'),
+    sleep.mode !== 'off' && h(WorkspaceButton, { onClick: () => controller.cancelSleepTimer() }, 'Cancel timer'),
+    sleepOpen && h(Modal, { title: 'Sleep timer', onClose: () => setSleepOpen(false) },
+      h('p', { className: 'fluid-muted' }, 'Pauses only the current player when it finishes. Changing the source cancels the timer; it never takes over another device. The timer is not restored after a reload.'),
+      h('div', { className: 'fluid-actions' },
+        SLEEP_PRESETS_MIN.map(minutes => h(WorkspaceButton, { key: minutes, onClick: () => { if (controller.armSleepTimer('duration', minutes)) setSleepOpen(false) } }, `${minutes} min`)),
+        h(WorkspaceButton, { disabled: item?.source === 'radio', onClick: () => { if (controller.armSleepTimer('end-of-item')) setSleepOpen(false) } }, 'End of item')),
+      item?.source === 'radio' && h('p', { className: 'fluid-muted' }, 'Live radio has no end-of-item; choose a duration.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); if (controller.armSleepTimer('duration', Number(custom))) setSleepOpen(false) } },
+        h('label', { className: 'fluid-field' }, 'Custom minutes (1–720)',
+          h('input', { className: 'fluid-input', type: 'number', min: 1, max: 720, value: custom, onChange: event => setCustom(event.target.value), 'aria-label': 'Custom sleep minutes' })),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setSleepOpen(false) }, 'Close'),
+          h(WorkspaceButton, { primary: true, type: 'submit' }, 'Start'))),
+      sleep.mode !== 'off' && h('div', { className: 'fluid-dialog-actions' },
+        h(WorkspaceButton, { danger: true, onClick: () => { controller.cancelSleepTimer(); setSleepOpen(false) } }, 'Cancel timer'))),
+    bookmarksOpen && h(Modal, { title: `Bookmarks · ${item?.title || ''}`, onClose: () => { setBookmarksOpen(false); setEditing(null) } },
+      h('p', { className: 'fluid-muted' }, 'Timestamp bookmarks for this long-form item. Jump seeks the current player; nothing is downloaded.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); void controller.addBookmark(label).then(result => { if (result) setLabel('') }) } },
+        h('label', { className: 'fluid-field' }, `Bookmark at ${formatPositionMs(progress.positionMs)}`,
+          h('input', { className: 'fluid-input', value: label, onChange: event => setLabel(event.target.value), placeholder: 'Optional label', 'aria-label': 'Bookmark label' })),
+        h('div', { className: 'fluid-dialog-actions' }, h(WorkspaceButton, { primary: true, type: 'submit' }, 'Add bookmark'))),
+      bookmarks.length ? h('div', { className: 'fluid-track-list' }, bookmarks.map(entry => h('div', { className: 'fluid-bookmark-row', key: entry.id },
+        h(WorkspaceButton, { onClick: () => controller.jumpToBookmark(entry.id) }, formatPositionMs(entry.positionMs)),
+        editing === entry.id
+          ? h('form', { onSubmit: (event) => { event.preventDefault(); void controller.editBookmark(entry.id, { label: editLabel, positionMs: Number(editPosition) * 1000 }).then(result => { if (result) setEditing(null) }) } },
+            h('input', { className: 'fluid-input', value: editLabel, onChange: event => setEditLabel(event.target.value), 'aria-label': 'Bookmark label' }),
+            h('input', { className: 'fluid-input', type: 'number', min: 0, value: editPosition, onChange: event => setEditPosition(event.target.value), 'aria-label': 'Bookmark position in seconds' }),
+            h('div', { className: 'fluid-dialog-actions' },
+              h(WorkspaceButton, { onClick: () => setEditing(null) }, 'Cancel'),
+              h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save')))
+          : h('span', { className: 'fluid-row-title' }, entry.label || 'Untitled bookmark'),
+        h('div', { className: 'fluid-row-actions' },
+          h(Action, { compact: true, kind: 'edit', label: `Edit bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => { setEditing(entry.id); setEditLabel(entry.label); setEditPosition(String(Math.round(entry.positionMs / 1000))) } }),
+          h(Action, { compact: true, kind: 'trash', label: `Delete bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => void controller.deleteBookmark(entry.id) })))))
+        : h('p', { className: 'fluid-muted' }, 'No bookmarks yet. Add one at the current position.')),
   )
 }
 
@@ -4867,6 +5326,7 @@ function BottomTransport({ controller }) {
       capabilities.volume && h(VolumeControl, { controller }),
       item && h('span', { className: 'fluid-source-chip', 'data-source': item.source }, sourceLabel(item)),
     ),
+    h(PlayerExtras, { controller }),
   )
 }
 
@@ -4889,7 +5349,7 @@ function SettingsPage({ controller }) {
   const autoplay = useValue(controller.spotifyAutoplay)
   return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.')))) : h(LogsPage, { controller }))
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) : h(LogsPage, { controller }))
 }
 
 function LogsPage({ controller }) {

@@ -261,6 +261,59 @@ function normalizeListeningSessions(value) {
   }).filter(Boolean)
 }
 
+const LONG_FORM_MIN_MS = 600000
+const SLEEP_PRESETS_MIN = [15, 30, 60]
+const SLEEP_MAX_CUSTOM_MIN = 720
+function isLongFormEligible(item) {
+  // Resume/bookmarks apply to eligible long-form YouTube/local items only.
+  // LIVE radio is never seekable; Spotify Connect position is provider-owned.
+  return Boolean(item && (item.source === 'youtube' || item.source === 'local') && !item.unavailable && Number(item.durationMs) >= LONG_FORM_MIN_MS)
+}
+function mediaKeyFor(item) {
+  if (!item) return ''
+  if (item.source === 'youtube') {
+    const id = safeText(item.id).replace(/^youtube:/, '')
+    return id ? `youtube:${id}` : ''
+  }
+  if (item.source === 'local' && item.localTrackId) return `local:${item.localTrackId}`
+  return ''
+}
+function normalizeResumePosition(value) {
+  if (!value || typeof value !== 'object') return null
+  const mediaKey = safeText(value.media_key ?? value.mediaKey)
+  if (!mediaKey) return null
+  return {
+    mediaKey,
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    durationMs: Math.max(0, Math.min(86400000, Number(value.duration_ms ?? value.durationMs) || 0)),
+  }
+}
+function normalizeBookmark(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = Number(value.id)
+  if (!Number.isInteger(id) || id <= 0) return null
+  return {
+    id,
+    mediaKey: safeText(value.media_key ?? value.mediaKey),
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    label: safeText(value.label).slice(0, 120),
+    createdAt: safeText(value.created_at ?? value.createdAt),
+  }
+}
+function formatPositionMs(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = Math.floor(total % 60)
+  const pad = value => String(value).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+function boundedSleepMinutes(value) {
+  const minutes = Math.round(Number(value))
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > SLEEP_MAX_CUSTOM_MIN) return 0
+  return minutes
+}
+
 function normalizeSpotifyAuth(value) {
   const root = value?.data || value || {}
   const data = root.auth || root.spotify || root

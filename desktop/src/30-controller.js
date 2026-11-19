@@ -29,9 +29,20 @@ function createController(ctx, hostCapabilities = {}) {
   const undoState = atom(null)
   const queueUndo = atom(null)
   const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
+  const resumeOffer = atom(null)
+  const bookmarks = atom([])
+  const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
+  const historyRetention = atom(0)
+  const historyFilters = atom({ query: '', source: '', since: '', until: '' })
+  const historyOffset = atom(0)
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
+  let sleepInterval = null
+  let sleepDeadline = 0
+  let sleepBound = null
+  let sleepEndedFor = null
+  let lastResumeSaveAt = 0
   let spotifyStartedUri = ''
   let localRefreshVersion = 0
   const status = atom('idle')
@@ -173,8 +184,17 @@ function createController(ctx, hostCapabilities = {}) {
       })
       .catch(() => {})
   }
-  const refreshHistory = async () => {
-    const data = await request('/history?limit=500&offset=0')
+  const refreshHistory = async (filters = null, offset = 0) => {
+    if (filters) historyFilters.set({ query: safeText(filters.query), source: safeText(filters.source), since: safeText(filters.since), until: safeText(filters.until) })
+    const active = historyFilters.get()
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0))
+    historyOffset.set(safeOffset)
+    const params = new URLSearchParams({ limit: '50', offset: String(safeOffset) })
+    if (active.query) params.set('query', active.query)
+    if (active.source) params.set('source', active.source)
+    if (active.since) params.set('since', active.since)
+    if (active.until) params.set('until', active.until)
+    const data = await request(`/history?${params.toString()}`)
     const entries = (Array.isArray(data?.items) ? data.items : []).map(entry => {
       const item = normalizeQueueItem(entry?.item)
       return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
@@ -187,6 +207,24 @@ function createController(ctx, hostCapabilities = {}) {
     await request('/history', { method: 'DELETE' })
     history.set([])
     historyTotal.set(0)
+    historyOffset.set(0)
+  }
+  const removeHistoryEntry = async id => {
+    await request(`/history/${Number(id)}`, { method: 'DELETE' })
+    history.set(history.get().filter(entry => entry.id !== Number(id)))
+    historyTotal.set(Math.max(0, historyTotal.get() - 1))
+  }
+  const loadHistoryRetention = async () => {
+    const data = await request('/history/retention')
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    return historyRetention.get()
+  }
+  const setHistoryRetention = async days => {
+    const data = await request('/history/retention', { method: 'PUT', body: { days } })
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    message.set(Number(data?.removed) > 0 ? `Retention updated: ${data.removed} older entry(s) removed.` : 'History retention updated.')
+    await refreshHistory(null, 0).catch(() => {})
+    return historyRetention.get()
   }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
@@ -243,7 +281,10 @@ function createController(ctx, hostCapabilities = {}) {
     progress.set({ positionMs, durationMs: anchor.durationMs })
     const guard = spotifyQueueGuard
     if (anchor.playing && anchor.durationMs > 0 && positionMs >= anchor.durationMs && guard?.expectedUri === anchor.uri) {
-      requestHermesQueueAdvance('projected-end', anchor.uri)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(current())) {
+        finishSleepAtEndOfItem(current())
+        void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+      } else requestHermesQueueAdvance('projected-end', anchor.uri)
     }
   }
 
@@ -372,7 +413,7 @@ function createController(ctx, hostCapabilities = {}) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       played = true
-
+      sleepEndedFor = null
       status.set('playing')
       message.set('')
       if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
@@ -381,10 +422,19 @@ function createController(ctx, hostCapabilities = {}) {
       if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
     })
     element.addEventListener('timeupdate', () => {
-      if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+      if (isCurrent()) {
+        progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+        saveResumePosition(false)
+      }
     })
-    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) status.set('paused') })
-    element.addEventListener('ended', () => { if (isCurrent()) void next() })
+    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) { status.set('paused'); saveResumePosition(false) } })
+    element.addEventListener('ended', () => {
+      if (!isCurrent()) return
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) { finishSleepAtEndOfItem(item); return }
+      if (sleepEndedFor === item.id) return
+      void next()
+    })
     element.addEventListener('error', () => {
       if (!isCurrent()) return
       if (!played && sourceIndex + 1 < sources.length) {
@@ -641,6 +691,11 @@ function createController(ctx, hostCapabilities = {}) {
   async function startSelected(nextIndex, token, contextPosition = null) {
     const item = queue.get()[nextIndex]
     if (!item || token !== transition || disposed) return
+    const previousItem = current()
+    if (previousItem && previousItem.id !== item.id) saveResumePosition(true)
+    if (sleepBound && (sleepBound.id !== item.id || sleepBound.source !== item.source)) cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.')
+    sleepEndedFor = null
+    void loadResumeContext(item, token)
     index.set(nextIndex)
     persist()
     message.set('')
@@ -706,6 +761,7 @@ function createController(ctx, hostCapabilities = {}) {
     return runTransition(async token => {
       if (token !== transition) return
       const item = current()
+      saveResumePosition(true)
       if (!item) { status.set('idle'); return }
 
       if (item.source === 'radio') {
@@ -1301,12 +1357,17 @@ function createController(ctx, hostCapabilities = {}) {
     if (state.kind !== 'state') return false
     youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
     progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    saveResumePosition(false)
     status.set(state.playing ? 'playing' : 'paused')
     if (state.playing && !youtubeHistoryRecorded) {
       youtubeHistoryRecorded = true
       recordHistory(item)
     }
-    if (state.ended) requestYouTubeQueueAdvance()
+    if (state.ended) {
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) finishSleepAtEndOfItem(item)
+      else requestYouTubeQueueAdvance()
+    }
     return true
   }
 
@@ -1505,12 +1566,15 @@ function createController(ctx, hostCapabilities = {}) {
   void refreshSpotifyDevices()
   void refreshLocalLibrary().catch(() => {})
   void refreshHistory().catch(() => {})
+  void loadHistoryRetention().catch(() => {})
   void refreshQueuedYouTubeMetadata()
   ctx.onDispose(() => {
     disposed = true
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
+    clearInterval(sleepInterval)
+    sleepInterval = null
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
@@ -1709,6 +1773,205 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // ---- Long-form resume, bookmarks and source-aware sleep timer (FM-21) ----
+  const monotonicNow = () => (typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now())
+
+  function sleepBoundMatches(item) {
+    return Boolean(sleepBound && item && sleepBound.id === item.id && sleepBound.source === item.source)
+  }
+
+  function loadResumeContext(item, token) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) {
+      if (token === transition && current()?.id === item.id) { resumeOffer.set(null); bookmarks.set([]) }
+      return Promise.resolve()
+    }
+    return Promise.all([
+      request(`/resume?media_key=${encodeURIComponent(key)}`).catch(() => null),
+      request(`/bookmarks?media_key=${encodeURIComponent(key)}`).catch(() => null),
+    ]).then(([resumeData, bookmarkData]) => {
+      if (token !== transition || current()?.id !== item.id) return
+      const saved = normalizeResumePosition(resumeData?.resume)
+      const position = saved && saved.mediaKey === key ? saved.positionMs : 0
+      const duration = saved && saved.mediaKey === key && saved.durationMs > 0 ? saved.durationMs : Number(item.durationMs) || 0
+      // Explicit Resume/Start over only — never an automatic seek on selection.
+      const offerable = position >= 15000 && (duration <= 0 || position < duration - 15000)
+      resumeOffer.set(offerable ? { mediaKey: key, positionMs: position, durationMs: duration, title: item.title } : null)
+      bookmarks.set((Array.isArray(bookmarkData?.items) ? bookmarkData.items : []).map(normalizeBookmark).filter(Boolean))
+    })
+  }
+
+  function saveResumePosition(force = false) {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (!force && monotonicNow() - lastResumeSaveAt < 15000) return
+    const { positionMs, durationMs } = progress.get()
+    if (positionMs < 15000) return
+    if (durationMs > 0 && positionMs >= durationMs - 15000) return
+    lastResumeSaveAt = monotonicNow()
+    void request('/resume', { method: 'PUT', body: { media_key: key, position_ms: Math.round(positionMs), duration_ms: Math.round(durationMs) } }).catch(() => {})
+  }
+
+  function clearResumeOnEnded(item) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (current()?.id === item.id) resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+  }
+
+  function resumeHere() {
+    const offer = resumeOffer.get()
+    if (!offer || mediaKeyFor(current()) !== offer.mediaKey) return false
+    resumeOffer.set(null)
+    void seekTo(offer.positionMs)
+    message.set(`Resumed at ${formatPositionMs(offer.positionMs)}.`)
+    return true
+  }
+
+  function startOver() {
+    const offer = resumeOffer.get()
+    const key = offer && mediaKeyFor(current()) === offer.mediaKey ? offer.mediaKey : mediaKeyFor(current())
+    if (!key) return false
+    resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+    void seekTo(0)
+    message.set('Starting over from the beginning.')
+    return true
+  }
+
+  const sortBookmarks = entries => [...entries].sort((a, b) => a.positionMs - b.positionMs || a.id - b.id)
+
+  function refreshBookmarks() {
+    const key = mediaKeyFor(current())
+    if (!key) { bookmarks.set([]); return Promise.resolve([]) }
+    return request(`/bookmarks?media_key=${encodeURIComponent(key)}`)
+      .then(data => {
+        const items = (Array.isArray(data?.items) ? data.items : []).map(normalizeBookmark).filter(Boolean)
+        if (mediaKeyFor(current()) === key) bookmarks.set(items)
+        return items
+      })
+      .catch(() => [])
+  }
+
+  async function addBookmark(label = '') {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) { message.set('Bookmarks are available for long-form YouTube and local items (10 minutes or longer).'); return null }
+    const positionMs = Math.round(progress.get().positionMs)
+    try {
+      const data = await request('/bookmarks', { method: 'POST', body: { media_key: key, position_ms: positionMs, label } })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark && mediaKeyFor(current()) === key) bookmarks.set(sortBookmarks([...bookmarks.get(), bookmark]))
+      message.set(`Bookmark saved at ${formatPositionMs(positionMs)}.`)
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be saved.')); return null }
+  }
+
+  async function editBookmark(id, changes = {}) {
+    const body = {}
+    if (changes.positionMs !== undefined) body.position_ms = Math.round(Number(changes.positionMs) || 0)
+    if (changes.label !== undefined) body.label = changes.label
+    try {
+      const data = await request(`/bookmarks/${Number(id)}`, { method: 'PUT', body })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark) bookmarks.set(sortBookmarks(bookmarks.get().map(entry => entry.id === bookmark.id ? bookmark : entry)))
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be updated.')); return null }
+  }
+
+  async function deleteBookmark(id) {
+    try {
+      await request(`/bookmarks/${Number(id)}`, { method: 'DELETE' })
+      bookmarks.set(bookmarks.get().filter(entry => entry.id !== Number(id)))
+      return true
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be deleted.')); return false }
+  }
+
+  function jumpToBookmark(id) {
+    const bookmark = bookmarks.get().find(entry => entry.id === Number(id))
+    if (!bookmark) return false
+    void seekTo(bookmark.positionMs)
+    message.set(`Jumped to ${formatPositionMs(bookmark.positionMs)}${bookmark.label ? ` · ${bookmark.label}` : ''}.`)
+    return true
+  }
+
+  function disarmSleepTimer() {
+    if (sleepInterval) { clearInterval(sleepInterval); sleepInterval = null }
+    sleepDeadline = 0
+    sleepBound = null
+    sleepTimer.set({ mode: 'off', remainingMs: 0, label: '' })
+  }
+
+  function cancelSleepTimer(reason = 'Sleep timer cancelled.') {
+    if (sleepTimer.get().mode === 'off') return false
+    disarmSleepTimer()
+    message.set(reason)
+    return true
+  }
+
+  function pauseForSleep() {
+    const item = current()
+    if (!item) return
+    if (item.source === 'radio') { stopInternalAudio(); status.set('paused'); return }
+    if (item.source === 'local') { if (audio) audio.pause(); status.set('paused'); return }
+    if (item.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('pauseVideo', []) : false
+      if (!sent) message.set('The YouTube player is not ready, so the sleep timer could not pause it.')
+      return
+    }
+    if (item.source === 'spotify') void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+  }
+
+  function finishSleepAtEndOfItem(item) {
+    // Consume the advance guards so repeated ended reports can never push the
+    // queue forward after the sleep timer chose to stop at this item.
+    sleepEndedFor = item?.id || null
+    if (youtubeQueueGuard) youtubeQueueGuard.advancing = true
+    spotifyProgressAnchor = null
+    spotifyQueueGuard = null
+    disarmSleepTimer()
+    status.set('paused')
+    message.set('Sleep timer finished at the end of the item. Playback paused.')
+  }
+
+  function sleepTick() {
+    if (disposed) { disarmSleepTimer(); return }
+    const state = sleepTimer.get()
+    if (state.mode !== 'duration') return
+    if (!sleepBoundMatches(current())) { cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.'); return }
+    const remainingMs = Math.max(0, sleepDeadline - monotonicNow())
+    if (remainingMs <= 0) {
+      disarmSleepTimer()
+      pauseForSleep()
+      message.set('Sleep timer finished. Playback paused.')
+      return
+    }
+    sleepTimer.set({ ...state, remainingMs })
+  }
+
+  function armSleepTimer(mode, minutes = 0) {
+    const item = current()
+    if (!item) { message.set('Choose something to play before starting a sleep timer.'); return false }
+    if (mode === 'end-of-item') {
+      if (item.source === 'radio') { message.set('Live radio has no end-of-item. Choose a duration instead.'); return false }
+      disarmSleepTimer()
+      sleepBound = { id: item.id, source: item.source }
+      sleepTimer.set({ mode: 'end-of-item', remainingMs: 0, label: 'End of item' })
+      message.set(`Sleep timer armed: pause at the end of “${item.title}”.`)
+      return true
+    }
+    const bounded = boundedSleepMinutes(minutes)
+    if (!bounded) { message.set(`Choose 1–${SLEEP_MAX_CUSTOM_MIN} minutes for the sleep timer.`); return false }
+    disarmSleepTimer()
+    sleepBound = { id: item.id, source: item.source }
+    sleepDeadline = monotonicNow() + bounded * 60000
+    sleepTimer.set({ mode: 'duration', remainingMs: bounded * 60000, label: `${bounded} min` })
+    sleepInterval = setInterval(sleepTick, 1000)
+    message.set(`Sleep timer armed: pause in ${bounded} minute(s).`)
+    return true
+  }
+
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
@@ -1716,6 +1979,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,

@@ -49,12 +49,41 @@ function YouTubeControls({ controller, compact = false }) {
 function HistoryPage({ controller }) {
   const entries = useValue(controller.history)
   const total = useValue(controller.historyTotal)
+  const filters = useValue(controller.historyFilters)
+  const offset = useValue(controller.historyOffset)
+  const retention = useValue(controller.historyRetention)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [removing, setRemoving] = useState(null)
+  const [draft, setDraft] = useState({ query: filters.query, source: filters.source, since: filters.since, until: filters.until })
   useEffect(() => { void controller.refreshHistory().catch(() => {}) }, [controller])
+  const applyFilters = () => { void controller.refreshHistory(draft, 0).catch(() => {}) }
+  const resetFilters = () => {
+    const empty = { query: '', source: '', since: '', until: '' }
+    setDraft(empty)
+    void controller.refreshHistory(empty, 0).catch(() => {})
+  }
+  const pageStart = total ? offset + 1 : 0
+  const pageEnd = offset + entries.length
   return h('section', {},
     h('div', { className: 'fluid-compact-toolbar' },
-      h('p', { className: 'fluid-muted' }, `${entries.length}${total > entries.length ? ` of ${total}` : ''} recent play${entries.length === 1 ? '' : 's'}`),
-      h(WorkspaceButton, { disabled: !entries.length, onClick: () => setConfirmClear(true) }, 'Clear history')),
+      h('p', { className: 'fluid-muted' }, `${total} recorded play${total === 1 ? '' : 's'}${total ? ` · showing ${pageStart}–${pageEnd}` : ''}`),
+      h(WorkspaceButton, { disabled: !total, onClick: () => setConfirmClear(true) }, 'Clear history')),
+    h('form', { className: 'fluid-history-filters', onSubmit: (event) => { event.preventDefault(); applyFilters() } },
+      h('label', { className: 'fluid-filter-field' }, 'Title',
+        h('input', { className: 'fluid-input', type: 'search', value: draft.query, onChange: event => setDraft({ ...draft, query: event.target.value }), placeholder: 'Search titles…', 'aria-label': 'Filter history by title' })),
+      h('label', { className: 'fluid-filter-field' }, 'Source',
+        h('select', { className: 'fluid-input', value: draft.source, onChange: event => setDraft({ ...draft, source: event.target.value }), 'aria-label': 'Filter history by source' },
+          [['', 'All sources'], ['spotify', 'Spotify'], ['radio', 'Radio'], ['local', 'Local'], ['youtube', 'YouTube']].map(([value, label]) => h('option', { key: value, value }, label)))),
+      h('label', { className: 'fluid-filter-field' }, 'Since',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.since, onChange: event => setDraft({ ...draft, since: event.target.value }), 'aria-label': 'Filter history since date' })),
+      h('label', { className: 'fluid-filter-field' }, 'Until',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.until, onChange: event => setDraft({ ...draft, until: event.target.value }), 'aria-label': 'Filter history until date' })),
+      h('div', { className: 'fluid-actions' },
+        h(WorkspaceButton, { type: 'submit' }, 'Apply'),
+        h(WorkspaceButton, { onClick: resetFilters }, 'Reset'))),
+    h('p', { className: 'fluid-muted' }, retention > 0
+      ? `Retention: entries older than ${retention} days are removed automatically. Change this in Settings › Playback.`
+      : 'Retention: keep forever (up to 5000 entries). Change this in Settings › Playback.'),
     entries.length ? h('div', { className: 'fluid-track-list' }, entries.map((entry, at) => h(TrackRow, {
       controller,
       item: entry.item,
@@ -63,13 +92,114 @@ function HistoryPage({ controller }) {
       hideSave: true,
       origin: 'history',
       onPlay: () => controller.add(entry.item, true, 'history'),
-      extraActions: h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+      extraActions: h('div', { className: 'fluid-row-actions' },
+        h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+        h(Action, { compact: true, kind: 'trash', label: `Remove ${entry.item.title} from history`, onClick: () => setRemoving(entry) })),
     }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
+    total > 0 && h('div', { className: 'fluid-history-pager' },
+      h(WorkspaceButton, { disabled: offset <= 0, onClick: () => void controller.refreshHistory(null, Math.max(0, offset - 50)).catch(() => {}) }, 'Back'),
+      h(WorkspaceButton, { disabled: offset + entries.length >= total, onClick: () => void controller.refreshHistory(null, offset + 50).catch(() => {}) }, 'Next'),
+      h('span', { className: 'fluid-muted' }, `Page ${Math.floor(offset / 50) + 1} of ${Math.max(1, Math.ceil(total / 50))}`)),
     confirmClear && h(Confirm, {
       title: 'Clear history',
       action: () => controller.clearHistory(),
       onClose: () => setConfirmClear(false),
-    }, `This removes ${entries.length} recorded play${entries.length === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
+    }, `This removes ${total} recorded play${total === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
+    removing && h(Confirm, {
+      title: 'Remove history entry',
+      action: () => controller.removeHistoryEntry(removing.id),
+      onClose: () => setRemoving(null),
+    }, `Remove “${removing.item.title}” from this profile's listening history? The media itself and provider history are not affected.`),
+  )
+}
+
+function HistoryRetention({ controller }) {
+  const days = useValue(controller.historyRetention)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => { void controller.loadHistoryRetention().catch(() => {}) }, [controller])
+  return h('div', { className: 'fluid-filter-field' },
+    h('strong', {}, 'History retention'),
+    h('small', { className: 'fluid-muted' }, 'How long this profile keeps played-history entries. Media files, queues and provider history are never touched.'),
+    h('select', {
+      className: 'fluid-input', value: String(days), disabled: busy, 'aria-label': 'History retention',
+      onChange: (event) => {
+        setBusy(true)
+        setError('')
+        void controller.setHistoryRetention(Number(event.target.value))
+          .catch(err => setError(err?.message || 'Retention could not be updated.'))
+          .finally(() => setBusy(false))
+      },
+    }, [[0, 'Keep forever'], [30, '30 days'], [90, '90 days'], [365, '1 year']].map(([value, label]) => h('option', { key: value, value: String(value) }, label))),
+    error && h('p', { className: 'fluid-error', role: 'alert' }, error))
+}
+
+function PlayerExtras({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const offer = useValue(controller.resumeOffer)
+  const sleep = useValue(controller.sleepTimer)
+  const bookmarks = useValue(controller.bookmarks)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const eligible = isLongFormEligible(item)
+  const [sleepOpen, setSleepOpen] = useState(false)
+  const [custom, setCustom] = useState('45')
+  const [bookmarksOpen, setBookmarksOpen] = useState(false)
+  const [label, setLabel] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [editLabel, setEditLabel] = useState('')
+  const [editPosition, setEditPosition] = useState('')
+  if (!item && !offer && sleep.mode === 'off') return null
+  return h('div', { className: 'fluid-player-extras' },
+    offer && h('div', { className: 'fluid-resume-offer', role: 'status' },
+      h('span', {}, `Resume “${offer.title}” at ${formatPositionMs(offer.positionMs)}?`),
+      h(WorkspaceButton, { onClick: () => controller.resumeHere() }, 'Resume'),
+      h(WorkspaceButton, { onClick: () => controller.startOver() }, 'Start over')),
+    eligible && h(WorkspaceButton, { onClick: () => { setLabel(''); setBookmarksOpen(true) } }, `Bookmarks${bookmarks.length ? ` · ${bookmarks.length}` : ''}`),
+    h('button', {
+      type: 'button', className: 'fluid-sleep-chip', 'data-armed': sleep.mode !== 'off' ? 'true' : undefined,
+      'aria-label': sleep.mode === 'duration' ? `Sleep timer: ${formatPositionMs(sleep.remainingMs)} remaining. Open sleep timer controls`
+        : sleep.mode === 'end-of-item' ? 'Sleep timer: end of item. Open sleep timer controls' : 'Open sleep timer',
+      onClick: () => setSleepOpen(true),
+    },
+      h(Icon, { kind: 'clock' }),
+      sleep.mode === 'duration' ? `Sleep · ${formatPositionMs(sleep.remainingMs)}` : sleep.mode === 'end-of-item' ? 'Sleep · end of item' : 'Sleep'),
+    sleep.mode !== 'off' && h(WorkspaceButton, { onClick: () => controller.cancelSleepTimer() }, 'Cancel timer'),
+    sleepOpen && h(Modal, { title: 'Sleep timer', onClose: () => setSleepOpen(false) },
+      h('p', { className: 'fluid-muted' }, 'Pauses only the current player when it finishes. Changing the source cancels the timer; it never takes over another device. The timer is not restored after a reload.'),
+      h('div', { className: 'fluid-actions' },
+        SLEEP_PRESETS_MIN.map(minutes => h(WorkspaceButton, { key: minutes, onClick: () => { if (controller.armSleepTimer('duration', minutes)) setSleepOpen(false) } }, `${minutes} min`)),
+        h(WorkspaceButton, { disabled: item?.source === 'radio', onClick: () => { if (controller.armSleepTimer('end-of-item')) setSleepOpen(false) } }, 'End of item')),
+      item?.source === 'radio' && h('p', { className: 'fluid-muted' }, 'Live radio has no end-of-item; choose a duration.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); if (controller.armSleepTimer('duration', Number(custom))) setSleepOpen(false) } },
+        h('label', { className: 'fluid-field' }, 'Custom minutes (1–720)',
+          h('input', { className: 'fluid-input', type: 'number', min: 1, max: 720, value: custom, onChange: event => setCustom(event.target.value), 'aria-label': 'Custom sleep minutes' })),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setSleepOpen(false) }, 'Close'),
+          h(WorkspaceButton, { primary: true, type: 'submit' }, 'Start'))),
+      sleep.mode !== 'off' && h('div', { className: 'fluid-dialog-actions' },
+        h(WorkspaceButton, { danger: true, onClick: () => { controller.cancelSleepTimer(); setSleepOpen(false) } }, 'Cancel timer'))),
+    bookmarksOpen && h(Modal, { title: `Bookmarks · ${item?.title || ''}`, onClose: () => { setBookmarksOpen(false); setEditing(null) } },
+      h('p', { className: 'fluid-muted' }, 'Timestamp bookmarks for this long-form item. Jump seeks the current player; nothing is downloaded.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); void controller.addBookmark(label).then(result => { if (result) setLabel('') }) } },
+        h('label', { className: 'fluid-field' }, `Bookmark at ${formatPositionMs(progress.positionMs)}`,
+          h('input', { className: 'fluid-input', value: label, onChange: event => setLabel(event.target.value), placeholder: 'Optional label', 'aria-label': 'Bookmark label' })),
+        h('div', { className: 'fluid-dialog-actions' }, h(WorkspaceButton, { primary: true, type: 'submit' }, 'Add bookmark'))),
+      bookmarks.length ? h('div', { className: 'fluid-track-list' }, bookmarks.map(entry => h('div', { className: 'fluid-bookmark-row', key: entry.id },
+        h(WorkspaceButton, { onClick: () => controller.jumpToBookmark(entry.id) }, formatPositionMs(entry.positionMs)),
+        editing === entry.id
+          ? h('form', { onSubmit: (event) => { event.preventDefault(); void controller.editBookmark(entry.id, { label: editLabel, positionMs: Number(editPosition) * 1000 }).then(result => { if (result) setEditing(null) }) } },
+            h('input', { className: 'fluid-input', value: editLabel, onChange: event => setEditLabel(event.target.value), 'aria-label': 'Bookmark label' }),
+            h('input', { className: 'fluid-input', type: 'number', min: 0, value: editPosition, onChange: event => setEditPosition(event.target.value), 'aria-label': 'Bookmark position in seconds' }),
+            h('div', { className: 'fluid-dialog-actions' },
+              h(WorkspaceButton, { onClick: () => setEditing(null) }, 'Cancel'),
+              h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save')))
+          : h('span', { className: 'fluid-row-title' }, entry.label || 'Untitled bookmark'),
+        h('div', { className: 'fluid-row-actions' },
+          h(Action, { compact: true, kind: 'edit', label: `Edit bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => { setEditing(entry.id); setEditLabel(entry.label); setEditPosition(String(Math.round(entry.positionMs / 1000))) } }),
+          h(Action, { compact: true, kind: 'trash', label: `Delete bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => void controller.deleteBookmark(entry.id) })))))
+        : h('p', { className: 'fluid-muted' }, 'No bookmarks yet. Add one at the current position.')),
   )
 }
 
@@ -124,6 +254,7 @@ function BottomTransport({ controller }) {
       capabilities.volume && h(VolumeControl, { controller }),
       item && h('span', { className: 'fluid-source-chip', 'data-source': item.source }, sourceLabel(item)),
     ),
+    h(PlayerExtras, { controller }),
   )
 }
 
@@ -146,7 +277,7 @@ function SettingsPage({ controller }) {
   const autoplay = useValue(controller.spotifyAutoplay)
   return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.')))) : h(LogsPage, { controller }))
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) : h(LogsPage, { controller }))
 }
 
 function LogsPage({ controller }) {
