@@ -384,6 +384,25 @@ function classifyYouTubeFailure(signal) {
   return { reason, ...YOUTUBE_FAILURES[reason] }
 }
 
+// REQUIRED public host contract for an owned first-party watch surface.
+// NONE of these exports exist in the current public Hermes Desktop SDK
+// (verified against apps/desktop/src/sdk/index.ts: the only sanctioned embed
+// primitive is SandboxedFrame — an opaque-origin iframe that forbids
+// allow-same-origin, so it can never hold a genuine provider login; raw
+// <webview> is explicitly rejected because it shares the app preview
+// partition). Full-scope FM-08 acceptance is gated on the host shipping this
+// contract; until then the adapter reports an honest unavailable state and
+// never opens an external app, focused-chat tab, or duplicate pane.
+function youTubeWatchCapability(namespace) {
+  const sdk = namespace && typeof namespace === 'object' ? namespace : {}
+  const hostApi = sdk.host && typeof sdk.host === 'object' ? sdk.host : {}
+  const missing = []
+  if (typeof sdk.OwnedMediaView !== 'function') missing.push('OwnedMediaView')
+  const session = hostApi.mediaSession
+  if (!session || typeof session.ensurePartition !== 'function' || typeof session.openLogin !== 'function' || typeof session.dispose !== 'function') missing.push('host.mediaSession')
+  return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },
@@ -462,7 +481,13 @@ function Action({ label, kind, onClick, disabled = false, compact = false, prima
 }
 
 /* CONTROLLER_START */
-function createController(ctx) {
+function createController(ctx, hostCapabilities = {}) {
+  // Owned first-party watch capability is negotiated at registration from the
+  // PUBLIC SDK namespace; absent capability is an honest unavailable state,
+  // never a hidden reduced-scope fallback or an external app.
+  const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
+  let youtubeEngine = 'embed'
+  let watchAttempts = 0
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
   const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
@@ -1085,7 +1110,9 @@ function createController(ctx) {
     }
     if (item.source === 'youtube') {
       armYouTubeQueueGuard(item, token)
-      youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
+      youtubeEngine = 'embed'
+      watchAttempts = 0
+      youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
       message.set('YouTube transport is in the FluidMusic player pane.')
@@ -1688,6 +1715,7 @@ function createController(ctx) {
     if (!item || item.source !== 'youtube') return false
     const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
     if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.engine && state.engine !== youtubeEngine) return false
     if (state.kind === 'ready') {
       youtube.set({ ...youtube.get(), status: 'ready', error: '', reason: '' })
       return true
@@ -1709,6 +1737,29 @@ function createController(ctx) {
       recordHistory(item)
     }
     if (state.ended) requestYouTubeQueueAdvance()
+    return true
+  }
+
+  function attemptYouTubeWatchFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube' || youtubeEngine === 'watch') return false
+    if (!youtube.get().fallbackEligible) return false
+    if (!watchCapability.available) {
+      youtube.set({ ...youtube.get(), watchUnavailable: true })
+      message.set('First-party watch fallback needs an owned host view capability this Hermes build does not provide. Skip or choose another video.')
+      return false
+    }
+    if (watchAttempts >= 1) {
+      message.set('The first-party watch fallback was already tried for this video. Skip or choose another video.')
+      return false
+    }
+    watchAttempts += 1
+    youtubeEngine = 'watch'
+    // Position and the once-per-transition history flag survive the switch;
+    // exactly one engine is active because the surface renders either/or.
+    youtube.set({ ...youtube.get(), engine: 'watch', status: 'switching', error: '', reason: '' })
+    status.set('loading')
+    message.set('Switching player…')
     return true
   }
 
@@ -1858,7 +1909,7 @@ function createController(ctx) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
@@ -4064,7 +4115,7 @@ function YouTubeTransport({ controller, frameRef, item }) {
         return
       }
       if (parsed.kind === 'state') setPlaying(parsed.playing)
-      controller.reportYouTubeState(parsed)
+      controller.reportYouTubeState({ ...parsed, engine: 'embed' })
     }
     window.addEventListener('message', receive)
     const handshake = setInterval(() => {
@@ -4076,6 +4127,26 @@ function YouTubeTransport({ controller, frameRef, item }) {
   }, [videoId, frameRef])
   const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
   return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+}
+
+function OwnedWatchSurface({ controller, item, capability, controlRef }) {
+  // Thin adapter over the REQUIRED public owned-view contract (see
+  // youTubeWatchCapability). The host owns the persistent isolated session,
+  // genuine provider login and the control bridge; the plugin never injects
+  // scripts into an opaque origin and never borrows the app preview partition.
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null }, [])
+  const View = capability?.OwnedMediaView
+  if (typeof View !== 'function') {
+    return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
+  }
+  return h(View, {
+    ref: controlRef,
+    src: item.url,
+    sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
+    title: item.title || 'YouTube video',
+    className: 'fluid-youtube-frame',
+    onMediaState: state => controller.reportYouTubeState({ ...state, engine: 'watch' }),
+  })
 }
 
 function MiniPlayer({ controller }) {
@@ -4092,17 +4163,25 @@ function MiniPlayer({ controller }) {
     : item
   const embedUrl = youtubeEmbedUrl(item)
   const youtubeFrameRef = useRef(null)
+  const watchControlRef = useRef(null)
   if (embedUrl) {
+    const watching = youtubeState.engine === 'watch'
     return h(
       'section',
       { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
       h('div', { className: 'fluid-youtube-frame-wrap' },
-        h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        watching
+          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
       ),
+      youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
-      h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
+      watching
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => { const handle = watchControlRef.current; if (handle) (youtubeState.playing ? handle.pause() : handle.play()) }, onVolumeChange: next => watchControlRef.current?.setVolume(next) })
+        : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
         h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )
   }
@@ -4354,7 +4433,7 @@ export default {
       }
       return
     }
-    const controller = createController(ctx)
+    const controller = createController(ctx, { watchCapability: youTubeWatchCapability(SDK) })
     ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
     ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
     ctx.register({ id: 'mini-player', area: 'panes', title: 'FluidMusic player', data: { placement: 'right', width: '300px', height: '420px' }, render: () => h(MiniPlayer, { controller }) })

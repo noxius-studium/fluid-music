@@ -159,9 +159,9 @@ test('polling observation across remounts never mutates the selected occurrence 
 test('registration creates exactly one shared controller and the controller never steals focus', () => {
   const calls = source.match(/createController\(/g) || []
   assert.equal(calls.length, 2, 'one definition plus exactly one registration call')
-  assert.equal((source.match(/const controller = createController\(ctx\)/g) || []).length, 1)
+  assert.equal((source.match(/const controller = createController\(ctx, \{ watchCapability: youTubeWatchCapability\(SDK\) \}\)/g) || []).length, 1)
   const gate = source.indexOf('if (!SDK_COMPATIBLE)')
-  const creation = source.indexOf('const controller = createController(ctx)')
+  const creation = source.indexOf('const controller = createController(ctx')
   assert.ok(gate >= 0 && creation > gate, 'controller is created only after the SDK capability gate')
   for (const surface of ['MediaPage', 'TitlebarPlayer', 'MiniPlayer']) {
     assert.equal((source.match(new RegExp(`render: \\(\\) => h\\(${surface}, \\{ controller \\}\\)`, 'g')) || []).length, 1, `${surface} shares the single controller`)

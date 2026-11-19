@@ -94,7 +94,7 @@ function YouTubeTransport({ controller, frameRef, item }) {
         return
       }
       if (parsed.kind === 'state') setPlaying(parsed.playing)
-      controller.reportYouTubeState(parsed)
+      controller.reportYouTubeState({ ...parsed, engine: 'embed' })
     }
     window.addEventListener('message', receive)
     const handshake = setInterval(() => {
@@ -106,6 +106,26 @@ function YouTubeTransport({ controller, frameRef, item }) {
   }, [videoId, frameRef])
   const toggle = () => { send(playing ? 'pauseVideo' : 'playVideo') }
   return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: toggle, onVolumeChange: next => send('setVolume', [Math.round(next * 100)]) })
+}
+
+function OwnedWatchSurface({ controller, item, capability, controlRef }) {
+  // Thin adapter over the REQUIRED public owned-view contract (see
+  // youTubeWatchCapability). The host owns the persistent isolated session,
+  // genuine provider login and the control bridge; the plugin never injects
+  // scripts into an opaque origin and never borrows the app preview partition.
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null }, [])
+  const View = capability?.OwnedMediaView
+  if (typeof View !== 'function') {
+    return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
+  }
+  return h(View, {
+    ref: controlRef,
+    src: item.url,
+    sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
+    title: item.title || 'YouTube video',
+    className: 'fluid-youtube-frame',
+    onMediaState: state => controller.reportYouTubeState({ ...state, engine: 'watch' }),
+  })
 }
 
 function MiniPlayer({ controller }) {
@@ -122,17 +142,25 @@ function MiniPlayer({ controller }) {
     : item
   const embedUrl = youtubeEmbedUrl(item)
   const youtubeFrameRef = useRef(null)
+  const watchControlRef = useRef(null)
   if (embedUrl) {
+    const watching = youtubeState.engine === 'watch'
     return h(
       'section',
       { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
       h('div', { className: 'fluid-youtube-frame-wrap' },
-        h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        watching
+          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
       ),
+      youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
-      h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
+      watching
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => { const handle = watchControlRef.current; if (handle) (youtubeState.playing ? handle.pause() : handle.play()) }, onVolumeChange: next => watchControlRef.current?.setVolume(next) })
+        : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
         h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )
   }

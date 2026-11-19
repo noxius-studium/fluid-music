@@ -355,6 +355,25 @@ function classifyYouTubeFailure(signal) {
   return { reason, ...YOUTUBE_FAILURES[reason] }
 }
 
+// REQUIRED public host contract for an owned first-party watch surface.
+// NONE of these exports exist in the current public Hermes Desktop SDK
+// (verified against apps/desktop/src/sdk/index.ts: the only sanctioned embed
+// primitive is SandboxedFrame — an opaque-origin iframe that forbids
+// allow-same-origin, so it can never hold a genuine provider login; raw
+// <webview> is explicitly rejected because it shares the app preview
+// partition). Full-scope FM-08 acceptance is gated on the host shipping this
+// contract; until then the adapter reports an honest unavailable state and
+// never opens an external app, focused-chat tab, or duplicate pane.
+function youTubeWatchCapability(namespace) {
+  const sdk = namespace && typeof namespace === 'object' ? namespace : {}
+  const hostApi = sdk.host && typeof sdk.host === 'object' ? sdk.host : {}
+  const missing = []
+  if (typeof sdk.OwnedMediaView !== 'function') missing.push('OwnedMediaView')
+  const session = hostApi.mediaSession
+  if (!session || typeof session.ensurePartition !== 'function' || typeof session.openLogin !== 'function' || typeof session.dispose !== 'function') missing.push('host.mediaSession')
+  return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
+}
+
 const RADIO_PRESETS = [
   { source: 'radio', id: 'fluid-chillsynth', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3', homepage: 'https://nightride.fm/?station=chillsynth' },
   { source: 'radio', id: 'fluid-nightride', title: 'Nightride', subtitle: 'Synthwave · after hours', streamUrl: 'https://stream.nightride.fm/nightride.mp3', homepage: 'https://nightride.fm/' },

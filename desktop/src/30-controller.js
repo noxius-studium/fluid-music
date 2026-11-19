@@ -1,6 +1,12 @@
 
 /* CONTROLLER_START */
-function createController(ctx) {
+function createController(ctx, hostCapabilities = {}) {
+  // Owned first-party watch capability is negotiated at registration from the
+  // PUBLIC SDK namespace; absent capability is an honest unavailable state,
+  // never a hidden reduced-scope fallback or an external app.
+  const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
+  let youtubeEngine = 'embed'
+  let watchAttempts = 0
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
   const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
@@ -623,7 +629,9 @@ function createController(ctx) {
     }
     if (item.source === 'youtube') {
       armYouTubeQueueGuard(item, token)
-      youtube.set({ status: 'ready', url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
+      youtubeEngine = 'embed'
+      watchAttempts = 0
+      youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
       progress.set({ positionMs: 0, durationMs: item.durationMs })
       status.set('paused')
       message.set('YouTube transport is in the FluidMusic player pane.')
@@ -1226,6 +1234,7 @@ function createController(ctx) {
     if (!item || item.source !== 'youtube') return false
     const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
     if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.engine && state.engine !== youtubeEngine) return false
     if (state.kind === 'ready') {
       youtube.set({ ...youtube.get(), status: 'ready', error: '', reason: '' })
       return true
@@ -1247,6 +1256,29 @@ function createController(ctx) {
       recordHistory(item)
     }
     if (state.ended) requestYouTubeQueueAdvance()
+    return true
+  }
+
+  function attemptYouTubeWatchFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube' || youtubeEngine === 'watch') return false
+    if (!youtube.get().fallbackEligible) return false
+    if (!watchCapability.available) {
+      youtube.set({ ...youtube.get(), watchUnavailable: true })
+      message.set('First-party watch fallback needs an owned host view capability this Hermes build does not provide. Skip or choose another video.')
+      return false
+    }
+    if (watchAttempts >= 1) {
+      message.set('The first-party watch fallback was already tried for this video. Skip or choose another video.')
+      return false
+    }
+    watchAttempts += 1
+    youtubeEngine = 'watch'
+    // Position and the once-per-transition history flag survive the switch;
+    // exactly one engine is active because the surface renders either/or.
+    youtube.set({ ...youtube.get(), engine: 'watch', status: 'switching', error: '', reason: '' })
+    status.set('loading')
+    message.set('Switching player…')
     return true
   }
 
@@ -1396,7 +1428,7 @@ function createController(ctx) {
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
     queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
