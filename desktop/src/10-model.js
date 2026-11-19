@@ -314,6 +314,36 @@ function boundedSleepMinutes(value) {
   return minutes
 }
 
+const RETRY_MAX_ATTEMPTS = 3
+const RETRY_COOLDOWN_MS = 30000
+const HEALTH_SOURCES = ['spotify', 'youtube', 'local', 'radio', 'backend']
+const HEALTH_STATES = ['ready', 'degraded', 'unavailable', 'unknown']
+function retryGate(budget, nowMs) {
+  const state = budget && typeof budget === 'object' ? budget : { attempts: 0, cooldownUntil: 0 }
+  const cooldownUntil = Math.max(0, Number(state.cooldownUntil) || 0)
+  if (cooldownUntil > nowMs) return { allowed: false, remainingMs: cooldownUntil - nowMs, attempts: Math.max(0, Number(state.attempts) || 0), cooldownUntil }
+  const attempts = cooldownUntil > 0 ? 0 : Math.max(0, Number(state.attempts) || 0)
+  return { allowed: true, remainingMs: 0, attempts, cooldownUntil: 0 }
+}
+function retryConsumed(budget, nowMs) {
+  const gate = retryGate(budget, nowMs)
+  const attempts = gate.attempts + 1
+  if (attempts >= RETRY_MAX_ATTEMPTS) return { attempts: 0, cooldownUntil: nowMs + RETRY_COOLDOWN_MS }
+  return { attempts, cooldownUntil: 0 }
+}
+function normalizeHealthRow(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = safeText(value.source)
+  if (!HEALTH_SOURCES.includes(source)) return null
+  return {
+    source,
+    state: HEALTH_STATES.includes(value.state) ? value.state : 'unknown',
+    detail: safeText(value.detail).slice(0, 200),
+    action: safeText(value.action),
+    lastEvidenceAt: safeText(value.lastEvidenceAt),
+  }
+}
+
 function normalizeSpotifyAuth(value) {
   const root = value?.data || value || {}
   const data = root.auth || root.spotify || root

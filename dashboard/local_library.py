@@ -12,8 +12,10 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -43,8 +45,77 @@ _MAX_RESUME_ROWS = 500
 _MAX_BOOKMARKS_PER_ITEM = 50
 _MAX_BOOKMARKS_TOTAL = 2000
 _RETENTION_CHOICES = (0, 30, 90, 365)
+_TARGET_USER_VERSION = 2
+_MAX_BACKUPS = 3
+_BUSY_RETRIES = 2
+_BUSY_DELAY_S = 0.25
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DATABASES: set[str] = set()
+
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS scan_roots (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    canonical_key TEXT NOT NULL UNIQUE,
+    added_at TEXT NOT NULL,
+    last_scanned_at TEXT,
+    last_scan_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS local_tracks (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES scan_roots(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    canonical_key TEXT NOT NULL UNIQUE,
+    relative_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL,
+    available INTEGER NOT NULL DEFAULT 1,
+    discovered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_tracks_root_available
+    ON local_tracks(root_id, available, relative_path);
+CREATE INDEX IF NOT EXISTS local_tracks_fingerprint
+    ON local_tracks(root_id, fingerprint);
+CREATE TABLE IF NOT EXISTS playback_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL DEFAULT '',
+    artwork TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    played_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS playback_history_played_at
+    ON playback_history(played_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS resume_positions (
+    media_key TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    position_ms INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    position_ms INTEGER NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bookmarks_media_key
+    ON bookmarks(media_key, position_ms, id);
+CREATE TABLE IF NOT EXISTS plugin_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
 
 
 def _now() -> str:
@@ -136,74 +207,60 @@ class LocalLibrary:
         with _SCHEMA_LOCK:
             if key in _INITIALIZED_DATABASES:
                 return
-            connection.executescript(
-                """
-                PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS scan_roots (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    canonical_key TEXT NOT NULL UNIQUE,
-                    added_at TEXT NOT NULL,
-                    last_scanned_at TEXT,
-                    last_scan_count INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS local_tracks (
-                    id TEXT PRIMARY KEY,
-                    root_id TEXT NOT NULL REFERENCES scan_roots(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    canonical_key TEXT NOT NULL UNIQUE,
-                    relative_path TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    available INTEGER NOT NULL DEFAULT 1,
-                    discovered_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS local_tracks_root_available
-                    ON local_tracks(root_id, available, relative_path);
-                CREATE INDEX IF NOT EXISTS local_tracks_fingerprint
-                    ON local_tracks(root_id, fingerprint);
-                CREATE TABLE IF NOT EXISTS playback_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    media_key TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    subtitle TEXT NOT NULL DEFAULT '',
-                    artwork TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL,
-                    played_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS playback_history_played_at
-                    ON playback_history(played_at DESC, id DESC);
-                CREATE TABLE IF NOT EXISTS resume_positions (
-                    media_key TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    position_ms INTEGER NOT NULL,
-                    duration_ms INTEGER NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS bookmarks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    media_key TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    position_ms INTEGER NOT NULL,
-                    label TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS bookmarks_media_key
-                    ON bookmarks(media_key, position_ms, id);
-                CREATE TABLE IF NOT EXISTS plugin_settings (
-                    key TEXT PRIMARY KEY,
-                    value_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                """
-            )
-            connection.commit()
+            connection.execute("PRAGMA journal_mode = WAL")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version < _TARGET_USER_VERSION:
+                has_data = bool(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall())
+                backup = self._backup_database(connection, version) if has_data else None
+                try:
+                    connection.executescript(_SCHEMA_SQL)
+                    connection.execute(f"PRAGMA user_version = {_TARGET_USER_VERSION}")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    if backup is not None:
+                        self._restore_backup(connection, backup)
+                    raise
+            else:
+                connection.executescript(_SCHEMA_SQL)
+                connection.commit()
             _INITIALIZED_DATABASES.add(key)
+
+    def _backup_database(self, connection: sqlite3.Connection, from_version: int) -> Path:
+        """Bounded pre-migration file backup; WAL is checkpointed so the copy is complete."""
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        backup_path = self.database_path.with_name(f"{self.database_path.name}.backup-v{from_version}-{stamp}")
+        shutil.copy2(self.database_path, backup_path)
+        backups = sorted(self.database_path.parent.glob(f"{self.database_path.name}.backup-*"))
+        for old in backups[:-_MAX_BACKUPS]:
+            old.unlink(missing_ok=True)
+        return backup_path
+
+    def _restore_backup(self, connection: sqlite3.Connection, backup_path: Path) -> None:
+        """Rollback via the SQLite online backup API into the live connection."""
+        source = sqlite3.connect(backup_path)
+        try:
+            source.backup(connection)
+        finally:
+            source.close()
+        connection.commit()
+
+    def _run_busy(self, operation):
+        """Bounded retry for transient SQLite busy/locked errors; never loops forever."""
+        attempts = 0
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if ("locked" in text or "busy" in text) and attempts < _BUSY_RETRIES:
+                    attempts += 1
+                    time.sleep(_BUSY_DELAY_S)
+                    continue
+                raise
 
     @staticmethod
     def _history_payload(value: Any) -> dict[str, Any]:
@@ -256,23 +313,27 @@ class LocalLibrary:
     def record_history(self, value: Any) -> dict[str, Any]:
         item = self._history_payload(value)
         played_at = _now()
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO playback_history(media_key, source, title, subtitle, artwork, payload_json, played_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    item["media_key"], item["source"], item["title"], item["subtitle"],
-                    item["artwork"], item["payload_json"], played_at,
-                ),
-            )
-            connection.execute(
-                "DELETE FROM playback_history WHERE id NOT IN (SELECT id FROM playback_history ORDER BY id DESC LIMIT 5000)"
-            )
-            self._prune_history(connection)
-            history_id = int(cursor.lastrowid)
-        return {"id": history_id, "played_at": played_at, "item": json.loads(item["payload_json"])}
+
+        def operation() -> dict[str, Any]:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO playback_history(media_key, source, title, subtitle, artwork, payload_json, played_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item["media_key"], item["source"], item["title"], item["subtitle"],
+                        item["artwork"], item["payload_json"], played_at,
+                    ),
+                )
+                connection.execute(
+                    "DELETE FROM playback_history WHERE id NOT IN (SELECT id FROM playback_history ORDER BY id DESC LIMIT 5000)"
+                )
+                self._prune_history(connection)
+                history_id = int(cursor.lastrowid)
+            return {"id": history_id, "played_at": played_at, "item": json.loads(item["payload_json"])}
+
+        return self._run_busy(operation)
 
     def list_history(
         self,

@@ -272,12 +272,62 @@ function LibraryPage({ controller }) {
   return h('div', {}, h(PageHead, { title: 'Library', subtitle: 'Playlists, local music, collections, and listening history.' }), h(SecondaryTabs, { label: 'Library sources', value: tab, onChange: setTab, items: [['spotify', 'Spotify'], ['local', 'Local'], ['collections', 'Collections'], ['history', 'History']] }), tab === 'spotify' ? h(SpotifyLibraryPage, { controller }) : tab === 'local' ? h(LocalPage, { controller }) : tab === 'history' ? h(HistoryPage, { controller }) : h(PlaylistsPage, { controller }))
 }
 
+function RecoveryPage({ controller, onOpenDiagnostics }) {
+  const health = useValue(controller.sourceHealth)
+  const retries = useValue(controller.retryState)
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const [copied, setCopied] = useState('')
+  const rows = ['spotify', 'youtube', 'local', 'radio', 'backend'].map(source => health[source] || { source, state: 'unknown', detail: 'No evidence yet — health updates only from real requests and playback.', action: '', lastEvidenceAt: '' })
+  const cooldownFor = key => {
+    const entry = retries[key]
+    return entry && entry.cooldownUntilWall > Date.now() ? Math.ceil((entry.cooldownUntilWall - Date.now()) / 1000) : 0
+  }
+  const retryAction = source => {
+    if (source === 'spotify') return () => void controller.retrySpotify()
+    if (source === 'youtube') return () => void controller.retryYouTube()
+    if (source === 'radio') return () => void controller.retryRadio()
+    if (source === 'local') return () => void controller.rescanLocalLibrary().catch(() => {})
+    return () => void controller.refreshHistory().catch(() => {})
+  }
+  const copy = () => {
+    const text = controller.copyDiagnostics()
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => setCopied('Sanitized diagnostics copied.'))
+        .catch(() => setCopied('Clipboard was refused — diagnostics remain in the Diagnostics tab.'))
+    } else setCopied('Clipboard is unavailable here — diagnostics remain in the Diagnostics tab.')
+  }
+  return h('section', { className: 'fluid-panel fluid-panel-pad', 'aria-label': 'Recovery center' },
+    h('div', { className: 'fluid-section-head' },
+      h('div', {},
+        h('h2', { className: 'fluid-section-title' }, 'Recovery'),
+        h('p', { className: 'fluid-section-copy' }, 'One quiet place for source health and bounded retries. Rows reflect the last real evidence — never a fake all-online badge. Retries cool down after three attempts.')),
+      h('div', { className: 'fluid-actions' },
+        h(WorkspaceButton, { onClick: copy }, 'Copy diagnostics'),
+        h(WorkspaceButton, { onClick: onOpenDiagnostics }, 'Open diagnostics'))),
+    copied && h('p', { className: 'fluid-muted', role: 'status' }, copied),
+    h('div', { className: 'fluid-track-list' }, rows.map(row => h('div', { className: 'fluid-health-row', key: row.source, 'data-state': row.state },
+      h('div', { className: 'fluid-row-copy' },
+        h('span', { className: 'fluid-row-title' }, `${sourceLabel({ source: row.source })} · ${row.state}`),
+        h('span', { className: 'fluid-row-detail' }, row.detail),
+        row.lastEvidenceAt && h('span', { className: 'fluid-row-detail' }, `Last evidence: ${new Date(row.lastEvidenceAt).toLocaleString()}`)),
+      h('div', { className: 'fluid-row-actions' },
+        h(WorkspaceButton, { disabled: cooldownFor(row.source) > 0, onClick: retryAction(row.source) }, cooldownFor(row.source) > 0 ? `Retry (${cooldownFor(row.source)}s)` : 'Retry'),
+        row.source === 'spotify' && row.action === 'reconnect' && h(WorkspaceButton, { onClick: () => void controller.startSpotifyAuth() }, 'Reconnect'),
+        row.source === 'local' && h(WorkspaceButton, { onClick: () => void controller.rescanLocalLibrary().catch(() => {}) }, 'Rescan'),
+        queue.length > at + 1 && h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip'))))),
+    h('p', { className: 'fluid-muted' }, 'Skipping advances the queue once; it never edits provider playlists. Diagnostics are sanitized — no tokens, credentials or raw history.'),
+  )
+}
+
 function SettingsPage({ controller }) {
   const [tab, setTab] = useState('providers')
   const autoplay = useValue(controller.spotifyAutoplay)
-  return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['diagnostics', 'Diagnostics']] }),
+  return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['recovery', 'Recovery'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) : h(LogsPage, { controller }))
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) :
+    tab === 'recovery' ? h(RecoveryPage, { controller, onOpenDiagnostics: () => setTab('diagnostics') }) : h(LogsPage, { controller }))
 }
 
 function LogsPage({ controller }) {

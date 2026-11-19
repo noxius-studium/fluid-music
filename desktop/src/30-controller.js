@@ -35,6 +35,8 @@ function createController(ctx, hostCapabilities = {}) {
   const historyRetention = atom(0)
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
+  const sourceHealth = atom({})
+  const retryState = atom({})
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
@@ -43,6 +45,7 @@ function createController(ctx, hostCapabilities = {}) {
   let sleepBound = null
   let sleepEndedFor = null
   let lastResumeSaveAt = 0
+  const retryBudgets = new Map()
   let spotifyStartedUri = ''
   let localRefreshVersion = 0
   const status = atom('idle')
@@ -161,11 +164,13 @@ function createController(ctx, hostCapabilities = {}) {
         throw failure
       }
       if (!quiet) addLog('info', 'api.success', { requestId, method, route, status: Number(response?.status_code || response?.data?.status_code) || 200, durationMs: Date.now() - started, ...diagnosticBody(options?.body) })
+      if (sourceHealth.get().backend?.state === 'unavailable') recordHealth('backend', 'ready', 'Backend reachable again.')
       return response && Object.prototype.hasOwnProperty.call(response, 'data') ? response.data : response
     } catch (error) {
       const failure = new Error(userFacingError(error, 'FluidMusic could not reach its backend. Retry after Hermes finishes reloading.'))
       failure.statusCode = Number(error?.statusCode) || 0
       addLog('error', 'api.failure', { requestId, method, route, status: failure.statusCode, durationMs: Date.now() - started, error: failure.message, ...diagnosticBody(options?.body) })
+      recordHealth('backend', 'unavailable', 'A backend request failed. Hermes may be reloading or offline.', 'retry')
       throw failure
     }
   }
@@ -342,6 +347,7 @@ function createController(ctx, hostCapabilities = {}) {
 
       status.set('error')
       message.set(detail || 'This HTTPS radio stream could not connect. Choose another station or retry.')
+      recordHealth('radio', 'degraded', detail || 'This HTTPS radio stream could not connect.', 'retry')
     }
     // Report the REAL failure boundary from the media element instead of one
     // generic notice: network reachability, decode/codec support, and
@@ -358,6 +364,7 @@ function createController(ctx, hostCapabilities = {}) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       clearTimeout(radioTimeout)
+      recordHealth('radio', 'ready', 'Live stream playing.')
       radioTimeout = null
       status.set('playing')
       message.set('')
@@ -381,6 +388,7 @@ function createController(ctx, hostCapabilities = {}) {
     if (item.unavailable || !sources.length) {
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder to restore it.')
+      recordHealth('local', 'degraded', 'A local track is missing. Rescan its folder.', 'rescan')
       return
     }
     const generation = radioGeneration
@@ -497,9 +505,12 @@ function createController(ctx, hostCapabilities = {}) {
         status.set(snapshot.playing ? 'playing' : 'paused')
         if (snapshot.device) message.set('')
       }
+      recordHealth('spotify', snapshot.connected ? 'ready' : 'unknown', snapshot.connected ? 'Spotify Connect responded.' : 'No active Connect session reported.', snapshot.connected ? '' : 'choose-device')
       return snapshot
     } catch (error) {
-      spotifyFailure.set(classifySpotifyFailure(error))
+      const failure = classifySpotifyFailure(error)
+      spotifyFailure.set(failure)
+      recordHealth('spotify', ['auth-required', 'insufficient-scope'].includes(failure.reason) ? 'unavailable' : 'degraded', failure.message, failure.action)
       if (token === transition && current()?.source === 'spotify') {
         status.set('error')
         message.set(error?.message || 'Spotify Connect state could not be confirmed.')
@@ -512,10 +523,12 @@ function createController(ctx, hostCapabilities = {}) {
     try {
       const snapshot = normalizeSpotifyAuth(await spotifyRequest('/spotify/auth/status'))
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', snapshot.authenticated ? 'ready' : 'unavailable', snapshot.authenticated ? 'Spotify sign-in confirmed.' : 'Not signed in to Spotify.', snapshot.authenticated ? '' : 'reconnect')
       return snapshot
     } catch (error) {
       const snapshot = { state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication status is unavailable.' }
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', 'unavailable', 'Spotify authentication status is unavailable.', 'reconnect')
       return snapshot
     }
   }
@@ -596,10 +609,17 @@ function createController(ctx, hostCapabilities = {}) {
 
   async function refreshLocalLibrary() {
     const version = ++localRefreshVersion
-    const [rootsData, tracksData] = await Promise.all([
-      request('/local/roots'),
-      request('/local/tracks?include_missing=true&limit=5000&offset=0')
-    ])
+    let rootsData
+    let tracksData
+    try {
+      [rootsData, tracksData] = await Promise.all([
+        request('/local/roots'),
+        request('/local/tracks?include_missing=true&limit=5000&offset=0')
+      ])
+    } catch (error) {
+      recordHealth('local', 'degraded', 'The local library could not be read. Rescan or retry.', 'rescan')
+      throw error
+    }
     if (disposed || version !== localRefreshVersion) return { roots: localRoots.get(), tracks: localTracks.get() }
     const roots = Array.isArray(rootsData?.roots) ? rootsData.roots : []
     const tracks = (Array.isArray(tracksData?.items) ? tracksData.items : []).map(localTrackItem).filter(Boolean)
@@ -614,6 +634,7 @@ function createController(ctx, hostCapabilities = {}) {
     })
     queue.set(hydrateLocalReferences(queue.get()))
     persist()
+    recordHealth('local', 'ready', `${tracks.length} indexed track(s) in ${roots.length} approved folder(s).`)
     return { roots, tracks }
   }
 
@@ -1351,11 +1372,13 @@ function createController(ctx, hostCapabilities = {}) {
     if (state.kind === 'error' || state.kind === 'autoplay-blocked') {
       const failure = classifyYouTubeFailure(state.kind === 'error' ? { kind: 'player-error', errorCode: state.errorCode } : { kind: 'autoplay-blocked' })
       youtube.set({ ...youtube.get(), status: failure.reason === 'autoplay-blocked' ? 'paused' : 'error', reason: failure.reason, error: failure.message, action: failure.action, retryable: failure.retryable, fallbackEligible: failure.fallbackEligible })
+      recordHealth('youtube', failure.retryable ? 'degraded' : 'unavailable', failure.message, failure.action)
       if (failure.message) message.set(`${failure.message} ${failure.remedy}`.trim())
       return true
     }
     if (state.kind !== 'state') return false
     youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
+    if (state.playing) recordHealth('youtube', 'ready', 'YouTube player reporting playback.')
     progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
     saveResumePosition(false)
     status.set(state.playing ? 'playing' : 'paused')
@@ -1378,6 +1401,7 @@ function createController(ctx, hostCapabilities = {}) {
     if (!watchCapability.available) {
       youtube.set({ ...youtube.get(), watchUnavailable: true })
       message.set('First-party watch fallback needs an owned host view capability this Hermes build does not provide. Skip or choose another video.')
+      recordHealth('youtube', 'degraded', 'Owned first-party watch view is not available on this host.', 'diagnose')
       return false
     }
     if (watchAttempts >= 1) {
@@ -1423,6 +1447,7 @@ function createController(ctx, hostCapabilities = {}) {
   function retryYouTube() {
     const item = current()
     if (!item || item.source !== 'youtube') return Promise.resolve(false)
+    if (!tryRetry('youtube')) return Promise.resolve(false)
     youtube.set({ ...youtube.get(), status: 'loading', error: '', reason: '', reloadToken: (Number(youtube.get().reloadToken) || 0) + 1 })
     return playAt(index.get()).then(() => true)
   }
@@ -1972,6 +1997,52 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // ---- Recovery center: evidence-based health and bounded retries (FM-22) ----
+  function recordHealth(source, state, detail, action = '') {
+    const row = normalizeHealthRow({ source, state, detail, action, lastEvidenceAt: new Date().toISOString() })
+    if (row) sourceHealth.set({ ...sourceHealth.get(), [source]: row })
+  }
+
+  function tryRetry(key) {
+    const now = monotonicNow()
+    const gate = retryGate(retryBudgets.get(key), now)
+    if (!gate.allowed) {
+      message.set(`Retry is cooling down for ${Math.ceil(gate.remainingMs / 1000)}s. Wait, then try again.`)
+      return false
+    }
+    const consumed = retryConsumed(retryBudgets.get(key), now)
+    retryBudgets.set(key, consumed)
+    retryState.set({ ...retryState.get(), [key]: { ...consumed, cooldownUntilWall: consumed.cooldownUntil > 0 ? Date.now() + (consumed.cooldownUntil - now) : 0 } })
+    addLog('state', 'recovery.retry', { key, attempt: gate.attempts + 1, cooldownMs: consumed.cooldownUntil > 0 ? RETRY_COOLDOWN_MS : 0 })
+    return true
+  }
+
+  function retryRadio() {
+    const item = current()
+    if (!item || item.source !== 'radio') return Promise.resolve(false)
+    if (!tryRetry('radio')) return Promise.resolve(false)
+    return playAt(index.get()).then(() => true)
+  }
+
+  function retrySpotify() {
+    if (!tryRetry('spotify')) return Promise.resolve(false)
+    return refreshSpotify().then(() => true).catch(() => false)
+  }
+
+  function copyDiagnostics() {
+    const rows = Object.values(sourceHealth.get()).map(row => `  ${row.source}: ${row.state} — ${row.detail}${row.lastEvidenceAt ? ` (evidence ${row.lastEvidenceAt})` : ''}`)
+    const events = logs.get().slice(0, 40).map(entry => `  ${entry.at} ${entry.level} ${entry.event} ${JSON.stringify(entry.detail)}`)
+    return [
+      'FluidMusic diagnostics (sanitized — no tokens, credentials or raw history)',
+      `Generated: ${new Date().toISOString()}`,
+      `Status: ${status.get()} · Current source: ${current()?.source || 'none'}`,
+      'Source health:',
+      ...(rows.length ? rows : ['  no evidence recorded yet']),
+      'Recent events:',
+      ...(events.length ? events : ['  none']),
+    ].join('\n')
+  }
+
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
@@ -1982,6 +2053,7 @@ function createController(ctx, hostCapabilities = {}) {
     resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
     armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,

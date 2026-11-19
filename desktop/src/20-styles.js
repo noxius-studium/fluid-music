@@ -70,6 +70,11 @@ const CSS = `
 .fluid-filter-field{display:flex;flex-direction:column;gap:3px;font-size:10px;color:var(--ui-text-tertiary);min-width:0}
 .fluid-filter-field .fluid-input{min-width:0}
 .fluid-history-pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fluid-health-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center;min-width:0}
+.fluid-health-row[data-state=ready] .fluid-row-title{color:var(--ui-text-primary)}
+.fluid-health-row[data-state=degraded] .fluid-row-title{color:var(--ui-accent)}
+.fluid-health-row[data-state=unavailable] .fluid-row-title{color:var(--ui-text-secondary)}
+@container fluid (max-width:580px){.fluid-health-row{grid-template-columns:1fr}.fluid-health-row>.fluid-row-actions{justify-content:flex-start;flex-wrap:wrap}}
 @container fluid (max-width:580px){.fluid-player-extras{padding:4px 0 2px}.fluid-history-filters{flex-direction:column;align-items:stretch}.fluid-bookmark-row{grid-template-columns:auto minmax(0,1fr)}.fluid-bookmark-row>.fluid-row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-titlebar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `
