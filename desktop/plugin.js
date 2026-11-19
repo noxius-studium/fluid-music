@@ -515,6 +515,15 @@ const CSS = `
 @container fluid (max-width:980px){.fluid-now-band{grid-template-columns:96px minmax(0,1fr)}.fluid-up-next{grid-column:1/-1;border-left:0;border-top:1px solid var(--fm-line);padding:8px 0}.fluid-orbit{width:96px;min-width:96px}}
 @container fluid (max-width:720px){.fluid-topbar{gap:10px;padding:0 8px}.fluid-wordmark span{display:none}.fluid-primary-nav{flex:1;justify-content:space-between}.fluid-primary-nav .fluid-nav-button{padding:5px 7px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);gap:12px;min-height:0}.fluid-orbit{width:72px;min-width:72px;padding:6px}.fluid-now-title{font-size:22px}.fluid-content{padding:12px 10px 24px}.fluid-page-head{margin-top:12px}.fluid-track-row{grid-template-columns:20px 36px minmax(0,1fr);}.fluid-track-row>.fluid-row-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.fluid-track-row>.fluid-source-tag,.fluid-track-row>.fluid-track-duration{display:none}}
 @container fluid (max-width:460px){.fluid-topbar{height:auto;min-height:42px}.fluid-primary-nav .fluid-nav-button{font-size:11px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);padding-top:10px}.fluid-orbit{width:72px;min-width:72px}.fluid-up-next{grid-column:1/-1}.fluid-now-main .fluid-volume{width:100%}.fluid-page-title{font-size:20px}.fluid-log-row{grid-template-columns:1fr}.fluid-log-row pre{grid-column:1}.fluid-titlebar-source{display:none}}
+.fluid-mini-player{container:mini / size}
+.fluid-mini-body{overflow:auto}
+.fluid-youtube-player{grid-template-rows:minmax(200px,1fr) auto;overflow:auto}
+.fluid-youtube-frame-wrap{min-height:200px}
+.fluid-youtube-frame{min-width:200px;min-height:200px}
+.fluid-mini-expand-note{display:none;margin:0;padding:6px 8px;border-left:2px solid var(--ui-accent);background:var(--fm-soft);color:var(--ui-text-secondary);font-size:10px;line-height:1.5}
+@container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
+@container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
+@container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
 @media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-titlebar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `
 
@@ -4330,6 +4339,10 @@ function MiniPlayer({ controller }) {
           ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
           : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
       ),
+      // Honest physical minimum: the video never shrinks below 200x200. When
+      // the docked pane is too short, say so and keep controls reachable
+      // instead of pretending everything fits or hiding the video.
+      h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
       youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       watching
@@ -4549,13 +4562,13 @@ function PlayerPopover({ controller, popoverRef }) {
   const capabilities = mediaCapabilities(item)
   const upcoming = queue.slice(at + 1, at + 4)
   const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
-  return h('div', { ref: popoverRef, className: 'fluid-title-popover', role: 'dialog', 'aria-label': 'FluidMusic quick controls' },
+  return h('div', { ref: popoverRef, id: 'fluid-title-popover', className: 'fluid-title-popover', role: 'dialog', 'aria-label': 'FluidMusic quick controls' },
     h('div', { className: 'fluid-popover-now' }, h('div', { className: 'fluid-orbit fluid-orbit-small', 'data-playing': state === 'playing' }, h(Artwork, { item: display, className: 'fluid-orbit-art' })), h('div', { className: 'fluid-row-copy' }, h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'), h('strong', { className: 'fluid-popover-title' }, display?.title || 'Nothing selected'), h('span', { className: 'fluid-row-detail' }, display?.subtitle || 'Open Media to choose something.'))),
     item && h(Transport, { controller }),
     capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : item?.source === 'radio' && h('p', { className: 'fluid-live-line' }, 'LIVE'),
     capabilities.volume && h(VolumeControl, { controller }),
     item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device || 'No confirmed Connect device'),
-    upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext' }, h('h3', {}, 'Up Next'), upcoming.map(next => h('div', { className: 'fluid-next-row', key: next.id }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
+    upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext', 'aria-label': 'Up next preview' }, h('h3', {}, 'Up Next'), upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, title: next.title, 'aria-label': `Play ${next.title}`, onClick: () => void controller.playAt(at + offset + 1) }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
     h(Notice, { controller }),
     h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); host.navigate(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Open Media')),
   )
@@ -4589,7 +4602,7 @@ function TitlebarPlayer({ controller }) {
     }
   }, [open, controller])
   return h('div', { ref: rootRef, className: 'fluid-titlebar' },
-    h(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'micro', className: 'fluid-titlebar-summary', 'aria-expanded': open, 'aria-haspopup': 'dialog', onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
+    h(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'micro', className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
     mediaCapabilities(item).play && h(Action, { compact: true, kind: ['playing', 'loading'].includes(state) ? 'pause' : 'play', label: ['playing', 'loading'].includes(state) ? 'Pause' : 'Play', onClick: () => void controller.toggle() }),
     open && h(PlayerPopover, { controller, popoverRef }),
   )
@@ -4621,6 +4634,9 @@ export default {
     const controller = createController(ctx, { watchCapability: youTubeWatchCapability(SDK) })
     ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
     ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
-    ctx.register({ id: 'mini-player', area: 'panes', title: 'FluidMusic player', data: { placement: 'right', width: '300px', height: '420px' }, render: () => h(MiniPlayer, { controller }) })
+    // One dockable pane for every source. 320px is the audio-only target width;
+    // 420px keeps the YouTube video above its 200px minimum plus controls. The
+    // pane itself declares shorter-height behavior honestly (see CSS).
+    ctx.register({ id: 'mini-player', area: 'panes', title: 'FluidMusic player', data: { placement: 'right', width: '320px', height: '420px' }, render: () => h(MiniPlayer, { controller }) })
   },
 }

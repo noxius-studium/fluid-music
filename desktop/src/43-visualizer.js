@@ -158,6 +158,10 @@ function MiniPlayer({ controller }) {
           ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
           : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
       ),
+      // Honest physical minimum: the video never shrinks below 200x200. When
+      // the docked pane is too short, say so and keep controls reachable
+      // instead of pretending everything fits or hiding the video.
+      h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
       youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
       youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       watching
