@@ -1,10 +1,11 @@
 function WorkspaceButton({ children, primary = false, danger = false, ...props }) {
+  // Button is an optional host SDK export; fall back to a plain button rather
+  // than crashing when a host build does not provide it.
   return h(
-    Button,
+    Button || 'button',
     {
       type: 'button',
-      variant: danger ? 'destructive' : primary ? 'default' : 'secondary',
-      size: 'sm',
+      ...(Button ? { variant: danger ? 'destructive' : primary ? 'default' : 'secondary', size: 'sm' } : {}),
       ...props,
     },
     children,

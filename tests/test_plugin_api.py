@@ -570,9 +570,10 @@ def test_router_exposes_frontend_contract(api: Any):
         ("/local/roots/{root_id}", "DELETE"), ("/local/rescan", "POST"),
         ("/local/tracks", "GET"), ("/local/tracks/{track_id}", "GET"),
         ("/radio/search", "GET"), ("/radio/click/{stationuuid}", "POST"),
+        ("/youtube/embed-host", "GET"), ("/youtube/search", "GET"), ("/youtube/resolve", "POST"),
+        ("/history", "GET"), ("/history", "POST"), ("/history", "DELETE"),
     }
     assert expected <= routes
-    assert not any("youtube" in path.lower() for path, _method in routes)
 
 
 def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):

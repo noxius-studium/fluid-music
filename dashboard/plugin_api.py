@@ -1,8 +1,11 @@
-"""FluidMusic REST API: Spotify Connect controls and a safe Radio Browser index.
+"""FluidMusic REST API: Spotify Connect, YouTube, radio and local-library routes.
 
-Spotify calls deliberately reuse Hermes' bundled ``SpotifyClient``.  It owns
-PKCE token refresh, a single 401 retry, and auth-store access, so this plugin
-never handles Spotify credentials itself.
+The Spotify integration is optional and resolved lazily on the first
+Spotify-specific request.  A missing or broken integration reports an explicit
+unavailable state and never aborts this module: YouTube, radio, local-library
+and history routes mount independently.  The legacy host-delegated loader is an
+interim compatibility path; a plugin-owned Spotify integration replaces it
+without changing these route shapes.
 
 Radio stream URLs are returned for the desktop's native player, not fetched by
 this backend.  The only outbound Radio Browser requests target fixed HTTPS
@@ -99,15 +102,55 @@ def _load_spotify_integration():
     )
 
 
-(
-    SpotifyClient,
-    SpotifyError,
-    get_spotify_auth_status,
-    login_spotify_command,
-    _configured_spotify_client_id,
-    _spotify_redirect_uri,
-    SPOTIFY_DASHBOARD_URL,
-) = _load_spotify_integration()
+# Optional-provider boundary: these names stay None until the first
+# Spotify-specific request resolves the integration.  Explicitly assigned
+# values (for example test doubles) are never overwritten by the loader.
+SpotifyClient: Any = None
+SpotifyError: Any = None
+get_spotify_auth_status: Any = None
+login_spotify_command: Any = None
+_configured_spotify_client_id: Any = None
+_spotify_redirect_uri: Any = None
+SPOTIFY_DASHBOARD_URL: Any = None
+
+_SPOTIFY_INTEGRATION_NAMES = (
+    "SpotifyClient",
+    "SpotifyError",
+    "get_spotify_auth_status",
+    "login_spotify_command",
+    "_configured_spotify_client_id",
+    "_spotify_redirect_uri",
+    "SPOTIFY_DASHBOARD_URL",
+)
+_spotify_integration_lock = threading.Lock()
+_spotify_integration_ready = False
+_spotify_integration_unavailable = False
+_SPOTIFY_UNAVAILABLE_ERROR = "Spotify integration is unavailable in this Hermes installation"
+
+
+class SpotifyIntegrationUnavailable(RuntimeError):
+    """The optional Spotify integration could not be loaded; other sources work."""
+
+
+def _resolve_spotify_integration() -> None:
+    """Load the optional integration once; failure is isolated and sanitized."""
+    global _spotify_integration_ready, _spotify_integration_unavailable
+    with _spotify_integration_lock:
+        if _spotify_integration_ready:
+            return
+        if _spotify_integration_unavailable:
+            raise SpotifyIntegrationUnavailable(_SPOTIFY_UNAVAILABLE_ERROR)
+        try:
+            loaded = _load_spotify_integration()
+        except Exception:  # an optional provider must never abort the backend.
+            _spotify_integration_unavailable = True
+            logger.warning("FluidMusic Spotify integration is unavailable; other sources remain active")
+            logger.debug("Spotify integration load failure", exc_info=True)
+            raise SpotifyIntegrationUnavailable(_SPOTIFY_UNAVAILABLE_ERROR) from None
+        for name, value in zip(_SPOTIFY_INTEGRATION_NAMES, loaded):
+            if globals()[name] is None:
+                globals()[name] = value
+        _spotify_integration_ready = True
 
 
 async def _profile_scope(profile: str | None = None) -> AsyncIterator[None]:
@@ -176,7 +219,7 @@ def _load_local_library_class():
 LocalLibrary = _load_local_library_class()
 # Construct lazily: Radio Browser and /config must remain available when the
 # user has not yet run `hermes auth spotify`.
-_client: SpotifyClient | None = None
+_client: Any = None
 
 PLUGIN_NAME = "fluid-music"
 RADIO_BROWSER_SEARCH_URL = "https://de1.api.radio-browser.info/json/stations/search"
@@ -256,6 +299,7 @@ def _spotify_auth_flow_status() -> dict[str, str | None]:
 
 def _spotify_auth_status_data() -> dict[str, Any]:
     """Whitelist Hermes auth-store metadata that is safe for the renderer."""
+    _resolve_spotify_integration()
     status = get_spotify_auth_status()
     if not isinstance(status, Mapping):
         return {"logged_in": False}
@@ -302,6 +346,7 @@ def _safe_spotify_auth_error(exc: BaseException) -> str:
 
 def _spotify_setup_data(auth: Mapping[str, Any]) -> dict[str, Any]:
     """Describe only the one-time public setup Hermes requires before PKCE can start."""
+    _resolve_spotify_integration()
     configured_client_id = auth.get("client_id")
     if not configured_client_id:
         try:
@@ -319,6 +364,7 @@ def _run_spotify_auth(client_id: str | None) -> None:
     """Run Hermes' PKCE flow in a daemon so API requests never wait for callback."""
     global _client
     try:
+        _resolve_spotify_integration()
         login_spotify_command(SimpleNamespace(
             client_id=client_id,
             redirect_uri=None,
@@ -326,6 +372,9 @@ def _run_spotify_auth(client_id: str | None) -> None:
             no_browser=False,
             timeout=180,
         ))
+    except SpotifyIntegrationUnavailable:
+        with _spotify_auth_lock:
+            _spotify_auth_flow.update(state="failed", error=_SPOTIFY_UNAVAILABLE_ERROR)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - Hermes reports cancelled OAuth flows through SystemExit.
         # OAuth exceptions can contain an authorization URL, client ID, or token response.
         logger.warning("Spotify authentication flow did not complete")
@@ -381,14 +430,27 @@ def _plugin_settings() -> dict[str, Any]:
 
 
 def _capabilities() -> dict[str, Any]:
+    try:
+        _resolve_spotify_integration()
+        spotify_connect: dict[str, Any] = {"available": True, "auth": "hermes_auth_spotify"}
+    except SpotifyIntegrationUnavailable:
+        spotify_connect = {
+            "available": False,
+            "auth": "hermes_auth_spotify",
+            "unavailable_reason": "spotify-integration-unavailable",
+        }
     return {
-        "spotify_connect": {"available": True, "auth": "hermes_auth_spotify"},
+        "spotify_connect": spotify_connect,
         "radio_browser": {"available": True, "stream_policy": "https-only-no-hls"},
     }
 
 
 async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
     """Run synchronous Spotify work off the event loop with stable public errors."""
+    try:
+        _resolve_spotify_integration()
+    except SpotifyIntegrationUnavailable as exc:
+        return _error(str(exc))
     try:
         data = await anyio.to_thread.run_sync(lambda: fn(*args, **kwargs))
         return {"ok": True, "data": data}
@@ -404,9 +466,10 @@ async def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> dict[str, 
         return _error(str(exc))
 
 
-def _spotify_client() -> SpotifyClient:
+def _spotify_client() -> Any:
     """Resolve Spotify only for a Spotify request, allowing authentication later."""
     global _client
+    _resolve_spotify_integration()
     if _client is None:
         _client = SpotifyClient()
     return _client
@@ -491,6 +554,8 @@ async def spotify_auth_status() -> dict[str, Any]:
     try:
         auth = _spotify_auth_status_data()
         setup = _spotify_setup_data(auth)
+    except SpotifyIntegrationUnavailable as exc:
+        return {"ok": False, "error": str(exc), "data": {"flow": flow}}
     except Exception:  # noqa: BLE001 - auth-store errors must not leak through the UI.
         return {"ok": False, "error": "Spotify authentication status unavailable", "data": {"flow": flow}}
     return {"ok": True, "data": {"auth": auth, "setup": setup, "flow": flow}}
@@ -509,6 +574,8 @@ async def spotify_auth_start(request: Request) -> dict[str, Any]:
             return _error("Spotify authentication is already in progress")
         try:
             setup = _spotify_setup_data(_spotify_auth_status_data())
+        except SpotifyIntegrationUnavailable as exc:
+            return _error(str(exc))
         except Exception:  # noqa: BLE001 - do not expose auth-store failure details.
             return _error("Spotify authentication status unavailable")
         if setup["client_id_required"] and client_id is None:

@@ -197,6 +197,19 @@ export default {
     style.textContent = CSS
     document.head.append(style)
     ctx.onDispose(() => style.remove())
+    if (!SDK_COMPATIBLE) {
+      // Honest incompatibility surface: no controller, no media commands, no
+      // polling. Never reference the missing exports beyond this message.
+      const renderFallback = () => h('div', { className: 'fluid-root', role: 'alert' },
+        h('main', { className: 'fluid-app' },
+          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Update Hermes, then reopen Media.`)))
+      if (ROUTES_AREA != null) {
+        ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: renderFallback })
+      } else {
+        ctx.register({ id: 'media-sdk-fallback', area: 'panes', title: 'FluidMusic', data: { placement: 'right', width: '320px', height: '160px' }, render: renderFallback })
+      }
+      return
+    }
     const controller = createController(ctx)
     ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
     ctx.register({ id: 'media-titlebar', area: TITLEBAR_AREAS.right, order: 18, render: () => h(TitlebarPlayer, { controller }) })
