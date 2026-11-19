@@ -813,7 +813,8 @@ test('workspace navigation, auth/device normalizers, queue settings, and diagnos
   assert.match(source, /guard\?\.expectedUri === anchor\.uri/)
   assert.match(source, /remainingMs: Math\.max\(0, snapshot\.durationMs - snapshot\.progressMs\)/)
   assert.match(source, /fluid-music-youtube/)
-  assert.match(source, /codicon: 'music'/)
+  assert.match(source, /id: 'media-route', area: ROUTES_AREA/)
+  assert.doesNotMatch(source, /SIDEBAR_NAV_AREA/, 'no extra permanent sidebar row (design contract)')
   assert.match(source, /TITLEBAR_AREAS\.right/)
 })
 

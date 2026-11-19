@@ -77,9 +77,7 @@ function NowPlayingBand({ controller }) {
   const at = useValue(controller.index)
   const status = useValue(controller.status)
   const spotify = useValue(controller.spotify)
-  const progress = useValue(controller.progress)
   const item = queue[at]
-  const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
   const upcoming = queue.slice(at + 1, at + 4)
   return h('section', { className: 'fluid-now-band', 'aria-label': 'Now playing' },
@@ -88,15 +86,42 @@ function NowPlayingBand({ controller }) {
       h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'),
       h('h1', { className: 'fluid-now-title' }, display?.title || 'Choose what plays next'),
       h('p', { className: 'fluid-now-subtitle' }, display?.subtitle || 'Spotify, live radio, local music, and embedded YouTube playback.'),
-      capabilities.play && h(Transport, { controller }),
-      capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : h('p', { className: 'fluid-live-line' }, item?.source === 'radio' ? 'LIVE · station broadcast' : status),
-      capabilities.volume && h(VolumeControl, { controller }),
       item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device ? `Playing on ${spotify.device}` : 'Choose an available Spotify Connect device in Settings.'),
     ),
     h('aside', { className: 'fluid-up-next', 'aria-label': 'Up next preview' },
       h('div', { className: 'fluid-section-head' }, h('h2', { className: 'fluid-section-title' }, 'Up Next'), h('span', {}, `${Math.max(0, queue.length - at - 1)}`)),
       upcoming.length ? upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, onClick: () => void controller.playAt(at + offset + 1) }, h(Artwork, { item: next, className: 'fluid-mini-cover' }), h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next))))) : h('p', { className: 'fluid-muted' }, 'Nothing queued after this.'),
       h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { onClick: () => controller.setWorkspaceView('queue') }, 'Open Queue')),
+    ),
+  )
+}
+
+function BottomTransport({ controller }) {
+  // The ONE persistent player bar: content scrolls above it, it never scrolls
+  // away. Same capability table and shared components as every other surface.
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const status = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const capabilities = mediaCapabilities(item)
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  return h('footer', { className: 'fluid-bottom-bar', 'aria-label': 'Player' },
+    h('div', { className: 'fluid-bottom-item' },
+      h(Artwork, { item: display, className: 'fluid-mini-cover' }),
+      h('div', { className: 'fluid-row-copy' },
+        h('span', { className: 'fluid-row-title', title: display?.title || '' }, display?.title || 'Nothing selected'),
+        h('span', { className: 'fluid-row-detail', title: display?.subtitle || '' }, display?.subtitle || 'Choose music in Browse.'),
+      ),
+    ),
+    h('div', { className: 'fluid-bottom-center' },
+      h(Transport, { controller }),
+      capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : h('p', { className: 'fluid-live-line' }, item?.source === 'radio' ? 'LIVE · station broadcast' : item ? status : 'idle'),
+    ),
+    h('div', { className: 'fluid-bottom-right' },
+      capabilities.volume && h(VolumeControl, { controller }),
+      item && h('span', { className: 'fluid-source-chip', 'data-source': item.source }, sourceLabel(item)),
     ),
   )
 }
@@ -145,7 +170,11 @@ function MediaPage({ controller }) {
   useEffect(() => { controller.setPollingOpen(true); return () => controller.setPollingOpen(false) }, [controller])
   const pages = { browse: BrowsePage, library: LibraryPage, queue: QueuePage, settings: SettingsPage }
   const Page = pages[view] || BrowsePage
-  return h('div', { className: 'fluid-root' }, h('main', { className: 'fluid-app' }, h(TopNavigation, { controller, view }), h('section', { className: 'fluid-content' }, h('div', { className: 'fluid-content-inner' }, h(Notice, { controller }), h(NowPlayingBand, { controller }), h(Page, { controller })))))
+  return h('div', { className: 'fluid-root' }, h('main', { className: 'fluid-app' },
+    h(TopNavigation, { controller, view }),
+    h('section', { className: 'fluid-content' }, h('div', { className: 'fluid-content-inner' }, h(Notice, { controller }), view === 'browse' && h(NowPlayingBand, { controller }), h(Page, { controller }))),
+    h(BottomTransport, { controller }),
+  ))
 }
 
 function PlayerPopover({ controller, popoverRef }) {
