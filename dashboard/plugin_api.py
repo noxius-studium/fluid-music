@@ -1,11 +1,13 @@
 """FluidMusic REST API: Spotify Connect, YouTube, radio and local-library routes.
 
-The Spotify integration is optional and resolved lazily on the first
-Spotify-specific request.  A missing or broken integration reports an explicit
-unavailable state and never aborts this module: YouTube, radio, local-library
-and history routes mount independently.  The legacy host-delegated loader is an
-interim compatibility path; a plugin-owned Spotify integration replaces it
-without changing these route shapes.
+The Spotify integration is OWNED by FluidMusic (dashboard/providers): official
+Authorization Code + PKCE, protected profile-local credentials, single-flight
+refresh.  No Hermes-core or sibling-plugin Spotify implementation is imported.
+The integration is resolved lazily on the first Spotify-specific request; a
+missing or broken provider reports an explicit unavailable state and never
+aborts this module — YouTube, radio, local-library and history routes mount
+independently.  Legacy credential stores stay untouched until an explicit
+owner sign-in; missing login is never a fake Connected state.
 
 Radio stream URLs are returned for the desktop's native player, not fetched by
 this backend.  The only outbound Radio Browser requests target fixed HTTPS
@@ -38,42 +40,17 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 def _load_spotify_integration():
-    """Support legacy core Spotify and the current official Spotify plugin."""
-    try:
-        from hermes_cli.auth import get_spotify_auth_status, login_spotify_command
-        from hermes_cli.auth_constants import SPOTIFY_DASHBOARD_URL
-        from hermes_cli.auth_spotify import _spotify_client_id, _spotify_redirect_uri
-        from plugins.spotify.client import SpotifyClient, SpotifyError
-        return (
-            SpotifyClient,
-            SpotifyError,
-            get_spotify_auth_status,
-            login_spotify_command,
-            _spotify_client_id,
-            _spotify_redirect_uri,
-            SPOTIFY_DASHBOARD_URL,
-        )
-    except ImportError:
-        pass
-
-    plugin_root = Path(__file__).resolve().parent.parent
-    sources_root = plugin_root.parent
-    from hermes_constants import get_hermes_home
-    canonical = Path(get_hermes_home()) / "plugins" / "spotify" / "spotify_auth.py"
-    candidates = [canonical] if canonical.is_file() else []
-    candidates.extend(sorted(sources_root.glob("spotify-*/spotify_auth.py"), reverse=True))
-    if not candidates:
-        raise ImportError("The official Spotify plugin is not installed beside FluidMusic")
-    spotify_root = candidates[0].parent
-    package_name = "hermes_fluid_music_spotify"
+    """Load the FluidMusic-OWNED Spotify provider (no core/sibling imports)."""
+    providers_root = Path(__file__).resolve().parent / "providers"
+    package_name = "hermes_fluid_music_providers"
     if package_name not in sys.modules:
         spec = importlib.util.spec_from_file_location(
             package_name,
-            spotify_root / "__init__.py",
-            submodule_search_locations=[str(spotify_root)],
+            providers_root / "__init__.py",
+            submodule_search_locations=[str(providers_root)],
         )
         if spec is None or spec.loader is None:
-            raise ImportError("The official Spotify plugin could not be loaded")
+            raise ImportError("The FluidMusic Spotify provider package is unavailable")
         package = importlib.util.module_from_spec(spec)
         sys.modules[package_name] = package
         try:
@@ -81,24 +58,15 @@ def _load_spotify_integration():
         except Exception:
             sys.modules.pop(package_name, None)
             raise
-    spotify_auth = importlib.import_module(f"{package_name}.spotify_auth")
-    spotify_client = importlib.import_module(f"{package_name}.spotify_client")
-
-    def configured_client_id():
-        try:
-            from hermes_cli.auth import get_provider_auth_state
-            return spotify_auth._client_id(state=get_provider_auth_state("spotify") or {})
-        except Exception:
-            return None
-
+    spotify = importlib.import_module(f"{package_name}.spotify")
     return (
-        spotify_client.SpotifyClient,
-        spotify_client.SpotifyError,
-        spotify_auth.auth_status,
-        spotify_auth.login,
-        configured_client_id,
-        spotify_auth._redirect_uri,
-        spotify_auth.DASHBOARD_URL,
+        spotify.SpotifyClient,
+        spotify.SpotifyError,
+        spotify.auth_status,
+        spotify.login,
+        spotify.configured_client_id,
+        spotify.redirect_uri,
+        spotify.DASHBOARD_URL,
     )
 
 
@@ -312,6 +280,7 @@ def _spotify_auth_status_data() -> dict[str, Any]:
         "expires_at",
         "api_base_url",
         "has_refresh_token",
+        "account",
     )
     return {field: status[field] for field in safe_fields if field in status}
 
@@ -432,11 +401,11 @@ def _plugin_settings() -> dict[str, Any]:
 def _capabilities() -> dict[str, Any]:
     try:
         _resolve_spotify_integration()
-        spotify_connect: dict[str, Any] = {"available": True, "auth": "hermes_auth_spotify"}
+        spotify_connect: dict[str, Any] = {"available": True, "auth": "plugin_owned_oauth_pkce"}
     except SpotifyIntegrationUnavailable:
         spotify_connect = {
             "available": False,
-            "auth": "hermes_auth_spotify",
+            "auth": "plugin_owned_oauth_pkce",
             "unavailable_reason": "spotify-integration-unavailable",
         }
     return {

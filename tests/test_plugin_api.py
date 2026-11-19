@@ -51,18 +51,11 @@ class FakeResponse:
 
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Import the API in isolation from a Hermes installation."""
-    client_module = types.ModuleType("plugins.spotify.client")
-    client_module.SpotifyClient = FakeSpotifyClient
-    client_module.SpotifyError = FakeSpotifyError
-    auth_module = types.ModuleType("hermes_cli.auth")
-    auth_module.get_spotify_auth_status = lambda: {"logged_in": False}
-    auth_module.login_spotify_command = lambda _args: None
-    constants_module = types.ModuleType("hermes_cli.auth_constants")
-    constants_module.SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-    auth_spotify_module = types.ModuleType("hermes_cli.auth_spotify")
-    auth_spotify_module._spotify_client_id = lambda: "configured-client-id"
-    auth_spotify_module._spotify_redirect_uri = lambda: "http://127.0.0.1:43827/spotify/callback"
+    """Import the API with the OWNED Spotify provider and labelled doubles.
+
+    No Hermes-core or sibling-plugin Spotify module is injected or imported;
+    the provider interface is doubled at the plugin_api module boundary.
+    """
     hermes_constants_module = types.ModuleType("hermes_constants")
     hermes_constants_module.get_hermes_home = lambda: tmp_path / "hermes-home"
     scope_calls: list[tuple[str, Any]] = []
@@ -91,13 +84,6 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     secret_scope_module.reset_secret_scope = (
         lambda token: scope_calls.append(("secret-reset", token))
     )
-    monkeypatch.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify", types.ModuleType("plugins.spotify"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify.client", client_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_constants", constants_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_spotify", auth_spotify_module)
     monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_module)
     monkeypatch.setitem(sys.modules, "hermes_cli.env_loader", env_loader_module)
     monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants_module)
@@ -106,6 +92,11 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
     module._scope_calls = scope_calls
+    # Labelled doubles for the owned provider interface (FM-09): the lazy
+    # resolver never overwrites explicitly assigned names.
+    module.SpotifyClient = FakeSpotifyClient
+    module.SpotifyError = FakeSpotifyError
+    module._configured_spotify_client_id = lambda: "configured-client-id"
     yield module
     sys.modules.pop("dashboard.plugin_api", None)
 
@@ -608,6 +599,9 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
             "fluid-music/dashboard/manifest.json",
             "fluid-music/dashboard/plugin_api.py",
             "fluid-music/dashboard/local_library.py",
+            "fluid-music/dashboard/providers/__init__.py",
+            "fluid-music/dashboard/providers/token_store.py",
+            "fluid-music/dashboard/providers/spotify.py",
             "fluid-music/desktop/plugin.js",
             "fluid-music/README.md",
             "fluid-music/LICENSE",

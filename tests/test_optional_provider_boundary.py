@@ -60,14 +60,18 @@ def host_only_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
+
+    def _provider_unavailable():
+        raise ImportError("FluidMusic Spotify provider modules unavailable (labelled fixture)")
+
+    monkeypatch.setattr(module, "_load_spotify_integration", _provider_unavailable)
     yield module
     sys.modules.pop("dashboard.plugin_api", None)
 
 
 @pytest.fixture
 def with_spotify_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Labelled fake Spotify integration for the available-path contract check."""
-    client_module = types.ModuleType("plugins.spotify.client")
+    """Owned provider resolved, then doubled at the module boundary (labelled)."""
 
     class FakeClient:
         def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -79,28 +83,15 @@ def with_spotify_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     class FakeError(RuntimeError):
         status_code = None
 
-    client_module.SpotifyClient = FakeClient
-    client_module.SpotifyError = FakeError
-    auth_module = types.ModuleType("hermes_cli.auth")
-    auth_module.get_spotify_auth_status = lambda: {"logged_in": False}
-    auth_module.login_spotify_command = lambda _args: None
-    constants_module = types.ModuleType("hermes_cli.auth_constants")
-    constants_module.SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-    auth_spotify_module = types.ModuleType("hermes_cli.auth_spotify")
-    auth_spotify_module._spotify_client_id = lambda: "configured-client-id"
-    auth_spotify_module._spotify_redirect_uri = lambda: "http://127.0.0.1:43827/spotify/callback"
     hermes_constants = types.ModuleType("hermes_constants")
     hermes_constants.get_hermes_home = lambda: tmp_path / "hermes-home"
-    monkeypatch.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify", types.ModuleType("plugins.spotify"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify.client", client_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_constants", constants_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_spotify", auth_spotify_module)
     monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants)
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
+    module._resolve_spotify_integration()
+    monkeypatch.setattr(module, "SpotifyClient", FakeClient)
+    monkeypatch.setattr(module, "SpotifyError", FakeError)
+    monkeypatch.setattr(module, "get_spotify_auth_status", lambda: {"logged_in": False})
     yield module
     sys.modules.pop("dashboard.plugin_api", None)
 
