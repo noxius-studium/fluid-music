@@ -473,6 +473,7 @@ function createController(ctx) {
   function clearAuthPoll() { if (authTimer) clearTimeout(authTimer); authTimer = null }
   async function pollSpotifyAuth() {
     const snapshot = await refreshSpotifyAuth()
+    if (disposed) { clearAuthPoll(); return snapshot }
     if (snapshot.authenticated || snapshot.state === 'failed') { clearAuthPoll(); return snapshot }
     authAttempts += 1
     if (authAttempts >= 80) {
@@ -1379,6 +1380,10 @@ function createController(ctx) {
 
   function restartSpotifyPolling() {
     if (spotifyTimer) clearInterval(spotifyTimer)
+    spotifyTimer = null
+    // A disposed controller must never resurrect polling (late surface
+    // unmount/remount after plugin disposal is not playback intent).
+    if (disposed) return
     spotifyTimer = setInterval(() => {
       void refreshSpotify()
       void refreshSpotifyDevices()
@@ -1387,6 +1392,8 @@ function createController(ctx) {
 
   function restartYouTubePolling() {
     if (youtubeTimer) clearInterval(youtubeTimer)
+    youtubeTimer = null
+    if (disposed) return
     youtubeTimer = setInterval(() => {
       if (youtubeHandle && current()?.source === 'youtube') void runYouTube('state')
     }, 2000)
