@@ -109,7 +109,7 @@ function atom(initial) {
 
 const MEDIA_COMMAND_ROUTES = new Set(['/play', '/pause', '/next', '/previous', '/transfer', '/queue', '/seek', '/volume', '/shuffle', '/repeat'])
 
-function makeHarness() {
+function makeHarness({ musicDir = '', fallback = null, localTracks = [] } = {}) {
   const restCalls = []
   const previewCalls = []
   const timers = []
@@ -135,10 +135,12 @@ function makeHarness() {
     if (route === '/config') return { ok: true, data: { poll_interval_open: 8, poll_interval_closed: 20 } }
     if (route === '/player') return { ok: true, data: { is_playing: false } }
     if (route === '/local/roots') return { ok: true, data: { roots: [] } }
-    if (route.startsWith('/local/tracks')) return { ok: true, data: { items: [], total: 0 } }
+    if (route.startsWith('/local/tracks')) return { ok: true, data: { items: localTracks, total: localTracks.length } }
     if (route === '/history') return { ok: true, data: { items: [], total: 0 } }
     if (route === '/spotify/auth/status') return { ok: true, data: { auth: { logged_in: false }, setup: {}, flow: { state: 'idle', error: null } } }
     if (route === '/devices') return { ok: true, data: { devices: [] } }
+    if (route === '/settings') return { ok: true, data: { music_dir: String(options?.body?.music_dir ?? musicDir) } }
+    if (route === '/youtube/fallback/audio') return { ok: true, data: fallback || { registered: false } }
     return { ok: true, data: {} }
   }
   const storage = new Map()
@@ -208,6 +210,56 @@ test('FM-26 hide-video state toggles, persists and never issues a transport comm
     assert.equal(harness.mediaCalls().length, 0, 'hiding the video must not stop the one active engine')
     assert.equal(controller.toggleYouTubeVideo(false), false)
     assert.equal(controller.youtubeVideoHidden.get(), false)
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+
+test('FM-27 music folder setting persists and is sent to the backend', async () => {
+  const harness = makeHarness()
+  try {
+    const { controller } = harness
+    await harness.flush()
+    assert.equal(await controller.setMusicDir('  /tmp/FM Music  '), '/tmp/FM Music')
+    assert.equal(controller.musicDir.get(), '/tmp/FM Music')
+    assert.equal(harness.storage.get('musicDir'), '/tmp/FM Music')
+    assert.ok(harness.restCalls.some(call => call.path === '/settings' && call.method === 'PUT' && call.options.body.music_dir === '/tmp/FM Music'))
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+test('FM-27 audio fallback needs a folder and never fakes success', async () => {
+  const harness = makeHarness()
+  try {
+    const { controller } = harness
+    await harness.flush()
+    controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
+    const before = harness.restCalls.filter(call => call.path === '/youtube/fallback/audio').length
+    assert.equal(await controller.downloadYouTubeAudioFallback(), false)
+    assert.match(controller.message.get(), /music folder/)
+    assert.equal(harness.restCalls.filter(call => call.path === '/youtube/fallback/audio').length, before)
+    assert.equal(harness.mediaCalls().length, 0, 'no transport command from a refused fallback')
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+test('FM-27 registered fallback goes Up Next without autoplay or a new engine', async () => {
+  const fallback = { title: 'Fixture Track', video_id: 'abcdefgh001', file: 'x.m4a', track_id: 't1', registered: true }
+  const tracks = [{ id: 't1', path: '/tmp/FM Music/x.m4a', title: 'Fixture Track', available: true, mime_type: 'audio/mp4' }]
+  const harness = makeHarness({ musicDir: '/tmp/FM Music', fallback, localTracks: tracks })
+  try {
+    const { controller } = harness
+    await harness.flush()
+    controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
+    assert.equal(await controller.downloadYouTubeAudioFallback(), true)
+    assert.ok(harness.restCalls.some(call => call.path === '/youtube/fallback/audio' && call.method === 'POST'))
+    assert.equal(controller.queue.get()[1]?.id, 'local:t1', 'indexed track added next')
+    assert.match(controller.message.get(), /local library and Up Next/)
+    assert.notEqual(controller.status.get(), 'playing', 'no surprise autoplay')
+    assert.equal(harness.mediaCalls().length, 0, 'one engine: no transport command from the fallback')
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }

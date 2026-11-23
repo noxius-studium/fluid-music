@@ -33,6 +33,8 @@ function createController(ctx, hostCapabilities = {}) {
   const bookmarks = atom([])
   const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
   const historyRetention = atom(0)
+  // Owner-approved audio fallback folder (non-secret, profile-local).
+  const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
   const sourceHealth = atom({})
@@ -1430,6 +1432,63 @@ function createController(ctx, hostCapabilities = {}) {
     return next
   }
 
+  async function loadSettings() {
+    try {
+      const data = await request('/settings')
+      const folder = safeText(data?.music_dir)
+      musicDir.set(folder)
+      ctx.storage.set('musicDir', folder)
+    } catch { /* Cached folder stays usable when settings cannot be read. */ }
+  }
+
+  async function setMusicDir(value) {
+    const folder = safeText(value)
+    if (!folder) throw new Error('Choose a music folder first.')
+    const data = await request('/settings', { method: 'PUT', body: { music_dir: folder } })
+    const saved = safeText(data?.music_dir, folder)
+    musicDir.set(saved)
+    ctx.storage.set('musicDir', saved)
+    message.set(`Audio fallback folder saved: ${saved}`)
+    return saved
+  }
+
+  async function chooseMusicDir() {
+    const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose the audio fallback folder' })
+    return path ? setMusicDir(path) : null
+  }
+
+  // Real fallback: download audio-only m4a to the configured folder, register
+  // it in the local library, and place it Up Next — never silently start a new
+  // engine or fake provider playback.
+  async function downloadYouTubeAudioFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const url = safeText(item.url)
+    if (!url) { message.set('This item has no source URL to download from.'); return false }
+    if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    message.set('Downloading audio to your music folder…')
+    status.set('loading')
+    try {
+      const result = await request('/youtube/fallback/audio', { method: 'POST', body: { url }, timeoutMs: 120000 })
+      const title = safeText(result?.title, item.title || 'YouTube audio')
+      if (!result?.registered || !result?.track_id) {
+        status.set('paused')
+        message.set(`Saved “${title}” to your music folder. Rescan it to add the track to your library.`)
+        return true
+      }
+      await refreshLocalLibrary()
+      const local = localTracks.get().find(track => String(track.localTrackId) === String(result.track_id))
+      if (local) addNext(local)
+      status.set('paused')
+      message.set(`“${title}” saved to your music folder and added to your local library${local ? ' and Up Next' : ''}.`)
+      return true
+    } catch (error) {
+      status.set('error')
+      message.set(error?.message || 'The audio fallback could not complete.')
+      return false
+    }
+  }
+
   async function assessSpotifyLocalPlayback() {
     let product = ''
     try {
@@ -1598,6 +1657,7 @@ function createController(ctx, hostCapabilities = {}) {
   restartSpotifyPolling()
   spotifyProgressTimer = setInterval(updateSpotifyProgress, 500)
   void loadConfig()
+  void loadSettings()
   void refreshSpotify()
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
@@ -2062,9 +2122,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,

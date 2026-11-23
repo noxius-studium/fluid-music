@@ -69,11 +69,18 @@ YouTube plays through the backend's 127.0.0.1-only, capability-token embed host 
 - Recovery health reflects the last real evidence, not a live guarantee; retries are bounded (three attempts, then a cooldown). History retention removes only this profile's played-history rows — never media, queues, collections or provider history.
 - Host compatibility is declared for the current/next SDK shape (see COMPATIBILITY.md); arbitrary future breaking Hermes releases are not guaranteed.
 
+## Audio-only YouTube fallback (0.6, owner-approved)
+
+- Settings → Playback → **Audio fallback folder** is a profile-local, non-secret path. When a YouTube item reports an eligible embed/watch failure, the player's **Download audio** action downloads AUDIO ONLY with yt-dlp, prefers a native m4a stream (no FFmpeg merge), and writes it to that folder. No video is downloaded, no signed URLs or credentials are logged, and retries/timeout are bounded.
+- The folder is registered as a local-library root and rescanned; the resulting track is added Up Next, never autoplayed. **Hide video** in the mini player only hides the frame — the one active engine keeps decoding audio.
+- If no folder is configured, the fallback says so and does nothing. A failed or rights-private/deleted item is never labelled "available". Packaged-host playback and live provider behavior remain owner review; cloud fixtures use a labelled yt-dlp double.
+- ToS (owner decision, 2026-11-21): accepted for personal use — "I don't care if it breaks the YouTube TOS... I am just providing the software... what people do is not my problem." FluidMusic supplies the path only; no DRM, paid-access, ad or entitlement bypass. Respect your local law and the provider's terms.
+
 ## Non-goals
 
 FluidMusic is not:
 
-- an ad blocker, subscription bypass, Premium unlocker, DRM workaround, or downloader;
+- a video downloader, ad blocker, subscription bypass, Premium unlocker, DRM workaround, or re-streaming proxy (a bounded, owner-configured audio-only fallback is the sole exception, described above);
 - a Spotify audio client or re-streaming proxy;
 - a guarantee of radio-stream licensing, uptime, or global availability;
 - a cross-provider gapless audio mixer.
