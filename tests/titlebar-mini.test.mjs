@@ -109,7 +109,7 @@ function atom(initial) {
 
 const MEDIA_COMMAND_ROUTES = new Set(['/play', '/pause', '/next', '/previous', '/transfer', '/queue', '/seek', '/volume', '/shuffle', '/repeat'])
 
-function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotifyClientId = '' } = {}) {
+function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotifyClientId = '', failPause = false } = {}) {
   const restCalls = []
   const previewCalls = []
   const timers = []
@@ -132,6 +132,7 @@ function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotify
   const rest = async (path, options) => {
     restCalls.push({ path, method: String(options?.method || 'GET').toUpperCase(), options })
     const route = path.split('?')[0]
+    if (route === '/pause' && failPause) return { ok: false, error: { message: 'FluidMusic could not reach its backend.' }, status_code: 0 }
     if (route === '/config') return { ok: true, data: { poll_interval_open: 8, poll_interval_closed: 20 } }
     if (route === '/player') return { ok: true, data: { is_playing: false } }
     if (route === '/local/roots') return { ok: true, data: { roots: [] } }
@@ -320,6 +321,22 @@ test('FM-29 background audio fallback never rewrites the shared transport status
     assert.equal(await controller.downloadYouTubeAudioFallback(), true)
     assert.equal(controller.status.get(), 'playing', 'a download is not a transport transition')
     assert.equal(harness.mediaCalls().length, 0)
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+test('a failed pause of the previous source cannot trap the player on Spotify', async () => {
+  const harness = makeHarness({ failPause: true })
+  try {
+    const { controller } = harness
+    assert.equal(controller.add({ source: 'spotify', id: 'spotify:track:old', uri: 'spotify:track:old', title: 'Old track' }), true)
+    await harness.flush()
+    assert.equal(controller.current()?.source, 'spotify', 'Spotify item is current')
+    assert.equal(controller.add({ source: 'radio', id: 'radio:new', title: 'Station', streamUrl: 'https://radio.example/new' }, true), true)
+    for (let i = 0; i < 8; i += 1) await harness.flush()
+    assert.equal(controller.current()?.source, 'radio', 'switch proceeds even when the old source fails to pause')
+    assert.ok(harness.restCalls.some(call => call.path === '/pause'), 'the old source was still asked to pause')
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }
