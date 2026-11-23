@@ -6,14 +6,12 @@ Labelled doubles only; no real Spotify account/network effect.
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-from test_plugin_api import api, app_for, deferred_thread, request, run  # noqa: F401
+from test_plugin_api import app_for, request, run
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))

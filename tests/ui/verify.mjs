@@ -12,7 +12,7 @@ const review = `${root}.impeccable/review`
 await Promise.all([mkdir(evidence, { recursive: true }), mkdir(review, { recursive: true })])
 const bundled = await build({ entryPoints: [`${root}tests/ui/entry.js`], bundle: true, format: 'iife', write: false, alias: { '@hermes/plugin-sdk': `${root}tests/ui/sdk-fixture.js` } })
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FluidMusic isolated UI</title><style>
-:root{--ui-bg-primary:#0b1220;--ui-bg-secondary:#151c29;--ui-bg-elevated:#151c29;--ui-text-primary:#f3f0e8;--ui-text-secondary:#aab2c2;--ui-text-tertiary:#7f899d;--ui-text-quaternary:#667085;--ui-stroke-secondary:#2b3548;--ui-accent:#9b8cff;--font-mono:monospace;font:13px/1.5 system-ui;color:var(--ui-text-primary);background:var(--ui-bg-primary)}*{box-sizing:border-box}html,body{margin:0;height:100%}body{display:grid;grid-template-rows:40px minmax(0,1fr);overflow:hidden}#host-title{display:flex;align-items:center;justify-content:flex-end;padding:0 12px;border-bottom:1px solid var(--ui-stroke-secondary);background:#0e1522}#surface{display:flex;min-height:0}#workspace{flex:1;min-width:0;height:100%}#pane{width:300px;display:none}.test-button{font:12px system-ui;color:var(--ui-text-primary);background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);padding:7px 10px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;gap:5px}.test-button[data-variant=default]{background:#ff786c;color:#10131b;border-color:#ff786c}.test-button[data-variant=ghost]{background:transparent;border-color:transparent}.test-button[data-size=icon-xs]{width:28px;height:28px;padding:5px}.test-button:disabled{opacity:.45}.test-work{padding:60px}
+:root{--ui-bg-primary:#0b1220;--ui-bg-secondary:#151c29;--ui-bg-elevated:#151c29;--ui-text-primary:#f3f0e8;--ui-text-secondary:#aab2c2;--ui-text-tertiary:#7f899d;--ui-text-quaternary:#667085;--ui-stroke-secondary:#2b3548;--ui-accent:#9b8cff;--font-mono:monospace;font:13px/1.5 system-ui;color:var(--ui-text-primary);background:var(--ui-bg-primary)}*{box-sizing:border-box}html,body{margin:0;height:100%}body{display:grid;grid-template-rows:40px minmax(0,1fr);overflow:hidden}#host-title{display:flex;align-items:center;justify-content:flex-end;padding:0 12px;border-bottom:1px solid var(--ui-stroke-secondary);background:#0e1522}#surface{display:flex;min-height:0}#workspace{flex:1;min-width:0;height:100%}#pane{width:300px;display:none}.test-button{font:12px system-ui;color:var(--ui-text-primary);background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);padding:7px 10px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;gap:5px}.test-button[data-variant=default]{background:#ff786c;color:#10131b;border-color:#ff786c}.test-button[data-variant=ghost]{background:transparent;border-color:transparent}.test-button[data-size=icon-xs]{width:28px;height:28px;padding:5px}.test-button:disabled{opacity:.45}.fluid-sleep-chip{background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);border-radius:5px;padding:4px 8px}.test-work{padding:60px}
 </style></head><body><div id="host-title"><div id="titlebar"></div></div><div id="surface"><div id="workspace"></div><aside id="pane"></aside></div><script src="/bundle.js"></script></body></html>`
 const server = createServer((req, res) => { res.setHeader('Content-Type', req.url === '/bundle.js' ? 'application/javascript' : 'text/html'); res.end(req.url === '/bundle.js' ? bundled.outputFiles[0].text : html) })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -40,11 +40,12 @@ try {
   await page.locator('#titlebar .fluid-titlebar-summary').click()
   await page.getByRole('dialog', { name: 'FluidMusic quick controls' }).waitFor()
   await page.screenshot({ path: `${review}/titlebar-popover.png`, fullPage: true })
-  await page.getByRole('dialog').getByRole('button', { name: 'YouTube', exact: true }).click()
-  assert.deepEqual(await page.evaluate(() => window.fixture.calls.find(call => call.preview === 'openOrFocus').options), { key: 'fluid-music-youtube', url: 'https://www.youtube.com/', label: 'YouTube' })
-  const invariant = await page.evaluate(() => { const c = window.fixture.controller; return { item: c.current()?.id, index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() } })
+  await page.getByRole('dialog').getByRole('button', { name: 'YouTube in Media', exact: true }).click()
+  assert.equal(await page.evaluate(() => window.lastNavigation), '/media', 'popover shortcut navigates the host to Media')
+  assert.equal(await page.locator('.fluid-primary-nav').getByRole('button', { name: 'Browse', exact: true }).getAttribute('aria-current'), 'page')
+  const invariant = await page.evaluate(() => { const c = window.fixture.controller; return { item: c.current()?.id, index: c.index.get(), status: c.status.get(), youtube: c.youtube.get() } })
   await page.evaluate(() => window.fixture.changeChatFocus('different-chat'))
-  assert.deepEqual(await page.evaluate(() => { const c = window.fixture.controller; return { item: c.current()?.id, index: c.index.get(), status: c.status.get(), handle: c.youtubeHandle() } }), invariant)
+  assert.deepEqual(await page.evaluate(() => { const c = window.fixture.controller; return { item: c.current()?.id, index: c.index.get(), status: c.status.get(), youtube: c.youtube.get() } }), invariant)
   await page.locator('#workspace').click({ position: { x: 5, y: 5 } })
   assert.equal(await page.getByRole('dialog', { name: 'FluidMusic quick controls' }).count(), 0)
   assert.equal(await page.locator('#titlebar .fluid-titlebar-summary').evaluate(el => el === document.activeElement), true)
@@ -65,9 +66,9 @@ try {
 
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.locator('.fluid-primary-nav').getByRole('button', { name: 'Library', exact: true }).click()
-  await page.getByRole('tab', { name: 'Local collections' }).click()
-  await page.getByText('Legacy mix', { exact: false }).first().waitFor()
-  assert.equal(await page.getByRole('heading', { name: 'After hours' }).count(), 1)
+  await page.getByRole('tab', { name: 'Collections', exact: true }).click()
+  await page.getByRole('heading', { name: 'Local collections' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: /After hours/ }).count(), 1, 'legacy mix stays readable')
   assert.equal(await page.getByRole('button', { name: 'Edit details' }).count(), 0)
 
   const report = await new AxeBuilder({ page }).include('.fluid-root').withTags(['wcag2a', 'wcag2aa']).analyze()

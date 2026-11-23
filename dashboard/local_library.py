@@ -151,7 +151,7 @@ def _safe_date(value: Any, field: str) -> str:
     if not text.strip():
         return ""
     try:
-        return datetime.strptime(text.strip(), "%Y-%m-%d").date().isoformat()
+        return datetime.strptime(text.strip(), "%Y-%m-%d").replace(tzinfo=UTC).date().isoformat()
     except ValueError:
         raise ValueError(f"{field} must be a YYYY-MM-DD date") from None
 
@@ -265,7 +265,7 @@ class LocalLibrary:
     @staticmethod
     def _history_payload(value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
-            raise ValueError("history item must be an object")
+            raise TypeError("history item must be an object")
         source = str(value.get("source") or "").strip()
         if source not in {"spotify", "radio", "local", "youtube"}:
             raise ValueError("history item has an unsupported source")

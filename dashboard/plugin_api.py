@@ -16,10 +16,10 @@ endpoints, never follow redirects, and accept no caller-supplied URL.
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import html
 import http.server
+import importlib
+import importlib.util
 import ipaddress
 import logging
 import math
@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+
 
 def _load_spotify_integration():
     """Load the FluidMusic-OWNED Spotify provider (no core/sibling imports)."""
@@ -219,7 +220,7 @@ class _YouTubeEmbedHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: Any) -> None:
         return
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract.
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
         match = re.fullmatch(rf"/{re.escape(_youtube_embed_token)}/youtube/([A-Za-z0-9_-]{{11}})", parsed.path)
         if not match or self.headers.get("Host") != urlparse(_youtube_embed_origin).netloc:
@@ -230,7 +231,7 @@ class _YouTubeEmbedHandler(http.server.BaseHTTPRequestHandler):
         params = {key: requested[key][0] for key in ("controls", "enablejsapi", "playsinline", "rel", "start") if requested.get(key) and requested[key][0].isdigit()}
         params["origin"] = _youtube_embed_origin
         player_url = f"https://www.youtube-nocookie.com/embed/{match.group(1)}?{urlencode(params)}"
-        document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>html,body,iframe{{margin:0;width:100%;height:100%;border:0;background:#000;overflow:hidden}}</style></head><body><iframe src="{html.escape(player_url, quote=True)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" title="YouTube player"></iframe><script>const frame=document.querySelector('iframe');const parentOrigin=(()=>{{try{{const referrer=new URL(document.referrer);return /^https?:$/.test(referrer.protocol)?referrer.origin:''}}catch{{return ''}}}})();const playerOrigins=new Set(['https://www.youtube-nocookie.com','https://www.youtube.com']);const commandFuncs=['playVideo','pauseVideo','seekTo','setVolume','mute','unMute','stopVideo'];const parse=value=>{{try{{return typeof value==='string'?JSON.parse(value):value}}catch{{return null}}}};addEventListener('message',event=>{{if(event.source===parent){{if(parentOrigin?event.origin!==parentOrigin:event.origin!=='null')return;const data=parse(event.data);if(!data||typeof data!=='object'||data.channel!=='fluid-music')return;if(data.event==='command'&&commandFuncs.includes(data.func)){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}else if(data.event==='listening'){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}}}else if(event.source===frame.contentWindow){{if(!playerOrigins.has(event.origin))return;const data=parse(event.data);if(!data||typeof data!=='object'||typeof data.event!=='string')return;parent.postMessage(JSON.stringify(data),parentOrigin||'*')}}}})</script></body></html>'''.encode("utf-8")
+        document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>html,body,iframe{{margin:0;width:100%;height:100%;border:0;background:#000;overflow:hidden}}</style></head><body><iframe src="{html.escape(player_url, quote=True)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" title="YouTube player"></iframe><script>const frame=document.querySelector('iframe');const parentOrigin=(()=>{{try{{const referrer=new URL(document.referrer);return /^https?:$/.test(referrer.protocol)?referrer.origin:''}}catch{{return ''}}}})();const playerOrigins=new Set(['https://www.youtube-nocookie.com','https://www.youtube.com']);const commandFuncs=['playVideo','pauseVideo','seekTo','setVolume','mute','unMute','stopVideo'];const parse=value=>{{try{{return typeof value==='string'?JSON.parse(value):value}}catch{{return null}}}};addEventListener('message',event=>{{if(event.source===parent){{if(parentOrigin?event.origin!==parentOrigin:event.origin!=='null')return;const data=parse(event.data);if(!data||typeof data!=='object'||data.channel!=='fluid-music')return;if(data.event==='command'&&commandFuncs.includes(data.func)){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}else if(data.event==='listening'){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}}}else if(event.source===frame.contentWindow){{if(!playerOrigins.has(event.origin))return;const data=parse(event.data);if(!data||typeof data!=='object'||typeof data.event!=='string')return;parent.postMessage(JSON.stringify(data),parentOrigin||'*')}}}})</script></body></html>'''.encode()
         self.send_response(200)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", "default-src 'none'; frame-src https://www.youtube-nocookie.com; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
@@ -560,7 +561,7 @@ async def youtube_audio_fallback(request: Request) -> dict[str, Any]:
         return {"ok": True, "data": result}
     except ValueError as exc:
         return _error(str(exc))
-    except Exception as exc:  # noqa: BLE001 - yt-dlp/provider failures are redacted.
+    except Exception:
         logger.warning("YouTube audio fallback failed", exc_info=True)
         return _error("The audio fallback could not complete. Check the music folder and try again.")
 
@@ -961,7 +962,7 @@ async def youtube_search(q: str, limit: int = 12) -> dict[str, Any]:
         return {"ok": True, "data": {"items": items[:bounded_limit]}}
     except ValueError as exc:
         return _error(str(exc))
-    except Exception as exc:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+    except Exception as exc:
         logger.warning("YouTube search failed", exc_info=True)
         return {"ok": False, **_youtube_provider_error(exc)}
 
@@ -978,7 +979,7 @@ async def youtube_resolve(request: Request) -> dict[str, Any]:
         return {"ok": True, "data": {"item": item}}
     except ValueError as exc:
         return _error(str(exc))
-    except Exception as exc:  # noqa: BLE001 - yt-dlp provider failures are deliberately redacted.
+    except Exception as exc:
         logger.warning("YouTube metadata lookup failed", exc_info=True)
         return {"ok": False, **_youtube_provider_error(exc)}
 

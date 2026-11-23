@@ -92,7 +92,7 @@ def test_embed_host_rejects_foreign_host_header(embed_api: Any):
 def test_embed_relay_is_origin_bound_and_schema_validated(embed_api: Any):
     origin, token = embed_api._ensure_youtube_embed_host()
     body = run(get(f"{origin}/{token}/youtube/abcdefghijk")).text
-    script = re.search(r"<script>(.*)</script>", body, re.S)
+    script = re.search(r"<script>(.*)</script>", body, re.DOTALL)
     assert script, "relay script present"
     relay = script.group(1)
     # Parent-bound forwarding: the wrapper derives the embedding origin from
