@@ -28,8 +28,12 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setitem(sys.modules, "hermes_constants", constants)
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
-    module._resolve_spotify_integration()
-    store = importlib.import_module("hermes_fluid_music_providers.token_store")
+    provider = module._load_dashboard_module("providers.spotify")
+    module.SpotifyClient = provider.SpotifyClient
+    module.SpotifyError = provider.SpotifyError
+    module.get_spotify_auth_status = provider.auth_status
+    module._spotify_integration_ready = True
+    store = module._load_dashboard_module("providers.token_store")
     store.save({
         "client_id": "cid",
         "access_token": "access-1",

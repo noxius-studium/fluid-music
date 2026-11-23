@@ -60,8 +60,6 @@ def test_owned_provider_reads_the_saved_client_id(api: Any, tmp_path: Path) -> N
     from dashboard.providers import local_settings
 
     sys.modules.pop("hermes_fluid_music_providers", None)
-    # _load_spotify_integration returns the OWNED provider's real functions;
-    # the fixture's double overrides only the module attribute, not this tuple.
     configured_client_id = api._load_spotify_integration()[4]
     assert configured_client_id() is None
     local_settings.set_spotify_client_id("ProviderClient9")

@@ -88,7 +88,7 @@ def download_audio(
         "paths": {"home": folder},
         "outtmpl": "%(title).150B - %(id)s.%(ext)s",
     }
-    factory: Any = ydl_factory or _youtube_dl_factory
+    factory: Any = ydl_factory or _youtube_dl_factory()
     with factory(options) as client:
         info = client.extract_info(target, download=True) or {}
         downloaded = _downloaded_file(client, info, folder, video_id)

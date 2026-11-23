@@ -13,7 +13,7 @@ Consequences:
 - transfer, track availability, seek, volume, shuffle, repeat, and queue commands can be rejected by Spotify or the target device;
 - account plan and regional availability remain Spotify decisions.
 
-Spotify credentials live in the FluidMusic-owned protected profile-local token store (official OAuth/PKCE with single-flight refresh) and never enter the renderer, logs, exports, or the public local-library database.
+Spotify credentials live in FluidMusic's protected profile-local token store. The self-contained OAuth/PKCE provider never exposes tokens to the renderer, logs, exports, or the public local-library database and does not depend on another Spotify plugin.
 
 FluidMusic follows its own queue after an individual Spotify track by default. This handoff is not gapless because the remote Spotify device must stop before the next engine starts. When **Let Spotify continue after a track** is enabled, Spotify owns continuation and may choose a context track or recommendation; FluidMusic cannot predict that selection in advance.
 
@@ -72,7 +72,7 @@ YouTube plays through the backend's 127.0.0.1-only, capability-token embed host 
 ## Audio-only YouTube fallback (0.6, owner-approved)
 
 - Settings → Playback → **Audio fallback folder** is a profile-local, non-secret path. When a YouTube item reports an eligible embed/watch failure, the player's **Download audio** action downloads AUDIO ONLY with yt-dlp, prefers a native m4a stream (no FFmpeg merge), and writes it to that folder. No video is downloaded, no signed URLs or credentials are logged, and retries/timeout are bounded.
-- The folder is registered as a local-library root and rescanned; the resulting track is added Up Next, never autoplayed. **Hide video** in the mini player only hides the frame — the one active engine keeps decoding audio.
+- The folder is registered as a local-library root and rescanned; the resulting track is added Up Next, never autoplayed. The mini player is controls-only by default; revealing or hiding details never unmounts the active engine or interrupts playback.
 - If no folder is configured, the fallback says so and does nothing. A failed or rights-private/deleted item is never labelled "available". Packaged-host playback and live provider behavior remain owner review; cloud fixtures use a labelled yt-dlp double.
 - ToS (owner decision, 2026-11-21): accepted for personal use — "I don't care if it breaks the YouTube TOS... I am just providing the software... what people do is not my problem." FluidMusic supplies the path only; no DRM, paid-access, ad or entitlement bypass. Respect your local law and the provider's terms.
 

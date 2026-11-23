@@ -105,7 +105,8 @@ def test_stale_instructions_are_reconciled():
         assert "patched Hermes" not in text, "no private host patch instruction"
     assert "Hermes-managed Spotify PKCE" not in readme and "bundled `SpotifyClient`" not in architecture
     assert "navy" not in architecture and "coral" not in architecture, "private palette description superseded"
-    assert "FluidMusic-owned Spotify PKCE" in readme
+    assert "ships and owns this PKCE integration" in readme
+    assert "imports no Hermes-core or sibling-plugin Spotify implementation" in architecture
     assert "capability-protected" in readme and "embed host" in architecture
     assert "playwright install" not in readme and "npm ci" not in readme, "heavy verification steps replaced by the serial suite"
     assert "COMPATIBILITY.md" in readme

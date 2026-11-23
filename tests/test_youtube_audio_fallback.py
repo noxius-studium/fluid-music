@@ -105,7 +105,7 @@ def test_settings_and_fallback_routes(api: Any, tmp_path: Path) -> None:
     assert get_json("GET", "/settings")["data"]["music_dir"] == "/tmp/FM Music"
     assert get_json("POST", "/youtube/fallback/audio", json={"url": "not-a-url"})["ok"] is False
     # A named double for the downloader: no real network/media effect in cloud fixtures.
-    import dashboard.youtube_audio_fallback as fallback
+    fallback = api._load_dashboard_module("youtube_audio_fallback")
 
     calls: list[dict[str, Any]] = []
 

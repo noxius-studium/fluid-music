@@ -35,11 +35,12 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
     return () => { live = false }
   }, [controller, direct, item?.id])
   return src
-    ? h('iframe', { ref: frameRef, src, title, className: 'fluid-youtube-frame', allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen', loading: 'lazy', referrerPolicy: 'strict-origin-when-cross-origin', scrolling: 'no' })
+    ? h('iframe', { ref: frameRef, src, title, className: 'fluid-youtube-frame', allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen', referrerPolicy: 'strict-origin-when-cross-origin', scrolling: 'no' })
     : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
 }
 
 function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
+  const detailsVisible = useValue(controller.miniDetailsVisible)
   // One shared control vocabulary for every provider: the same Transport
   // actions and the same VolumeControl as the main bottom anchor.
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
@@ -51,6 +52,11 @@ function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
     h(VolumeControl, { controller, compact: true }),
     h('div', { className: 'fluid-mini-links' },
       h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Queue'),
+      h(WorkspaceButton, {
+        onClick: () => controller.toggleMiniDetails(),
+        'aria-pressed': detailsVisible,
+        'aria-label': detailsVisible ? 'Hide player details' : 'Show player details',
+      }, detailsVisible ? 'Hide player' : 'Show player'),
       h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
     ),
   )
@@ -140,7 +146,7 @@ function MiniPlayer({ controller }) {
   const status = useValue(controller.status)
   const progress = useValue(controller.progress)
   const youtubeState = useValue(controller.youtube)
-  const videoHidden = useValue(controller.youtubeVideoHidden)
+  const detailsVisible = useValue(controller.miniDetailsVisible)
   const item = queue[at]
   const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title
@@ -153,44 +159,35 @@ function MiniPlayer({ controller }) {
     const watching = youtubeState.engine === 'watch'
     return h(
       'section',
-      { className: `fluid-mini-player fluid-youtube-player${videoHidden ? ' fluid-video-hidden' : ''}`, 'aria-label': 'FluidMusic YouTube player' },
-      // The frame stays mounted; CSS only hides it, so the single engine keeps
-      // decoding audio and the shared command sink stays bound. The toggle
-      // lives OUTSIDE the hidden frame so it remains keyboard-reachable.
-      h('div', { className: 'fluid-youtube-stage' },
-        h('div', { className: 'fluid-youtube-frame-wrap' },
-          watching
-            ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
-            : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
+      // Details leave view by default, but remain mounted so YouTube playback
+      // and the command bridge continue without a second engine.
+      h('div', { className: 'fluid-mini-details', hidden: !detailsVisible },
+        h('div', { className: 'fluid-youtube-stage' },
+          h('div', { className: 'fluid-youtube-frame-wrap' },
+            watching
+              ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+              : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+          ),
         ),
-        h('button', {
-          type: 'button',
-          className: 'fluid-video-toggle',
-          'aria-pressed': videoHidden,
-          'aria-label': videoHidden ? 'Show video' : 'Hide video',
-          onClick: () => controller.toggleYouTubeVideo(),
-        }, videoHidden ? 'Show video' : 'Hide video'),
+        h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
+        youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
+        youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
+        youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
+          youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
+          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
+          h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
       ),
-      // Honest physical minimum: the video never shrinks below 200x200. When
-      // the docked pane is too short, say so and keep controls reachable
-      // instead of pretending everything fits or hiding the video.
-      h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
-      youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
-      youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
       watching
         ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => void controller.toggle() })
         : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
-      youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
-        youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
-        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
-        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
-        h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )
   }
   return h(
     'section',
     { className: 'fluid-mini-player', 'aria-label': 'Dockable FluidMusic player' },
-    h('div', { className: 'fluid-mini-body' },
+    h('div', { className: 'fluid-mini-body', hidden: !detailsVisible },
       h('div', { className: 'fluid-mini-summary' },
         h(Artwork, { item: display, className: 'fluid-mini-art' }),
         h('div', { className: 'fluid-row-copy' },

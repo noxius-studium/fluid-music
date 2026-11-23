@@ -2,12 +2,11 @@
 
 The Spotify integration is OWNED by FluidMusic (dashboard/providers): official
 Authorization Code + PKCE, protected profile-local credentials, single-flight
-refresh.  No Hermes-core or sibling-plugin Spotify implementation is imported.
+refresh. No Hermes-core or sibling-plugin Spotify implementation is imported.
 The integration is resolved lazily on the first Spotify-specific request; a
 missing or broken provider reports an explicit unavailable state and never
 aborts this module — YouTube, radio, local-library and history routes mount
-independently.  Legacy credential stores stay untouched until an explicit
-owner sign-in; missing login is never a fake Connected state.
+independently. Missing login is never a fake Connected state.
 
 Radio stream URLs are returned for the desktop's native player, not fetched by
 this backend.  The only outbound Radio Browser requests target fixed HTTPS
@@ -40,8 +39,30 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 
+def _load_dashboard_module(relative_name: str) -> Any:
+    """Load a dashboard sibling when Hermes imports this file standalone."""
+    dashboard_root = Path(__file__).resolve().parent
+    package_name = "hermes_fluid_music_dashboard"
+    if package_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            package_name,
+            dashboard_root / "__init__.py",
+            submodule_search_locations=[str(dashboard_root)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("The FluidMusic dashboard package is unavailable")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[package_name] = package
+        try:
+            spec.loader.exec_module(package)
+        except Exception:
+            sys.modules.pop(package_name, None)
+            raise
+    return importlib.import_module(f"{package_name}.{relative_name}")
+
+
 def _load_spotify_integration():
-    """Load the FluidMusic-OWNED Spotify provider (no core/sibling imports)."""
+    """Load the FluidMusic-owned Spotify provider (no core/sibling imports)."""
     providers_root = Path(__file__).resolve().parent / "providers"
     package_name = "hermes_fluid_music_providers"
     if package_name not in sys.modules:
@@ -72,7 +93,7 @@ def _load_spotify_integration():
 
 
 # Optional-provider boundary: these names stay None until the first
-# Spotify-specific request resolves the integration.  Explicitly assigned
+# Spotify-specific request resolves the owned integration. Explicitly assigned
 # values (for example test doubles) are never overwritten by the loader.
 SpotifyClient: Any = None
 SpotifyError: Any = None
@@ -231,7 +252,7 @@ class _YouTubeEmbedHandler(http.server.BaseHTTPRequestHandler):
         params = {key: requested[key][0] for key in ("controls", "enablejsapi", "playsinline", "rel", "start") if requested.get(key) and requested[key][0].isdigit()}
         params["origin"] = _youtube_embed_origin
         player_url = f"https://www.youtube-nocookie.com/embed/{match.group(1)}?{urlencode(params)}"
-        document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>html,body,iframe{{margin:0;width:100%;height:100%;border:0;background:#000;overflow:hidden}}</style></head><body><iframe src="{html.escape(player_url, quote=True)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" title="YouTube player"></iframe><script>const frame=document.querySelector('iframe');const parentOrigin=(()=>{{try{{const referrer=new URL(document.referrer);return /^https?:$/.test(referrer.protocol)?referrer.origin:''}}catch{{return ''}}}})();const playerOrigins=new Set(['https://www.youtube-nocookie.com','https://www.youtube.com']);const commandFuncs=['playVideo','pauseVideo','seekTo','setVolume','mute','unMute','stopVideo'];const parse=value=>{{try{{return typeof value==='string'?JSON.parse(value):value}}catch{{return null}}}};addEventListener('message',event=>{{if(event.source===parent){{if(parentOrigin?event.origin!==parentOrigin:event.origin!=='null')return;const data=parse(event.data);if(!data||typeof data!=='object'||data.channel!=='fluid-music')return;if(data.event==='command'&&commandFuncs.includes(data.func)){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}else if(data.event==='listening'){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}}}else if(event.source===frame.contentWindow){{if(!playerOrigins.has(event.origin))return;const data=parse(event.data);if(!data||typeof data!=='object'||typeof data.event!=='string')return;parent.postMessage(JSON.stringify(data),parentOrigin||'*')}}}})</script></body></html>'''.encode()
+        document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>html,body,iframe{{margin:0;width:100%;height:100%;border:0;background:#000;overflow:hidden}}</style></head><body><iframe src="{html.escape(player_url, quote=True)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" title="YouTube player"></iframe><script>const frame=document.querySelector('iframe');let playerLoaded=false;frame.addEventListener('load',()=>{{playerLoaded=true}});const parentOrigin=(()=>{{try{{const referrer=new URL(document.referrer);return /^https?:$/.test(referrer.protocol)?referrer.origin:''}}catch{{return ''}}}})();const playerOrigins=new Set(['https://www.youtube-nocookie.com','https://www.youtube.com']);const commandFuncs=['playVideo','pauseVideo','seekTo','setVolume','mute','unMute','stopVideo'];const parse=value=>{{try{{return typeof value==='string'?JSON.parse(value):value}}catch{{return null}}}};addEventListener('message',event=>{{if(event.source===parent){{if(parentOrigin?event.origin!==parentOrigin:event.origin!=='null')return;const data=parse(event.data);if(!data||typeof data!=='object'||data.channel!=='fluid-music')return;if(!playerLoaded)return;if(data.event==='command'&&commandFuncs.includes(data.func)){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}else if(data.event==='listening'){{frame.contentWindow.postMessage(JSON.stringify(data),'https://www.youtube-nocookie.com')}}}}else if(event.source===frame.contentWindow){{if(!playerOrigins.has(event.origin))return;const data=parse(event.data);if(!data||typeof data!=='object'||typeof data.event!=='string')return;parent.postMessage(JSON.stringify(data),parentOrigin||'*')}}}})</script></body></html>'''.encode()
         self.send_response(200)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", "default-src 'none'; frame-src https://www.youtube-nocookie.com; script-src 'unsafe-inline'; style-src 'unsafe-inline'")
@@ -520,14 +541,14 @@ async def get_config() -> dict[str, Any]:
 @router.get("/settings")
 async def get_settings() -> dict[str, Any]:
     """Non-secret, profile-local preferences. Never returns credentials/tokens."""
-    from dashboard.providers import local_settings
+    local_settings = _load_dashboard_module("providers.local_settings")
 
     return {"ok": True, "data": {"music_dir": local_settings.music_dir(), "spotify_client_id": local_settings.spotify_client_id()}}
 
 
 @router.put("/settings")
 async def put_settings(request: Request) -> dict[str, Any]:
-    from dashboard.providers import local_settings
+    local_settings = _load_dashboard_module("providers.local_settings")
 
     try:
         payload = await _payload(request)
@@ -546,8 +567,8 @@ async def put_settings(request: Request) -> dict[str, Any]:
 @router.post("/youtube/fallback/audio")
 async def youtube_audio_fallback(request: Request) -> dict[str, Any]:
     """Real fallback: audio-only yt-dlp download into the configured folder."""
-    from dashboard.providers import local_settings
-    from dashboard.youtube_audio_fallback import download_audio
+    local_settings = _load_dashboard_module("providers.local_settings")
+    download_audio = _load_dashboard_module("youtube_audio_fallback").download_audio
 
     try:
         payload = await _payload(request)
@@ -582,9 +603,9 @@ async def spotify_auth_status() -> dict[str, Any]:
 
 @router.post("/spotify/auth/start")
 async def spotify_auth_start(request: Request) -> dict[str, Any]:
-    """Start one Hermes-managed browser PKCE flow without exposing its credentials."""
+    """Start one FluidMusic-owned browser PKCE flow without exposing credentials."""
     try:
-        from dashboard.providers import local_settings
+        local_settings = _load_dashboard_module("providers.local_settings")
 
         payload = await _payload(request)
         supplied = payload["client_id"] if "client_id" in payload else (local_settings.spotify_client_id() or None)

@@ -12,7 +12,7 @@ const review = `${root}.impeccable/review`
 await Promise.all([mkdir(evidence, { recursive: true }), mkdir(review, { recursive: true })])
 const bundled = await build({ entryPoints: [`${root}tests/ui/entry.js`], bundle: true, format: 'iife', write: false, alias: { '@hermes/plugin-sdk': `${root}tests/ui/sdk-fixture.js` } })
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FluidMusic isolated UI</title><style>
-:root{--ui-bg-primary:#0b1220;--ui-bg-secondary:#151c29;--ui-bg-elevated:#151c29;--ui-text-primary:#f3f0e8;--ui-text-secondary:#aab2c2;--ui-text-tertiary:#7f899d;--ui-text-quaternary:#667085;--ui-stroke-secondary:#2b3548;--ui-accent:#9b8cff;--font-mono:monospace;font:13px/1.5 system-ui;color:var(--ui-text-primary);background:var(--ui-bg-primary)}*{box-sizing:border-box}html,body{margin:0;height:100%}body{display:grid;grid-template-rows:40px minmax(0,1fr);overflow:hidden}#host-title{display:flex;align-items:center;justify-content:flex-end;padding:0 12px;border-bottom:1px solid var(--ui-stroke-secondary);background:#0e1522}#surface{display:flex;min-height:0}#workspace{flex:1;min-width:0;height:100%}#pane{width:300px;display:none}.test-button{font:12px system-ui;color:var(--ui-text-primary);background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);padding:7px 10px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;gap:5px}.test-button[data-variant=default]{background:#ff786c;color:#10131b;border-color:#ff786c}.test-button[data-variant=ghost]{background:transparent;border-color:transparent}.test-button[data-size=icon-xs]{width:28px;height:28px;padding:5px}.test-button:disabled{opacity:.45}.fluid-sleep-chip{background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);border-radius:5px;padding:4px 8px}.test-work{padding:60px}
+:root{--ui-bg-primary:#0b1220;--ui-bg-secondary:#151c29;--ui-bg-elevated:#151c29;--ui-text-primary:#f3f0e8;--ui-text-secondary:#aab2c2;--ui-text-tertiary:#7f899d;--ui-text-quaternary:#667085;--ui-stroke-secondary:#2b3548;--ui-accent:#9b8cff;--font-mono:monospace;font:13px/1.5 system-ui;color:var(--ui-text-primary);background:var(--ui-bg-primary)}*{box-sizing:border-box}html,body{margin:0;height:100%}body{display:grid;grid-template-rows:40px minmax(0,1fr);overflow:hidden}#host-title{display:flex;align-items:center;justify-content:flex-end;padding:0 12px;border-bottom:1px solid var(--ui-stroke-secondary);background:#0e1522}#surface{display:flex;min-height:0}#workspace{flex:1;min-width:0;height:100%}#pane{width:320px;height:420px;display:block;align-self:end}.test-button{font:12px system-ui;color:var(--ui-text-primary);background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);padding:7px 10px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;gap:5px}.test-button[data-variant=default]{background:#ff786c;color:#10131b;border-color:#ff786c}.test-button[data-variant=ghost]{background:transparent;border-color:transparent}.test-button[data-size=icon-xs]{width:28px;height:28px;padding:5px}.test-button:disabled{opacity:.45}.fluid-sleep-chip{background:var(--ui-bg-secondary);border:1px solid var(--ui-stroke-secondary);border-radius:5px;padding:4px 8px}.test-work{padding:60px}
 </style></head><body><div id="host-title"><div id="titlebar"></div></div><div id="surface"><div id="workspace"></div><aside id="pane"></aside></div><script src="/bundle.js"></script></body></html>`
 const server = createServer((req, res) => { res.setHeader('Content-Type', req.url === '/bundle.js' ? 'application/javascript' : 'text/html'); res.end(req.url === '/bundle.js' ? bundled.outputFiles[0].text : html) })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -27,6 +27,33 @@ try {
   await page.waitForFunction(() => Boolean(window.fixture))
   await page.evaluate(() => window.fixture.seed())
   await page.locator('.fluid-now-band').waitFor()
+  const mini = page.locator('#pane .fluid-mini-player')
+  await mini.waitFor()
+  assert.equal(await mini.locator('.fluid-mini-body').isHidden(), true, 'mini player starts controls-only')
+  const controls = mini.locator('.fluid-mini-controls')
+  const geometry = await controls.evaluate(el => {
+    const player = el.closest('.fluid-mini-player').getBoundingClientRect()
+    const bounds = el.getBoundingClientRect()
+    const playerStyle = getComputedStyle(el.closest('.fluid-mini-player'))
+    return {
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+      childBottom: Math.max(...[...el.children].map(child => child.getBoundingClientRect().bottom)),
+      bottom: bounds.bottom,
+      contentBottom: player.bottom - Number.parseFloat(playerStyle.paddingBottom || '0'),
+    }
+  })
+  assert.ok(geometry.scrollHeight <= geometry.clientHeight, `mini controls clip ${geometry.scrollHeight - geometry.clientHeight}px`)
+  assert.ok(geometry.childBottom <= geometry.bottom + 1, 'every mini control row stays inside the footer')
+  assert.ok(Math.abs(geometry.bottom - geometry.contentBottom) <= 1, `mini controls end at ${geometry.bottom}, content box ends at ${geometry.contentBottom}`)
+  const hitTargets = await controls.locator('.fluid-player-controls > button').evaluateAll(buttons => buttons.map(button => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })))
+  assert.ok(hitTargets.every(rect => rect.width >= 32 && rect.height >= 32), JSON.stringify(hitTargets))
+  await controls.getByRole('button', { name: 'Show player details' }).click()
+  assert.equal(await mini.locator('.fluid-mini-body').isVisible(), true)
+  await controls.getByRole('button', { name: 'Hide player details' }).click()
+  assert.equal(await mini.locator('.fluid-mini-body').isHidden(), true)
+  await page.screenshot({ path: `${review}/mini-player-controls-only.png`, fullPage: true })
+  await page.locator('#pane').evaluate(el => { el.style.display = 'none' })
   assert.equal(await page.locator('[aria-label="Persistent player"]').count(), 0)
   assert.equal(await page.locator('#status').count(), 0)
   assert.deepEqual(await page.locator('.fluid-primary-nav .fluid-nav-button').allTextContents(), ['Browse', 'Library', 'Queue', 'Settings'])

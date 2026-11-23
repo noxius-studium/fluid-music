@@ -95,7 +95,7 @@ New collections accept only local catalog references. Existing v3 mixed collecti
 
 ## Spotify
 
-FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. No Hermes-core or sibling-plugin Spotify implementation is imported, and OAuth tokens never reach the renderer, logs, or exports. Older credential stores are left untouched until a separately approved migration/login. The backend provides:
+FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. It imports no Hermes-core or sibling-plugin Spotify implementation, and OAuth tokens never reach the renderer, logs, or exports. The backend provides:
 
 - PKCE status/start routes;
 - `/me/player/devices` discovery and active-device fallback;

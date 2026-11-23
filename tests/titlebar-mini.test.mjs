@@ -79,8 +79,9 @@ test('mini pane adapts art/video to pane size above anchored controls; video min
   assert.match(css, /@container mini \(max-height:170px\)\{[\s\S]*?\.fluid-mini-summary \.fluid-mini-art\{display:none\}\}/, 'very short pane drops decorative art before controls')
   assert.match(css, /\.fluid-mini-body\{overflow:auto\}/, 'body scrolls rather than silently clipping')
   assert.match(css, /\.fluid-mini-controls\{[^}]*border-top:1px solid var\(--fm-line\)/, 'controls stay the anchored bottom row')
-  assert.match(css, /@container mini \(max-width:360px\)\{\.fluid-mini-controls\{[^}]*grid-template-areas:"controls links" "volume volume"/, 'narrow pane reflows volume to its own full row')
-  assert.match(css, /\.fluid-mini-controls>\.fluid-volume\{grid-area:volume;width:100%;min-width:0\}/)
+  assert.match(css, /\.fluid-mini-controls\{[^}]*display:flex;flex-direction:column/, 'controls use three full-width rows at every pane width')
+  assert.match(css, /\.fluid-mini-controls>\.fluid-volume[^}]*\{width:100%;min-width:0/, 'volume owns a full-width row')
+  assert.match(css, /\.fluid-mini-controls \.fluid-player-controls>button\{width:32px;height:32px/, 'transport buttons keep usable hit targets')
   assert.match(miniBar, /h\(VolumeControl, \{ controller, compact: true \}\)/, 'same shared VolumeControl as the main bar')
   assert.match(miniBar, /kind: 'previous'/)
   assert.match(miniBar, /kind: 'next'/)
@@ -215,6 +216,29 @@ test('FM-26 hide-video state toggles, persists and never issues a transport comm
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }
+})
+
+
+test('mini player defaults to persistent controls-only mode and reveals details on demand', async () => {
+  const harness = makeHarness()
+  try {
+    const { controller } = harness
+    assert.equal(controller.miniDetailsVisible.get(), false, 'details are hidden by default')
+    assert.equal(controller.toggleMiniDetails(), true)
+    assert.equal(controller.miniDetailsVisible.get(), true)
+    assert.equal(harness.storage.get('miniDetailsVisible'), true, 'the user choice persists')
+    assert.equal(harness.mediaCalls().length, 0, 'showing details never changes playback')
+    assert.equal(controller.toggleMiniDetails(false), false)
+    assert.equal(controller.miniDetailsVisible.get(), false)
+    assert.match(mini, /hidden: !detailsVisible/, 'the optional body stays mounted but leaves view')
+    assert.match(miniBar, /detailsVisible \? 'Hide player' : 'Show player'/)
+    assert.match(css, /\.fluid-mini-controls\{[^}]*display:flex;flex-direction:column/, 'transport, volume and links use three full-width rows')
+    assert.match(css, /\.fluid-mini-controls \.fluid-player-controls\{[^}]*width:100%[^}]*justify-content:space-around/, 'transport buttons are evenly spaced and usable')
+    assert.doesNotMatch(css, /grid-template-rows:minmax\(0,1fr\) 40px/, 'the footer is never clipped into a fixed 40px track')
+  } finally {
+    harness.dispose()
+    harness.restore()
+  }
 })
 
 

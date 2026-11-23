@@ -60,7 +60,7 @@ $HERMES_HOME/plugins/fluid-music/
 ## Spotify
 
 1. Open **Media → Settings → Providers**.
-2. Complete the FluidMusic-owned Spotify PKCE sign-in (**Connect Spotify**). Tokens stay in a protected profile-local store, never in the renderer or the public library database.
+2. Enter your public Spotify Client ID and use **Connect Spotify**. FluidMusic ships and owns this PKCE integration; no separate Spotify plugin is required. Tokens stay in FluidMusic's protected profile-local store, never in the renderer or public library database.
 3. Open Spotify on a phone, computer, speaker, or browser under the same account.
 4. Refresh devices and select a Spotify Connect device.
 
