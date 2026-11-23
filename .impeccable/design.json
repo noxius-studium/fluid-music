@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T09:26:44+02:00",
+  "title": "Design System: FluidMusic Night Radio",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Broadcast Coral",
+        "canonical": "#ff786c",
+        "tonalRamp": ["#341b19", "#76120a", "#a51a0d", "#d42111", "#ee3b2b", "#f2665a", "#f7a8a1", "#f7efee"]
+      },
+      "secondary": {
+        "role": "secondary",
+        "displayName": "Source Violet",
+        "canonical": "#9b8cff",
+        "tonalRamp": ["#1c1934", "#180a76", "#210da5", "#2b11d4", "#442bee", "#6e5af2", "#aca1f7", "#efeef7"]
+      },
+      "night-mix-anchor": {
+        "role": "neutral",
+        "displayName": "Night Ground",
+        "canonical": "color-mix(in srgb, var(--ui-bg-primary) 86%, #08111f)",
+        "tonalRamp": ["#192334", "#1a3865", "#254e8e", "#2f64b6", "#497ed0", "#719ada", "#aec5ea", "#eef1f7"]
+      },
+      "graphite-mix-anchor": {
+        "role": "neutral",
+        "displayName": "Cool Graphite",
+        "canonical": "color-mix(in srgb, var(--ui-bg-secondary) 88%, #182033)",
+        "tonalRamp": ["#192134", "#293657", "#394c79", "#49629c", "#637bb6", "#8699c6", "#bac5de", "#eef0f7"]
+      },
+      "ink-mix-anchor": {
+        "role": "neutral",
+        "displayName": "Warm Ink",
+        "canonical": "color-mix(in srgb, var(--ui-text-primary) 96%, #f4f1e9)",
+        "tonalRamp": ["#332c19", "#55492a", "#77673b", "#99844c", "#b39e66", "#c4b388", "#ddd4bb", "#f6f4ee"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Now Playing Display", "purpose": "Current track or station title in the now-playing band." },
+      "headline": { "displayName": "Page Headline", "purpose": "Destination and task headings." },
+      "title": { "displayName": "Section Title", "purpose": "Queue, card, panel, and settings headings." },
+      "body": { "displayName": "Operational Body", "purpose": "Interface copy and standard rows." },
+      "label": { "displayName": "Source Label", "purpose": "Uppercase source, live, and kicker metadata." },
+      "mono": { "displayName": "Changing Data", "purpose": "Clocks, percentages, and diagnostic output." }
+    },
+    "shadows": [
+      { "name": "orbit-lift", "value": "8px 12px 34px color-mix(in srgb, #000 34%, transparent)", "purpose": "Quiet physical separation for the circular artwork focal object." },
+      { "name": "popover-lift", "value": "8px 16px 46px color-mix(in srgb, #000 42%, transparent)", "purpose": "Separates titlebar quick controls from the workspace." },
+      { "name": "dialog-lift", "value": "0 24px 90px color-mix(in srgb, var(--ui-text-primary) 12%, transparent)", "purpose": "Reserved for modal decisions." },
+      { "name": "active-nav-inset", "value": "inset 0 -2px var(--fm-coral)", "purpose": "Marks the active primary destination without a filled tab." },
+      { "name": "current-row-inset", "value": "inset 2px 0 var(--ui-accent)", "purpose": "Marks the current queue or active list row." }
+    ],
+    "motion": [
+      { "name": "orbit-spin", "value": "22s linear infinite", "purpose": "Rotates Orbit only while playback state is playing." },
+      { "name": "reduced-motion", "value": "animation: none; transition: none; scroll-behavior: auto", "purpose": "Applied to all FluidMusic surfaces under prefers-reduced-motion: reduce." }
+    ],
+    "breakpoints": [
+      { "name": "playlist-stack", "value": "1080px" },
+      { "name": "now-playing-stack", "value": "980px" },
+      { "name": "dense-row-simplify", "value": "800px" },
+      { "name": "compact-navigation", "value": "720px" },
+      { "name": "dense-mobile", "value": "580px" },
+      { "name": "single-column-now-playing", "value": "460px" },
+      { "name": "review-narrow", "value": "390px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "top-navigation",
+      "description": "Compact Graphite bar with four stable destinations and a coral active underline.",
+      "html": "<nav class=\"ds-topnav\" aria-label=\"FluidMusic\"><button class=\"ds-wordmark\">♪ <span>FluidMusic</span></button><button class=\"ds-navitem ds-navitem-active\" aria-current=\"page\">Browse</button><button class=\"ds-navitem\">Library</button><button class=\"ds-navitem\">Queue</button><button class=\"ds-navitem\">Settings</button></nav>",
+      "css": ".ds-topnav{height:52px;display:flex;align-items:center;gap:28px;padding:0 38px;border-bottom:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);background:color-mix(in srgb,var(--ui-bg-secondary) 88%,#182033);color:color-mix(in srgb,var(--ui-text-primary) 96%,#f4f1e9);font:13px/1.5 inherit}.ds-wordmark,.ds-navitem{border:0;background:transparent;color:var(--ui-text-secondary);cursor:pointer}.ds-wordmark{color:inherit;font-weight:700;margin-right:8px}.ds-navitem{min-height:30px;padding:6px 12px;border-radius:4px}.ds-navitem:hover{background:color-mix(in srgb,var(--ui-accent) 9%,transparent)}.ds-navitem-active{color:inherit;box-shadow:inset 0 -2px #ff786c}.ds-topnav :focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Provider Source Chip",
+      "kind": "chip",
+      "refersTo": "source-chip-provider",
+      "description": "Small outlined metadata label; violet identifies Spotify and YouTube while coral identifies radio.",
+      "html": "<div class=\"ds-chipset\"><span class=\"ds-source ds-source-provider\">Spotify</span><span class=\"ds-source ds-source-live\">Live radio</span><span class=\"ds-source\">Local</span></div>",
+      "css": ".ds-chipset{display:flex;gap:7px;align-items:center;font-family:inherit}.ds-source{display:inline-flex;width:max-content;padding:3px 7px;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:3px;color:var(--ui-text-secondary);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.ds-source-provider{color:#9b8cff}.ds-source-live{color:#ff786c}"
+    },
+    {
+      "name": "Orbit Artwork",
+      "kind": "custom",
+      "refersTo": "orbit-artwork",
+      "description": "The single circular focal object for runtime artwork or a semantic SVG fallback.",
+      "html": "<div class=\"ds-orbit\" role=\"img\" aria-label=\"Now playing artwork\"><div class=\"ds-orbit-art\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M6 19h12M8 19l2-10h4l2 10M12 9V5M8.5 7.5a5 5 0 0 1 7 0M5.5 5a9 9 0 0 1 13 0\"/></svg></div></div>",
+      "css": ".ds-orbit{position:relative;width:240px;aspect-ratio:1;border-radius:50%;padding:16px;background:color-mix(in srgb,var(--ui-bg-secondary) 88%,#182033);border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);box-shadow:8px 12px 34px color-mix(in srgb,#000 34%,transparent)}.ds-orbit:after{content:'';position:absolute;inset:46%;border-radius:50%;background:color-mix(in srgb,var(--ui-bg-primary) 86%,#08111f);border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent)}.ds-orbit-art{width:100%;height:100%;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--ui-bg-primary) 86%,#08111f)}.ds-orbit-art svg{width:54px;height:54px;fill:none;stroke:#9b8cff;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}@media(prefers-reduced-motion:no-preference){.ds-orbit{animation:ds-spin 22s linear infinite}}@keyframes ds-spin{to{transform:rotate(360deg)}}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Semantic Hermes field for search, filtering, and paths.",
+      "html": "<label class=\"ds-field\">Search music<input class=\"ds-input\" placeholder=\"Song, album, artist, or playlist\"></label>",
+      "css": ".ds-field{display:flex;flex-direction:column;gap:8px;color:var(--ui-text-primary);font:12px/1.5 inherit}.ds-input{width:100%;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:6px;background:var(--ui-bg-secondary);color:var(--ui-text-primary);padding:10px 12px;font:13px/1.5 inherit}.ds-input::placeholder{color:var(--ui-text-tertiary)}.ds-input:focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Connection Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Border-led utility panel for providers, settings, and local-library controls.",
+      "html": "<section class=\"ds-panel\"><div class=\"ds-panel-head\"><div><h3>Spotify Connect</h3><p>Playback stays on your chosen Spotify device.</p></div><span class=\"ds-provider-state\"><i></i>Connected</span></div><button class=\"ds-panel-action\">Refresh devices</button></section>",
+      "css": ".ds-panel{border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:10px;background:color-mix(in srgb,var(--ui-bg-secondary) 80%,transparent);color:var(--ui-text-primary);padding:22px;font:13px/1.5 inherit}.ds-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.ds-panel h3{font-size:17px;letter-spacing:-.025em;margin:0}.ds-panel p{margin:6px 0 0;color:var(--ui-text-secondary);font-size:12px}.ds-provider-state{display:flex;gap:8px;align-items:center;color:var(--ui-text-secondary);font-size:11px}.ds-provider-state i{width:6px;height:6px;border-radius:50%;background:var(--ui-accent)}.ds-panel-action{padding:7px 10px;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:6px;background:transparent;color:inherit}.ds-panel-action:hover{background:color-mix(in srgb,var(--ui-accent) 9%,transparent)}.ds-panel-action:focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Track Row",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "Dense line-separated media row with compact artwork and capability-driven actions.",
+      "html": "<div class=\"ds-track\"><span class=\"ds-track-number\">01</span><span class=\"ds-cover\">♪</span><span class=\"ds-track-copy\"><strong>Night drive</strong><small>Spotify Connect</small></span><span class=\"ds-track-source\">Spotify</span><span class=\"ds-track-time\">3:42</span><button class=\"ds-track-action\" aria-label=\"Play Night drive\">▶</button></div>",
+      "css": ".ds-track{display:grid;grid-template-columns:24px 40px minmax(0,1fr) 52px 40px auto;gap:12px;align-items:center;padding:12px 4px;border-top:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-bottom:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);color:var(--ui-text-primary);font:13px/1.5 inherit}.ds-track:hover{background:color-mix(in srgb,var(--ui-accent) 9%,transparent)}.ds-cover{width:40px;height:40px;border-radius:5px;background:color-mix(in srgb,var(--ui-accent) 9%,transparent);display:grid;place-items:center;color:var(--ui-accent)}.ds-track-copy{min-width:0}.ds-track-copy strong,.ds-track-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-track-copy small{font-size:11px;color:var(--ui-text-secondary);margin-top:4px}.ds-track-number,.ds-track-time{font:10px/1.5 var(--font-mono,monospace);color:var(--ui-text-tertiary)}.ds-track-source{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--ui-text-secondary)}.ds-track-action{border:0;background:transparent;color:inherit;border-radius:5px;padding:7px}.ds-track-action:hover{background:color-mix(in srgb,var(--ui-accent) 9%,transparent)}.ds-track-action:focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Titlebar Player Popover",
+      "kind": "custom",
+      "refersTo": "titlebar-popover",
+      "description": "Viewport-safe quick controls with a small Orbit, live state, Up Next, and workspace shortcuts.",
+      "html": "<section class=\"ds-popover\" role=\"dialog\" aria-label=\"FluidMusic quick controls\"><div class=\"ds-popover-now\"><span class=\"ds-popover-orbit\">♪</span><div><span class=\"ds-popover-source\">Live radio</span><strong>Chillsynth</strong><small>Soft focus · warm synths</small></div></div><button class=\"ds-play\" aria-label=\"Play\">▶</button><p class=\"ds-live\">Live</p><hr><h3>Up Next</h3><strong>Night drive</strong><small>Spotify Connect</small><hr><div class=\"ds-shortcuts\"><button>YouTube</button><button>Open Queue</button><button>Open Media</button></div></section>",
+      "css": ".ds-popover{width:390px;max-width:calc(100vw - 24px);max-height:min(680px,calc(100vh - 72px));overflow:auto;padding:18px;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:8px;background:color-mix(in srgb,var(--ui-bg-primary) 86%,#08111f);color:color-mix(in srgb,var(--ui-text-primary) 96%,#f4f1e9);box-shadow:8px 16px 46px color-mix(in srgb,#000 42%,transparent);font:13px/1.5 inherit}.ds-popover-now{display:grid;grid-template-columns:76px minmax(0,1fr);gap:14px;align-items:center}.ds-popover-orbit{width:76px;height:76px;border-radius:50%;display:grid;place-items:center;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);background:color-mix(in srgb,var(--ui-bg-secondary) 88%,#182033);color:#9b8cff;font-size:28px}.ds-popover-source,.ds-live{color:#ff786c;font-size:9px;letter-spacing:.08em;text-transform:uppercase}.ds-popover-now strong,.ds-popover-now small{display:block}.ds-popover-now strong{font-size:17px;margin:7px 0 2px}.ds-popover-now small,.ds-popover>small{color:var(--ui-text-secondary)}.ds-play{margin:16px 0 0;background:var(--ui-accent);color:var(--ui-bg-primary);border:0;border-radius:6px;padding:8px 12px}.ds-popover hr{border:0;border-top:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);margin:16px 0}.ds-popover h3{font-size:12px}.ds-shortcuts{display:flex;gap:7px;flex-wrap:wrap}.ds-shortcuts button{border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:6px;background:transparent;color:inherit;padding:7px 10px}.ds-popover button:focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    },
+    {
+      "name": "Legacy Mix Notice",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Read-only preservation treatment for pre-migration mixed collections.",
+      "html": "<section class=\"ds-legacy\"><span class=\"ds-legacy-chip\">Legacy mix · read only</span><h3>Weekend archive</h3><p>This mixed collection is preserved without rewriting it. You can play, enqueue, or export it; new FluidMusic collections are local-only.</p><div><button>Play legacy mix</button><button>Add to Up Next</button><button>Export</button></div></section>",
+      "css": ".ds-legacy{color:var(--ui-text-primary);font:13px/1.5 inherit}.ds-legacy-chip{display:inline-flex;padding:3px 7px;border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:3px;color:var(--ui-text-secondary);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.ds-legacy h3{font-size:38px;line-height:1.1;letter-spacing:-.045em;margin:10px 0}.ds-legacy p{border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);background:color-mix(in srgb,var(--ui-accent) 9%,transparent);padding:12px 16px;color:var(--ui-text-secondary)}.ds-legacy div{display:flex;gap:7px;flex-wrap:wrap}.ds-legacy button{border:1px solid color-mix(in srgb,var(--ui-text-primary) 14%,transparent);border-radius:6px;background:transparent;color:inherit;padding:7px 10px}.ds-legacy button:first-child{background:var(--ui-accent);color:var(--ui-bg-primary)}.ds-legacy button:focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Night Radio",
+    "overview": "FluidMusic is a quiet listening instrument embedded in Hermes Desktop: deep navy carries the workspace, cool graphite separates compact chrome, and sparse coral and violet signals make state readable without turning the surface into a branded streaming clone. The system inherits Hermes typography and semantic --ui-* variables so it remains native to the host while keeping a recognisable Night Radio hierarchy. The signature object is Orbit: a large circular artwork or record field in the now-playing band. It supplies one memorable silhouette while the rest of the interface stays operational—compact Blackstage-style navigation, hairline divisions, aligned metadata, honest provider labels, and dense rows. Runtime provider artwork may fill Orbit and media tiles; no raster artwork, texture, or decorative image asset ships with the plugin.",
+    "keyCharacteristics": [
+      "Deep navy and cool graphite structure with off-white text.",
+      "Coral reserved for live/broadcast emphasis and the active navigation underline.",
+      "Violet used for provider/source identity and selected secondary tabs.",
+      "One circular Orbit focal object; other components remain compact and rectilinear.",
+      "Four stable primary destinations: Browse, Library, Queue, and Settings.",
+      "Provider capabilities and ownership stay visible instead of being visually normalised away.",
+      "Theme-aware surfaces derive from Hermes semantic variables; green-tinted backgrounds are forbidden."
+    ],
+    "rules": [
+      { "name": "The No-Green-Background Rule", "body": "Never tint workspace, card, tile, chip, or selected-state backgrounds green. Spotify remains identifiable through copy, icons, and violet source treatment—not a green wash.", "section": "colors" },
+      { "name": "The Signal Rarity Rule", "body": "Coral means live or active; violet means source or secondary selection. Do not use either as broad decorative fill.", "section": "colors" },
+      { "name": "The Semantic Host Rule", "body": "Base surfaces, text, strokes, focus, and control accent come from Hermes --ui-* variables. Fixed brand accents supplement the host; they do not replace its theme contract.", "section": "colors" },
+      { "name": "The Inherited Voice Rule", "body": "Do not ship a custom font for FluidMusic. Inherit Hermes typography so the plugin belongs to the desktop shell.", "section": "typography" },
+      { "name": "The Tight-Title Rule", "body": "Tight negative tracking is for display, page, and section titles only. Body copy and controls retain normal tracking.", "section": "typography" },
+      { "name": "The Stable-Destinations Rule", "body": "Browse, Library, Queue, and Settings remain the only primary workspace destinations; source choices belong in secondary tabs.", "section": "layout" },
+      { "name": "The One-Player Rule", "body": "The now-playing band owns the full workspace playback story. Never add a bottom player bar.", "section": "layout" },
+      { "name": "The Flat-by-Default Rule", "body": "Panels and rows use borders and tonal shifts at rest. Shadows are reserved for Orbit, popovers, dialogs, and inset state markers.", "section": "elevation" },
+      { "name": "The One-Circle Rule", "body": "Orbit is the dominant circle. Do not turn every control, chip, tile, or card into a pill or disc.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do build every surface from Hermes semantic variables plus the fixed coral and violet signals.",
+      "Do keep Orbit as the single memorable focal object and let runtime artwork supply its content.",
+      "Do preserve all four primary destinations and use secondary tabs for provider or section changes.",
+      "Do render controls from active-source capabilities and state the provider/device boundary in copy.",
+      "Do distinguish editable local collections from read-only legacy mixes through labels, notices, and available actions.",
+      "Do test broad, 980px, 720px, and 390px container behavior, visible focus, keyboard dismissal, and reduced motion."
+    ],
+    "donts": [
+      "Don't use green-tinted backgrounds, Spotify-green panels, or provider-colored page washes.",
+      "Don't add a sidebar-plus-bottom-player streaming shell or duplicate the now-playing controls in a footer.",
+      "Don't ship raster artwork, texture, or placeholder imagery; provider artwork is runtime content and SVG supplies fallbacks.",
+      "Don't show fake seek, previous, next, shuffle, repeat, queue, or device actions where the active source cannot perform them.",
+      "Don't make new saved collections cross-source; use temporary Up Next for mixed listening and preserve legacy mixes as read-only.",
+      "Don't replace hairline structure with stacks of floating cards, broad shadows, excessive pills, or decorative animation."
+    ]
+  }
+}

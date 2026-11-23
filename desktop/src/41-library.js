@@ -1,131 +1,7 @@
-function HomePage({ controller, navigate }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    playlists = useValue(controller.playlists),
-    status = useValue(controller.status),
-    spotify = useValue(controller.spotify)
-  const item = queue[at],
-    display =
-      item?.source === 'spotify' && spotify.title && status === 'playing'
-        ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
-        : item
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Your listening space',
-      title: 'Make room for music.',
-      subtitle: 'Build a mix. Find a station. Keep your flow.',
-    }),
-    h(
-      'section',
-      { className: 'fluid-now-card' },
-      h(Artwork, { item: display, className: 'fluid-now-cover' }),
-      h(
-        'div',
-        { className: 'fluid-now-copy' },
-        h(
-          'p',
-          { className: 'fluid-kicker' },
-          item ? `${sourceLabel(item)} · ${status}` : 'Pick your soundtrack',
-        ),
-        h('h2', { className: 'fluid-now-title' }, display?.title || 'A little less silence.'),
-        h(
-          'p',
-          { className: 'fluid-now-subtitle' },
-          display?.subtitle || 'Your library, live radio, and Spotify in one workspace.',
-        ),
-        item
-          ? h(
-              'div',
-              { className: 'fluid-actions' },
-              h(Transport, { controller }),
-              h(WorkspaceButton, { onClick: () => navigate('queue') }, `View queue · ${queue.length}`),
-            )
-          : h(
-              'div',
-              { className: 'fluid-actions' },
-              h(WorkspaceButton, { primary: true, onClick: () => navigate('radio') }, 'Discover radio'),
-              h(WorkspaceButton, { onClick: () => navigate('local') }, 'Add your music'),
-            ),
-      ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-source-links' },
-      [
-        ['search', 'spotify', 'Spotify', 'Search songs, albums & playlists'],
-        ['radio', 'radio', 'Live radio', 'A station for every kind of focus'],
-        ['local', 'local', 'On your device', 'Your folders. Your collection.'],
-      ].map(([view, kind, title, text]) =>
-        h(
-          'button',
-          { type: 'button', key: view, onClick: () => navigate(view) },
-          h(Icon, { kind }),
-          h('span', {}, h('strong', {}, title), h('small', {}, text)),
-          h(Icon, { kind: 'forward' }),
-        ),
-      ),
-    ),
-    h(
-      'section',
-      { className: 'fluid-result-section' },
-      h(
-        'div',
-        { className: 'fluid-section-head' },
-        h('h2', { className: 'fluid-section-title' }, 'Made by you'),
-        h(WorkspaceButton, { onClick: () => navigate('playlists') }, 'Manage playlists'),
-      ),
-      playlists.length
-        ? h(
-            'div',
-            { className: 'fluid-collection-grid' },
-            playlists.slice(0, 6).map((entry) =>
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'fluid-collection-card',
-                  key: entry.id,
-                  onClick: () => {
-                    controller.selectPlaylist(entry.id)
-                    navigate('playlists')
-                  },
-                },
-                h('span', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })),
-                h('strong', {}, entry.name),
-                h('span', {}, `${entry.items.length} items · ${entry.description || 'Your mix'}`),
-              ),
-            ),
-          )
-        : h(
-            Empty,
-            { title: 'Start a collection' },
-            h(WorkspaceButton, { onClick: () => navigate('playlists') }, 'Create your first playlist'),
-          ),
-    ),
-    h(
-      'section',
-      { className: 'fluid-result-section' },
-      h(
-        'div',
-        { className: 'fluid-section-head' },
-        h('h2', { className: 'fluid-section-title' }, 'On the air'),
-        h(WorkspaceButton, { onClick: () => navigate('radio') }, 'Explore radio'),
-      ),
-      h(
-        'div',
-        { className: 'fluid-track-list' },
-        RADIO_PRESETS.map((station, index) =>
-          h(TrackRow, { key: station.id, controller, item: station, at: index }),
-        ),
-      ),
-    ),
-  )
-}
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
-    devices = useValue(controller.spotifyDevices)
+    devices = useValue(controller.spotifyDevices),
+    localCap = useValue(controller.spotifyLocalCapability)
   const [clientId, setClientId] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
@@ -158,6 +34,12 @@ function SpotifyConnection({ controller }) {
         h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
         auth.authenticated ? 'Connected' : auth.state,
       ),
+    ),
+    h(
+      'div',
+      { className: 'fluid-local-playback' },
+      h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
     auth.needsClientId &&
       h(
@@ -253,7 +135,9 @@ function SearchPage({ controller }) {
     [results, setResults] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [searched, setSearched] = useState('')
+    [searched, setSearched] = useState(''),
+    [offset, setOffset] = useState(0),
+    [next, setNext] = useState(false)
   const request = useRef(0)
   useEffect(
     () => () => {
@@ -261,18 +145,25 @@ function SearchPage({ controller }) {
     },
     [],
   )
-  const search = async (event) => {
+  const search = async (event, more = false) => {
     event?.preventDefault()
-    if (busy || query.trim().length < 2 || !auth.authenticated) return
+    const term = more ? searched : query.trim()
+    if (busy || term.length < 2 || !auth.authenticated) return
     const token = ++request.current,
-      term = query.trim()
+      start = more ? offset : 0
     setBusy(true)
     setError('')
     try {
-      const data = await controller.searchSpotifyCatalog(term)
+      const data = await controller.searchSpotifyCatalog(term, start)
       if (token === request.current) {
-        setResults(data)
+        setResults((previous) =>
+          more && previous
+            ? { tracks: [...previous.tracks, ...data.tracks], albums: [...previous.albums, ...data.albums], playlists: [...previous.playlists, ...data.playlists], artists: [...previous.artists, ...data.artists] }
+            : data,
+        )
         setSearched(term)
+        setOffset(start + 10)
+        setNext(Boolean(data.cursors && Object.values(data.cursors).some(Boolean)))
       }
     } catch (reason) {
       if (token === request.current) setError(userFacingError(reason))
@@ -283,11 +174,7 @@ function SearchPage({ controller }) {
   return h(
     'div',
     {},
-    h(PageHead, {
-      kicker: 'Discover',
-      title: 'Find your next favourite.',
-      subtitle: 'Search the Spotify catalog. Save individual tracks or whole contexts.',
-    }),
+    h('p', { className: 'fluid-section-copy fluid-spotify-discovery' }, 'Play Spotify results now or add them to your temporary Up Next queue. FluidMusic collections are local-only; your Spotify playlists stay on Spotify.'),
     h(
       'form',
       { className: 'fluid-searchbar', onSubmit: search },
@@ -322,7 +209,7 @@ function SearchPage({ controller }) {
                 'div',
                 { className: 'fluid-track-list' },
                 results.tracks.map((item, at) =>
-                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at }),
+                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'search' }),
                 ),
               ),
             ),
@@ -336,11 +223,11 @@ function SearchPage({ controller }) {
                 h(
                   'div',
                   { className: 'fluid-grid' },
-                  results[kind].map((item) =>
+                  results[kind].map((item, at) =>
                     kind === 'artists'
                       ? h(
                           'article',
-                          { className: 'fluid-media-tile', key: item.id },
+                          { className: 'fluid-media-tile', key: `${item.id}-${at}` },
                           h(Artwork, { item }),
                           h('strong', { className: 'fluid-tile-title' }, item.title),
                           h(
@@ -359,11 +246,17 @@ function SearchPage({ controller }) {
                             'Search this artist',
                           ),
                         )
-                      : h(MediaTile, { controller, item, key: item.id }),
+                      : h(MediaTile, { controller, item, key: `${item.id}-${at}` }),
                   ),
                 ),
               ),
           ),
+          next &&
+            h(
+              'div',
+              { className: 'fluid-load-more' },
+              h(WorkspaceButton, { disabled: busy, onClick: () => void search(null, true) }, busy ? 'Loading…' : 'Load more results'),
+            ),
         )
       : auth.authenticated &&
           h(
@@ -399,7 +292,7 @@ function SpotifyLibraryPage({ controller }) {
         ? await controller.loadSpotifyPlaylist(playlist, start)
         : await controller.loadSpotifyPlaylists(start)
       if (token !== request.current) return
-      if (playlist) setDetail((previous) => (more ? [...previous, ...data.tracks] : data.tracks))
+      if (playlist) setDetail((previous) => (more ? [...previous, ...(data.rows || data.tracks)] : (data.rows || data.tracks)))
       else setLibrary((previous) => (more ? [...previous, ...data.items] : data.items))
       setNext(data.next)
       setOffset(playlist ? data.nextOffset : start + 50)
@@ -432,7 +325,7 @@ function SpotifyLibraryPage({ controller }) {
       title: selected?.name || 'Your library.',
       subtitle:
         selected?.description ||
-        'Your Spotify playlists stay on Spotify. Save tracks to FluidMusic to build a mixed collection.',
+        'Your Spotify playlists stay on Spotify. Play them directly or add a playlist context to your temporary Up Next queue.',
       actions:
         auth.authenticated &&
         h(WorkspaceButton, { onClick: () => void load() }, selected ? 'All playlists' : 'Refresh'),
@@ -479,7 +372,7 @@ function SpotifyLibraryPage({ controller }) {
             ? h(
                 'div',
                 { className: 'fluid-track-list' },
-                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at })),
+                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'provider' })),
               )
             : h(
                 'div',
@@ -568,6 +461,7 @@ function RadioPage({ controller }) {
           controller,
           item,
           at,
+          origin: 'search',
           extraActions: h(Action, {
             compact: true,
             kind: 'heart',
@@ -580,11 +474,9 @@ function RadioPage({ controller }) {
   return h(
     'div',
     {},
-    h(PageHead, {
-      kicker: 'Tune in',
-      title: 'Something is always playing.',
-      subtitle: 'Live stations for deep work, slow mornings, and everything between.',
-      actions: h(
+    h('div', { className: 'fluid-compact-toolbar' },
+      h('p', { className: 'fluid-muted' }, 'Search live stations or add a trusted HTTPS stream.'),
+      h(
         WorkspaceButton,
         {
           onClick: () => {
@@ -594,7 +486,7 @@ function RadioPage({ controller }) {
         },
         'Add a stream',
       ),
-    }),
+    ),
     h(
       'form',
       { className: 'fluid-searchbar', onSubmit: find },
@@ -737,11 +629,11 @@ function LocalPage({ controller }) {
         h(
           'div',
           {},
-          h('h2', { className: 'fluid-section-title' }, 'Open files with visualization'),
+          h('h2', { className: 'fluid-section-title' }, 'Open files for this session'),
           h(
             'p',
             { className: 'fluid-section-copy' },
-            'Direct browser playback gives the visualizer real audio samples, without changing your indexed library.',
+            'Play individual files without adding their folder to the persistent library.',
           ),
         ),
         h(WorkspaceButton, { primary: true, onClick: () => files.current?.click() }, 'Open audio files'),
@@ -752,7 +644,7 @@ function LocalPage({ controller }) {
         hidden: true,
         multiple: true,
         accept: 'audio/*,.flac,.mp3,.m4a,.aac,.wav,.ogg,.opus,.webm',
-        'aria-label': 'Open audio files for visualization',
+        'aria-label': 'Open session audio files',
         onChange: (event) => {
           try {
             controller.openLocalFiles(event.target.files)
@@ -779,10 +671,11 @@ function LocalPage({ controller }) {
               item,
               at,
               key: item.id,
+              origin: 'session',
               onPlay: () => {
                 const queued = controller.queue.get().findIndex((row) => row.id === item.id)
                 if (queued >= 0) void controller.playAt(queued)
-                else controller.add(item, true)
+                else controller.add(item, true, 'session')
               },
             }),
           ),
@@ -892,7 +785,7 @@ function LocalPage({ controller }) {
         ? h(
             'div',
             { className: 'fluid-track-list' },
-            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id })),
+            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id, origin: 'library' })),
           )
         : h(
             Empty,

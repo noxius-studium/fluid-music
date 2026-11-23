@@ -1,10 +1,54 @@
-import { atom, Button, host, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS, useValue } from '@hermes/plugin-sdk'
+import * as HermesSDK from '@hermes/plugin-sdk'
 import { createElement as h, useEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
+/* SDK_BOUNDARY_START */
+const HOST_CONTRACT = {
+  contractVersion: 1,
+  sdk: '@hermes/plugin-sdk',
+  required: ['atom', 'useValue', 'host', 'ROUTES_AREA', 'TITLEBAR_AREAS'],
+  optional: {
+    Button: 'plain-button fallback with the same actions',
+    'host.navigate': 'navigation shortcuts degrade; in-pane view switching still works',
+    'TITLEBAR_AREAS.right': 'titlebar surface skipped; route and mini-player remain',
+    OwnedMediaView: 'first-party YouTube watch fallback reports unavailable',
+    'host.mediaSession': 'first-party YouTube watch fallback reports unavailable',
+    'window.hermesDesktop.getEmbedHostOrigin': 'direct embed URL fallback',
+    'window.Spotify.Player': 'in-plugin Spotify audio assessed as unsupported; Connect control remains',
+  },
+  minimum: 'Namespace SDK exposing atom, useValue, host, ROUTES_AREA and TITLEBAR_AREAS; React createElement/hooks are stable platform imports, not optional host exports.',
+  policy: 'Current/next/absent capability fixtures guard the declared doors. Unknown arbitrary future breaking releases are not guaranteed; an incompatible host gets a precise recovery surface, never silent data deletion or rewritten product scope.',
+}
+const resolveSdk = namespace => {
+  const sdk = namespace && typeof namespace === 'object' ? namespace : {}
+  const missing = HOST_CONTRACT.required.filter(name => sdk[name] == null)
+  const optional = {
+    button: typeof sdk.Button === 'function',
+    navigate: typeof sdk.host?.navigate === 'function',
+    titlebarRight: sdk.TITLEBAR_AREAS?.right != null,
+  }
+  return { sdk, missing, compatible: missing.length === 0, optional }
+}
+/* SDK_BOUNDARY_END */
+// Namespace import + capability check before any export is referenced: a
+// missing named ESM binding would abort the whole plugin at link time, while
+// this boundary lets registration render an honest fallback instead. Button
+// is optional (WorkspaceButton and the titlebar summary fall back to a plain
+// button); the rest are required for the current surfaces. React bindings
+// above are stable platform APIs, not optional host exports.
+const { sdk: SDK, missing: SDK_MISSING, compatible: SDK_COMPATIBLE, optional: SDK_OPTIONAL } = resolveSdk(HermesSDK)
+const atom = SDK.atom
+const useValue = SDK.useValue
+const host = SDK.host
+const ROUTES_AREA = SDK.ROUTES_AREA
+const TITLEBAR_AREAS = SDK.TITLEBAR_AREAS
+const Button = SDK.Button
+const HOST_NAVIGATE = SDK_OPTIONAL.navigate ? SDK.host.navigate.bind(SDK.host) : null
+const TITLEBAR_RIGHT = SDK_OPTIONAL.titlebarRight ? SDK.TITLEBAR_AREAS.right : null
+
 const ID = 'fluid-music'
 const ROUTE = '/media'
-const SOURCES = { spotify: 'Spotify Connect', radio: 'Live radio', local: 'Local music' }
+const SOURCES = { spotify: 'Spotify Connect', radio: 'Live radio', local: 'Local music', youtube: 'YouTube' }
 
 /* PURE_FUNCTIONS_START */
 const LOCAL_AUDIO_EXTENSIONS = /\.(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|webm)$/i
@@ -51,11 +95,34 @@ function localTrackItem(value) {
   })
 }
 
+function safeYouTubeWatchUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    if (url.protocol !== 'https:' || url.username || url.password) return null
+    let videoId = ''
+    if (url.hostname === 'www.youtube.com' && url.pathname === '/watch') videoId = safeText(url.searchParams.get('v'))
+    else if (url.hostname === 'youtu.be' && /^\/[A-Za-z0-9_-]{11}$/.test(url.pathname)) videoId = url.pathname.slice(1)
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null
+    return { url: url.href, videoId }
+  } catch {
+    return null
+  }
+}
+
+function safeHttpsMetadataUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
 function normalizeQueueItem(value) {
   if (!value || typeof value !== 'object') return null
   const source = value.source
-  if (!['spotify', 'radio', 'local'].includes(source)) return null
-  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : 'Untitled track')
+  if (!['spotify', 'radio', 'local', 'youtube'].includes(source)) return null
+  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : source === 'youtube' ? 'YouTube video' : 'Untitled track').slice(0, 300)
   if (source === 'spotify') {
     const uri = safeText(value.uri)
     if (!/^spotify:(track|album|playlist):[A-Za-z0-9]+$/.test(uri)) return null
@@ -66,6 +133,11 @@ function normalizeQueueItem(value) {
     const streamUrl = safeRadioStreamUrl(value.streamUrl)
     if (!streamUrl) return null
     return { id: safeText(value.id, makeId('radio', streamUrl)), source, title, subtitle: safeText(value.subtitle, safeText(value.provider)), streamUrl, homepage: safeText(value.homepage), favicon: safeText(value.favicon), artwork: safeText(value.artwork, safeText(value.favicon)), country: safeText(value.country), language: safeText(value.language), tags: safeText(value.tags), codec: safeText(value.codec), bitrate: safeText(value.bitrate) }
+  }
+  if (source === 'youtube') {
+    const watch = safeYouTubeWatchUrl(value.url)
+    if (!watch) return null
+    return { id: `youtube:${watch.videoId}`, source, url: watch.url, title, subtitle: safeText(value.subtitle, 'YouTube').slice(0, 300), durationMs: Math.max(0, Math.min(86_400_000, Number(value.durationMs) || 0)), artwork: safeHttpsMetadataUrl(value.artwork) }
   }
   if (source === 'local') {
     const objectUrl = safeText(value.objectUrl)
@@ -128,11 +200,11 @@ function shouldShowNext(item) {
 function mediaCapabilities(item) {
   const source = item?.source
   return {
-    play: source === 'spotify' || source === 'radio' || source === 'local',
-    previous: source === 'spotify' || source === 'local',
-    next: source === 'spotify' || source === 'local',
-    seek: source === 'spotify' || source === 'local',
-    volume: source === 'spotify' || source === 'radio' || source === 'local',
+    play: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
+    previous: source === 'spotify' || source === 'local' || source === 'youtube',
+    next: source === 'spotify' || source === 'local' || source === 'youtube',
+    seek: source === 'spotify' || source === 'local' || source === 'youtube',
+    volume: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
     shuffle: source === 'spotify',
     repeat: source === 'spotify',
     device: source === 'spotify'
@@ -185,7 +257,9 @@ function spotifyPlayPayload(value) {
 }
 
 function isWorkspaceView(value) {
-  return ['home', 'search', 'library', 'radio', 'local', 'playlists', 'queue', 'settings', 'logs'].includes(value) ? value : 'home'
+  const aliases = { home: 'browse', search: 'browse', radio: 'browse', playlists: 'library', local: 'library', logs: 'settings' }
+  const next = aliases[value] || value
+  return ['browse', 'library', 'queue', 'settings'].includes(next) ? next : 'browse'
 }
 
 function serializePlaylistItem(value) {
@@ -210,9 +284,114 @@ function normalizePlaylistState(value) {
   return {
     version: 3,
     playlists: playlists.map((entry, at) => {
-      const items = Array.isArray(entry?.items) ? entry.items.map(item => serializePlaylistItem(item)).filter(Boolean) : []
-      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled playlist'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items }
+      const rawItems = Array.isArray(entry?.items) ? entry.items : []
+      const items = rawItems.map(item => serializePlaylistItem(item)).filter(Boolean)
+      const legacy = entry?.legacy === true || rawItems.some(value => {
+        const item = normalizeQueueItem(value)
+        return !item || item.source !== 'local' || !item.localTrackId
+      })
+      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled collection'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items, legacy }
     })
+  }
+}
+
+const QUEUE_ORIGINS = { search: 'From search', history: 'From history', collection: 'From collection', provider: 'From provider', library: 'From local library', session: 'Opened this session' }
+function queueOriginLabel(origin) {
+  return QUEUE_ORIGINS[origin] || ''
+}
+function normalizeListeningSessions(value) {
+  // Listening sessions are durable snapshots of SAFE references only. Stored
+  // data is re-serialized on load so blob handles, raw paths or capability
+  // URLs can never survive into a restored session, and bounds are enforced.
+  const list = Array.isArray(value) ? value : []
+  return list.slice(0, 50).map(entry => {
+    if (!entry || typeof entry !== 'object') return null
+    const items = (Array.isArray(entry.items) ? entry.items : []).map(serializePlaylistItem).filter(item => item && !(item.source === 'local' && !item.localTrackId)).slice(0, 500)
+    if (!items.length) return null
+    return { id: safeText(entry.id, makeId('session', 'restored')), name: safeText(entry.name, 'Listening session').slice(0, 120), createdAt: safeText(entry.createdAt), items }
+  }).filter(Boolean)
+}
+
+const LONG_FORM_MIN_MS = 600000
+const SLEEP_PRESETS_MIN = [15, 30, 60]
+const SLEEP_MAX_CUSTOM_MIN = 720
+function isLongFormEligible(item) {
+  // Resume/bookmarks apply to eligible long-form YouTube/local items only.
+  // LIVE radio is never seekable; Spotify Connect position is provider-owned.
+  return Boolean(item && (item.source === 'youtube' || item.source === 'local') && !item.unavailable && Number(item.durationMs) >= LONG_FORM_MIN_MS)
+}
+function mediaKeyFor(item) {
+  if (!item) return ''
+  if (item.source === 'youtube') {
+    const id = safeText(item.id).replace(/^youtube:/, '')
+    return id ? `youtube:${id}` : ''
+  }
+  if (item.source === 'local' && item.localTrackId) return `local:${item.localTrackId}`
+  return ''
+}
+function normalizeResumePosition(value) {
+  if (!value || typeof value !== 'object') return null
+  const mediaKey = safeText(value.media_key ?? value.mediaKey)
+  if (!mediaKey) return null
+  return {
+    mediaKey,
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    durationMs: Math.max(0, Math.min(86400000, Number(value.duration_ms ?? value.durationMs) || 0)),
+  }
+}
+function normalizeBookmark(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = Number(value.id)
+  if (!Number.isInteger(id) || id <= 0) return null
+  return {
+    id,
+    mediaKey: safeText(value.media_key ?? value.mediaKey),
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    label: safeText(value.label).slice(0, 120),
+    createdAt: safeText(value.created_at ?? value.createdAt),
+  }
+}
+function formatPositionMs(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = Math.floor(total % 60)
+  const pad = value => String(value).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+function boundedSleepMinutes(value) {
+  const minutes = Math.round(Number(value))
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > SLEEP_MAX_CUSTOM_MIN) return 0
+  return minutes
+}
+
+const RETRY_MAX_ATTEMPTS = 3
+const RETRY_COOLDOWN_MS = 30000
+const HEALTH_SOURCES = ['spotify', 'youtube', 'local', 'radio', 'backend']
+const HEALTH_STATES = ['ready', 'degraded', 'unavailable', 'unknown']
+function retryGate(budget, nowMs) {
+  const state = budget && typeof budget === 'object' ? budget : { attempts: 0, cooldownUntil: 0 }
+  const cooldownUntil = Math.max(0, Number(state.cooldownUntil) || 0)
+  if (cooldownUntil > nowMs) return { allowed: false, remainingMs: cooldownUntil - nowMs, attempts: Math.max(0, Number(state.attempts) || 0), cooldownUntil }
+  const attempts = cooldownUntil > 0 ? 0 : Math.max(0, Number(state.attempts) || 0)
+  return { allowed: true, remainingMs: 0, attempts, cooldownUntil: 0 }
+}
+function retryConsumed(budget, nowMs) {
+  const gate = retryGate(budget, nowMs)
+  const attempts = gate.attempts + 1
+  if (attempts >= RETRY_MAX_ATTEMPTS) return { attempts: 0, cooldownUntil: nowMs + RETRY_COOLDOWN_MS }
+  return { attempts, cooldownUntil: 0 }
+}
+function normalizeHealthRow(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = safeText(value.source)
+  if (!HEALTH_SOURCES.includes(source)) return null
+  return {
+    source,
+    state: HEALTH_STATES.includes(value.state) ? value.state : 'unknown',
+    detail: safeText(value.detail).slice(0, 200),
+    action: safeText(value.action),
+    lastEvidenceAt: safeText(value.lastEvidenceAt),
   }
 }
 
@@ -233,18 +412,175 @@ function normalizeSpotifyDevices(value) {
   return Array.isArray(devices) ? devices.filter(device => device && safeText(device.id)).map(device => ({ id: safeText(device.id), name: safeText(device.name, 'Unnamed device'), type: safeText(device.type, 'Spotify Connect'), active: Boolean(device.is_active || device.active), restricted: Boolean(device.is_restricted) })) : []
 }
 
-// Log-frequency bands over the useful audible range, excluding DC and unused ultrasonic bins.
-function spectrumBands(binCount, sampleRate, count) {
-  if (!Number.isInteger(binCount) || binCount < 1 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(count) || count < 1) return []
-  const binHz = sampleRate / (2 * binCount)
-  const maximumHz = Math.min(16000, sampleRate / 2)
-  const minimumHz = Math.min(maximumHz, Math.max(40, binHz))
-  const ratio = maximumHz / minimumHz
-  return Array.from({ length: count }, (_, at) => {
-    const low = Math.min(binCount - 1, Math.floor(minimumHz * Math.pow(ratio, at / count) / binHz))
-    const high = Math.min(binCount, Math.max(low + 1, Math.ceil(minimumHz * Math.pow(ratio, (at + 1) / count) / binHz)))
-    return { low, high }
-  })
+
+const YOUTUBE_COMMAND_FUNCS = ['playVideo', 'pauseVideo', 'seekTo', 'setVolume', 'mute', 'unMute', 'stopVideo']
+function youTubeCommandMessage(func, args = []) {
+  if (!YOUTUBE_COMMAND_FUNCS.includes(func)) return null
+  return JSON.stringify({ event: 'command', func, args: Array.isArray(args) ? args : [], id: 'fluid-music', channel: 'fluid-music' })
+}
+function youTubeListeningMessage() {
+  return JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' })
+}
+function embedFrameOrigin(src) {
+  try {
+    const url = new URL(safeText(src))
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : ''
+  } catch {
+    return ''
+  }
+}
+function parseYouTubePlayerMessage(value, expectedVideoId = '') {
+  let data = value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { return null }
+  }
+  if (!data || typeof data !== 'object') return null
+  const info = data.info && typeof data.info === 'object' ? data.info : null
+  if (data.event === 'onReady') return { kind: 'ready', videoId: safeText(info?.videoData?.video_id) }
+  if (data.event === 'onError') {
+    const errorCode = Number(data.info)
+    return Number.isInteger(errorCode) && errorCode >= 0 ? { kind: 'error', errorCode } : null
+  }
+  if (data.event === 'onAutoplayBlocked') return { kind: 'autoplay-blocked' }
+  if (data.event !== 'infoDelivery' || !info) return null
+  const videoId = safeText(info.videoData?.video_id)
+  if (expectedVideoId && videoId && videoId !== expectedVideoId) return null
+  const playerState = Number(info.playerState)
+  if (!Number.isInteger(playerState) || playerState < -1 || playerState > 5) return null
+  return {
+    kind: 'state',
+    videoId,
+    playerState,
+    playing: playerState === 1,
+    ended: playerState === 0,
+    positionMs: Math.max(0, Number(info.currentTime) || 0) * 1000,
+    durationMs: Math.max(0, Number(info.duration) || 0) * 1000
+  }
+}
+
+const YOUTUBE_FAILURES = {
+  'invalid-video-id': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'That YouTube link or video ID is invalid.', remedy: 'Check the URL or choose another video.' },
+  'html5-player-failure': { action: 'retry', retryable: true, fallbackEligible: true, contentAvailable: null, message: 'The YouTube player failed to start this video.', remedy: 'Retry once; if it keeps failing, use Skip or another video.' },
+  'video-not-found': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video was removed or is not found.', remedy: 'Skip it or choose another video.' },
+  'embed-denied-by-owner': { action: 'fallback', retryable: false, fallbackEligible: true, contentAvailable: null, message: "This video's owner disabled embedding.", remedy: 'Use Skip, or try the first-party watch fallback when available.' },
+  'missing-referer-identification': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube rejected the player identification (Referer/origin).', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'autoplay-blocked': { action: 'interact', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The browser blocked autoplay.', remedy: 'Press play in the FluidMusic player to start.' },
+  'wrong-video-state': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player is showing a different video than selected.', remedy: 'Retry to reload the selected video.' },
+  'origin-mismatch': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player origin does not match the embedded frame.', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'player-not-ready': { action: 'wait', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The YouTube player is not ready yet.', remedy: 'Wait for the player to finish loading.' },
+  'stale-generation': { action: 'ignore', retryable: false, fallbackEligible: false, contentAvailable: null, message: '', remedy: '' },
+  'content-unavailable': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is unavailable.', remedy: 'Skip it or choose another video.' },
+  'private-video': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is private.', remedy: 'Skip it; private videos cannot be played.' },
+  'consent-required': { action: 'sign-in', retryable: false, fallbackEligible: true, contentAvailable: null, message: 'This video requires YouTube sign-in or age confirmation.', remedy: 'Sign in on the first-party watch surface when available, or skip.' },
+  'rate-limited': { action: 'wait', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+  'network-error': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube could not be reached.', remedy: 'Check the connection and retry.' },
+  'undetermined': { action: 'diagnose', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'YouTube playback failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+}
+function classifyYouTubeFailure(signal) {
+  // Documented IFrame API semantics (PROVIDER_RESEARCH): 2 invalid ID,
+  // 5 HTML5 failure, 100 removed/not found, 101/150 owner embed denial,
+  // 153 missing Referer/API-client identification. Unknown stays unknown —
+  // an iframe that did not start is NOT evidence of removed/private content.
+  let reason = 'undetermined'
+  if (signal && typeof signal === 'object') {
+    if (signal.kind === 'player-error') {
+      const code = Number(signal.errorCode)
+      reason = code === 2 ? 'invalid-video-id'
+        : code === 5 ? 'html5-player-failure'
+        : code === 100 ? 'video-not-found'
+        : code === 101 || code === 150 ? 'embed-denied-by-owner'
+        : code === 153 ? 'missing-referer-identification'
+        : 'undetermined'
+    } else if (signal.kind === 'autoplay-blocked') {
+      reason = 'autoplay-blocked'
+    } else if (signal.kind === 'bridge') {
+      reason = signal.reason === 'wrong-video' ? 'wrong-video-state'
+        : signal.reason === 'wrong-origin' ? 'origin-mismatch'
+        : signal.reason === 'not-ready' ? 'player-not-ready'
+        : signal.reason === 'stale-generation' ? 'stale-generation'
+        : 'undetermined'
+    } else if (signal.kind === 'provider' && YOUTUBE_FAILURES[signal.code]) {
+      reason = signal.code
+    }
+  }
+  return { reason, ...YOUTUBE_FAILURES[reason] }
+}
+
+// REQUIRED public host contract for an owned first-party watch surface.
+// NONE of these exports exist in the current public Hermes Desktop SDK
+// (verified against apps/desktop/src/sdk/index.ts: the only sanctioned embed
+// primitive is SandboxedFrame — an opaque-origin iframe that forbids
+// allow-same-origin, so it can never hold a genuine provider login; raw
+// <webview> is explicitly rejected because it shares the app preview
+// partition). Full-scope FM-08 acceptance is gated on the host shipping this
+// contract; until then the adapter reports an honest unavailable state and
+// never opens an external app, focused-chat tab, or duplicate pane.
+function youTubeWatchCapability(namespace) {
+  const sdk = namespace && typeof namespace === 'object' ? namespace : {}
+  const hostApi = sdk.host && typeof sdk.host === 'object' ? sdk.host : {}
+  const missing = []
+  if (typeof sdk.OwnedMediaView !== 'function') missing.push('OwnedMediaView')
+  const session = hostApi.mediaSession
+  if (!session || typeof session.ensurePartition !== 'function' || typeof session.openLogin !== 'function' || typeof session.dispose !== 'function') missing.push('host.mediaSession')
+  return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
+}
+
+function classifySpotifyFailure(value) {
+  // Distinct remediation per official Web API status semantics; unknown stays
+  // unknown. Connect control errors are never evidence about local audio.
+  const status = Number(value?.statusCode ?? value?.status_code)
+  const text = safeText(value?.message).toLowerCase()
+  let reason = 'undetermined'
+  if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
+  else if (status === 429) reason = 'rate-limited'
+  else if (status === 403 && /scope/.test(text)) reason = 'insufficient-scope'
+  else if (status === 403) reason = 'forbidden'
+  else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
+  else if (status === 404) reason = 'not-found'
+  else if (status >= 500 && status <= 599) reason = 'transient'
+  const matrix = {
+    'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
+    'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'insufficient-scope': { action: 'reconnect', retryable: false, message: 'Spotify sign-in is missing a permission this action needs.', remedy: 'Reconnect Spotify to grant the required scopes.' },
+    'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
+    'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
+    'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
+    'transient': { action: 'retry', retryable: true, message: 'Spotify had a temporary problem.', remedy: 'Retry in a moment.' },
+    'undetermined': { action: 'diagnose', retryable: false, message: 'Spotify request failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+  }
+  return { reason, ...matrix[reason] }
+}
+function spotifyEntryUnavailableReason(track) {
+  if (!track || typeof track !== 'object') return 'Removed or unavailable on Spotify.'
+  if (track.is_local) return 'Local file — not synced to Spotify streaming.'
+  const restriction = safeText(track?.restrictions?.reason)
+  if (restriction === 'market') return 'Not available in your market.'
+  if (restriction === 'product') return 'Requires a different Spotify subscription.'
+  if (restriction === 'explicit') return 'Blocked by explicit-content settings.'
+  if (track.is_playable === false) return 'Not playable on your account right now.'
+  return 'Unavailable on Spotify.'
+}
+
+function spotifyLocalPlaybackCapability(signals) {
+  // Official Web Playback SDK requirements: Premium account, encrypted-media
+  // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's
+  // prior written approval for commercial use. Connect remote control is NOT
+  // decoded in-plugin audio. Without owner-side audio proof the best honest
+  // state is 'eligible-unproven' — never a silent full-audio certification.
+  const product = safeText(signals?.product).toLowerCase()
+  if (product && product !== 'premium') {
+    return { state: 'ineligible-account', reasons: ['Spotify Web Playback SDK requires a Premium account.'], localAudio: false }
+  }
+  if (signals?.checked && (!signals.sdkPresent || !signals.emeSupported)) {
+    const reasons = []
+    if (!signals.sdkPresent) reasons.push('The Spotify Web Playback SDK is not available in this runtime.')
+    if (!signals.emeSupported) reasons.push('Encrypted-media (Widevine) support was not detected in this runtime.')
+    return { state: 'unsupported-runtime', reasons, localAudio: false }
+  }
+  if (signals?.checked && signals.sdkPresent && signals.emeSupported && product === 'premium') {
+    return { state: 'eligible-unproven', reasons: ['Account and runtime checks pass; actual in-plugin audio still needs owner Desktop proof and provider approval.'], localAudio: null }
+  }
+  return { state: 'unverified', reasons: ['Local playback capability has not been checked on this runtime.'], localAudio: null }
 }
 
 const RADIO_PRESETS = [
@@ -255,24 +591,82 @@ const RADIO_PRESETS = [
 /* PURE_FUNCTIONS_END */
 
 const CSS = `
-.fluid-root,.fluid-dialog,.fluid-mini-player,.fluid-statusbar{--fm-panel:color-mix(in srgb,var(--ui-bg-secondary) 80%,transparent);--fm-soft:color-mix(in srgb,var(--ui-accent) 9%,transparent);--fm-line:var(--ui-stroke-secondary);color:var(--ui-text-primary);font-family:inherit;font-size:13px;line-height:1.5}
-.fluid-root{container:fluid / inline-size;height:100%;min-height:0;min-width:0}.fluid-app{height:100%;min-height:0;display:grid;grid-template-rows:minmax(0,1fr) auto;background:transparent;overflow:hidden}.fluid-root *,.fluid-dialog *,.fluid-mini-player *{box-sizing:border-box}.fluid-root button,.fluid-root input,.fluid-root textarea,.fluid-root select,.fluid-dialog input,.fluid-dialog textarea,.fluid-dialog select{font:inherit}.fluid-root :focus-visible,.fluid-dialog :focus-visible,.fluid-mini-player :focus-visible,.fluid-statusbar :focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}
-.fluid-shell{display:grid;grid-template-columns:176px minmax(0,1fr);min-height:0;overflow:hidden}.fluid-sidebar{display:flex;flex-direction:column;gap:24px;padding:24px 12px;border-right:1px solid var(--fm-line);overflow:auto;background:color-mix(in srgb,var(--ui-bg-secondary) 35%,transparent)}.fluid-brand{display:flex;align-items:center;gap:10px;padding:0 8px 12px}.fluid-brand>svg{width:25px;height:25px;color:var(--ui-accent)}.fluid-brand strong{font-size:16px;letter-spacing:-.04em}.fluid-brand small{display:block;font-size:9px;color:var(--ui-text-tertiary);margin-top:2px}.fluid-nav-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ui-text-tertiary);margin:0 12px 8px}.fluid-nav-group{display:flex;flex-direction:column;gap:4px}.fluid-nav-button{display:flex;gap:10px;align-items:center;border:0;border-radius:6px;background:transparent;color:var(--ui-text-secondary);padding:10px 12px;cursor:pointer;text-align:left;min-height:38px}.fluid-nav-button:hover{background:var(--fm-soft)}.fluid-nav-button[data-active=true]{color:var(--ui-text-primary);background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent);font-weight:650}.fluid-nav-icon{display:flex;color:var(--ui-accent)}.fluid-nav-count{margin-left:auto;font-size:10px;color:var(--ui-text-tertiary)}.fluid-sidebar-foot{margin-top:auto;font-size:10px;padding:8px}.fluid-provider-state{display:flex;gap:8px;align-items:center;color:var(--ui-text-secondary);font-size:11px}.fluid-state-dot,.fluid-status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ui-text-quaternary);flex:none}.fluid-state-dot[data-on=true],.fluid-status-dot[data-state=playing]{background:var(--ui-accent)}
-.fluid-content{min-width:0;overflow:auto;padding:36px clamp(20px,3cqw,48px) 44px;scrollbar-gutter:stable}.fluid-content-inner{max-width:1360px;margin:0 auto}.fluid-page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:30px}.fluid-kicker{color:var(--ui-accent);font-size:10px;letter-spacing:.13em;text-transform:uppercase;font-weight:650;margin:0 0 10px}.fluid-page-title{font-size:clamp(26px,3.4cqw,42px);line-height:1.12;letter-spacing:-.055em;font-weight:650;margin:0}.fluid-page-subtitle{color:var(--ui-text-secondary);font-size:13px;max-width:650px;margin:10px 0 0;line-height:1.6}.fluid-section-title{font-size:17px;font-weight:650;letter-spacing:-.025em;margin:0}.fluid-section-copy{margin:6px 0 0;color:var(--ui-text-secondary);font-size:12px}.fluid-section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.fluid-actions,.fluid-row-actions,.fluid-tile-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.fluid-row-actions{gap:2px;flex-wrap:nowrap}.fluid-actions>button{white-space:nowrap}.fluid-muted{font-size:12px;color:var(--ui-text-secondary);line-height:1.6}.fluid-error{font-size:13px;color:var(--ui-text-primary);border-left:3px solid var(--ui-accent);padding:12px;background:var(--fm-soft)}.fluid-panel{border:1px solid var(--fm-line);border-radius:10px;min-width:0;background:var(--fm-panel)}.fluid-panel-pad{padding:22px}.fluid-empty{padding:44px 24px;border:1px dashed var(--fm-line);border-radius:9px;text-align:center;color:var(--ui-text-secondary);font-size:13px;line-height:1.7}.fluid-empty>svg{width:30px;height:30px;margin-bottom:12px;color:var(--ui-accent)}.fluid-empty strong{display:block;color:var(--ui-text-primary);font-size:18px;letter-spacing:-.025em;margin-bottom:8px}.fluid-empty .fluid-actions{justify-content:center;margin-top:20px}.fluid-notice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:0 0 18px;background:var(--fm-soft);border-left:2px solid var(--ui-accent);font-size:12px;overflow-wrap:anywhere}.fluid-notice>span{min-width:0}
-.fluid-now-card{display:grid;grid-template-columns:180px minmax(0,1fr);gap:32px;align-items:center;padding:30px;background:linear-gradient(120deg,var(--fm-soft),transparent);border-top:1px solid var(--fm-line);border-bottom:1px solid var(--fm-line)}.fluid-now-cover{width:180px;aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border:1px solid var(--fm-line);border-radius:8px;overflow:hidden}.fluid-now-cover>svg{width:54px;height:54px;color:var(--ui-accent)}.fluid-now-title{font-size:clamp(25px,3.4cqw,46px);line-height:1.1;letter-spacing:-.05em;margin:0 0 12px;overflow-wrap:anywhere}.fluid-now-subtitle{color:var(--ui-text-secondary);margin:0 0 20px;font-size:14px}.fluid-source-links{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-bottom:1px solid var(--fm-line);margin:10px 0 28px}.fluid-source-links>button{border:0;border-right:1px solid var(--fm-line);background:none;color:inherit;display:flex;gap:12px;align-items:center;text-align:left;padding:24px 16px;cursor:pointer;min-width:0}.fluid-source-links>button:last-child{border-right:0}.fluid-source-links>button:hover{background:var(--fm-soft)}.fluid-source-links>button>svg{flex:none;color:var(--ui-accent)}.fluid-source-links>button>svg:last-child{margin-left:auto}.fluid-source-links strong{display:block;font-size:13px}.fluid-source-links small{display:block;color:var(--ui-text-secondary);font-size:11px;margin-top:4px}.fluid-result-section{margin-top:32px}.fluid-result-section>.fluid-section-title{margin-bottom:16px}.fluid-collection-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}.fluid-collection-card{display:flex;flex-direction:column;gap:10px;background:var(--fm-panel);color:inherit;border:1px solid var(--fm-line);border-radius:8px;text-align:left;padding:18px;cursor:pointer;min-width:0}.fluid-collection-card:hover{border-color:var(--ui-accent)}.fluid-collection-card>span:last-child{font-size:11px;color:var(--ui-text-secondary);overflow-wrap:anywhere}.fluid-collection-icon{width:52px;height:52px;flex:none;background:var(--fm-soft);border:1px solid var(--fm-line);display:grid;place-items:center;border-radius:6px;color:var(--ui-accent)}.fluid-collection-icon>svg{width:25px;height:25px}
+.fluid-root,.fluid-dialog,.fluid-mini-player{--fm-panel:color-mix(in srgb,var(--ui-bg-secondary) 80%,transparent);--fm-soft:color-mix(in srgb,var(--ui-accent) 9%,transparent);--fm-line:var(--ui-stroke-secondary);color:var(--ui-text-primary);font-family:inherit;font-size:13px;line-height:1.5}
+.fluid-root{container:fluid / inline-size;height:100%;min-height:0;min-width:0}.fluid-app{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:transparent;overflow:hidden}.fluid-root *,.fluid-dialog *,.fluid-mini-player *{box-sizing:border-box}.fluid-root button,.fluid-root input,.fluid-root textarea,.fluid-root select,.fluid-dialog input,.fluid-dialog textarea,.fluid-dialog select{font:inherit}.fluid-root :focus-visible,.fluid-dialog :focus-visible,.fluid-mini-player :focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}
+.fluid-nav-button{display:flex;gap:10px;align-items:center;border:0;border-radius:6px;background:transparent;color:var(--ui-text-secondary);padding:10px 12px;cursor:pointer;text-align:left;min-height:38px}.fluid-nav-button:hover{background:var(--fm-soft)}.fluid-nav-button[data-active=true]{color:var(--ui-text-primary);background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent);font-weight:650}.fluid-provider-state{display:flex;gap:8px;align-items:center;color:var(--ui-text-secondary);font-size:11px}.fluid-state-dot,.fluid-status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ui-text-quaternary);flex:none}.fluid-state-dot[data-on=true],.fluid-status-dot[data-state=playing]{background:var(--ui-accent)}
+.fluid-content{min-width:0;overflow:auto;padding:18px clamp(14px,2cqw,28px) 28px;scrollbar-gutter:stable}.fluid-content-inner{max-width:1360px;margin:0 auto}.fluid-page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}.fluid-kicker{display:none}.fluid-page-title{font-size:clamp(19px,2cqw,25px);line-height:1.2;letter-spacing:-.03em;font-weight:650;margin:0}.fluid-page-subtitle{color:var(--ui-text-secondary);font-size:12px;max-width:680px;margin:5px 0 0;line-height:1.45}.fluid-section-title{font-size:17px;font-weight:650;letter-spacing:-.025em;margin:0}.fluid-section-copy{margin:6px 0 0;color:var(--ui-text-secondary);font-size:12px}.fluid-section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.fluid-actions,.fluid-row-actions,.fluid-tile-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.fluid-row-actions{gap:2px;flex-wrap:nowrap}.fluid-actions>button{white-space:nowrap}.fluid-muted{font-size:12px;color:var(--ui-text-secondary);line-height:1.6}.fluid-error{font-size:13px;color:var(--ui-text-primary);border-left:3px solid var(--ui-accent);padding:12px;background:var(--fm-soft)}.fluid-panel{border:1px solid var(--fm-line);border-radius:10px;min-width:0;background:var(--fm-panel)}.fluid-panel-pad{padding:22px}.fluid-empty{padding:24px 18px;border:1px dashed var(--fm-line);border-radius:9px;text-align:center;color:var(--ui-text-secondary);font-size:13px;line-height:1.7}.fluid-empty>svg{width:30px;height:30px;margin-bottom:12px;color:var(--ui-accent)}.fluid-empty strong{display:block;color:var(--ui-text-primary);font-size:18px;letter-spacing:-.025em;margin-bottom:8px}.fluid-empty .fluid-actions{justify-content:center;margin-top:20px}.fluid-notice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:0 0 18px;background:var(--fm-soft);border-left:2px solid var(--ui-accent);font-size:12px;overflow-wrap:anywhere}.fluid-notice>span{min-width:0}
+.fluid-now-title{font-size:clamp(19px,2cqw,25px);line-height:1.2;letter-spacing:-.03em;margin:0 0 6px;overflow-wrap:anywhere}.fluid-now-subtitle{color:var(--ui-text-secondary);margin:0 0 8px;font-size:12px}.fluid-result-section{margin-top:32px}.fluid-result-section>.fluid-section-title{margin-bottom:16px}.fluid-collection-icon{width:52px;height:52px;flex:none;background:var(--fm-soft);border:1px solid var(--fm-line);display:grid;place-items:center;border-radius:6px;color:var(--ui-accent)}.fluid-collection-icon>svg{width:25px;height:25px}
 .fluid-input,.fluid-select,.fluid-textarea{width:100%;min-width:0;border:1px solid var(--fm-line);border-radius:6px;background:var(--ui-bg-secondary);color:var(--ui-text-primary);padding:10px 12px}.fluid-input::placeholder,.fluid-textarea::placeholder{color:var(--ui-text-tertiary)}.fluid-textarea{min-height:90px;resize:vertical}.fluid-searchbar{display:flex;align-items:center;gap:10px;margin:18px 0}.fluid-searchbar>.fluid-input{flex:1}.fluid-field{display:flex;flex-direction:column;gap:8px;font-size:12px;margin:18px 0}.fluid-field small{color:var(--ui-text-secondary)}.fluid-filter{max-width:300px}.fluid-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:18px}.fluid-media-tile{min-width:0;padding:0 0 12px}.fluid-tile-art{aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border:1px solid var(--fm-line);border-radius:8px;overflow:hidden;margin-bottom:12px}.fluid-tile-art>svg{width:36px;height:36px;color:var(--ui-accent)}.fluid-tile-title{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:13px}.fluid-tile-detail{display:block;color:var(--ui-text-secondary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:11px;margin:4px 0 10px}
-.fluid-track-list{border-top:1px solid var(--fm-line)}.fluid-track-row{display:grid;grid-template-columns:24px 40px minmax(0,1fr) 52px 40px auto;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--fm-line);min-width:0}.fluid-track-row:hover{background:var(--fm-soft)}.fluid-track-row[data-missing=true] .fluid-row-title{color:var(--ui-text-tertiary)}.fluid-track-number,.fluid-track-duration,.fluid-row-index{font-size:10px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.fluid-source-tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--ui-text-secondary)}.fluid-mini-cover{width:40px;height:40px;border-radius:5px;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center}.fluid-row-copy{min-width:0}.fluid-row-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;font-weight:550}.fluid-row-detail{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ui-text-secondary);margin-top:4px}.fluid-queue-row{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center}.fluid-queue-row[data-current=true]{background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent)}.fluid-track-link{border:0;background:transparent;color:inherit;text-align:left;min-width:0;cursor:pointer;padding:0}.fluid-track-link:disabled{cursor:not-allowed}.fluid-mini-cover img,.fluid-tile-art img,.fluid-now-cover img,.fluid-player-cover img,.fluid-library-cover img,.fluid-mini-art img{width:100%;height:100%;object-fit:cover}
+.fluid-track-list{border-top:1px solid var(--fm-line)}.fluid-track-row{display:grid;grid-template-columns:24px 40px minmax(0,1fr) 52px 40px auto;gap:12px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--fm-line);min-width:0}.fluid-track-row:hover{background:var(--fm-soft)}.fluid-track-row[data-missing=true] .fluid-row-title{color:var(--ui-text-tertiary)}.fluid-track-number,.fluid-track-duration,.fluid-row-index{font-size:10px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.fluid-source-tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--ui-text-secondary)}.fluid-mini-cover{width:40px;height:40px;border-radius:5px;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center}.fluid-row-copy{min-width:0}.fluid-row-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;font-weight:550}.fluid-row-detail{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:var(--ui-text-secondary);margin-top:4px}.fluid-queue-row{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center}.fluid-queue-row[data-current=true]{background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent)}.fluid-track-link{border:0;background:transparent;color:inherit;text-align:left;min-width:0;cursor:pointer;padding:0}.fluid-track-link:disabled{cursor:not-allowed}.fluid-mini-cover img,.fluid-tile-art img,.fluid-now-cover img,.fluid-library-cover img,.fluid-mini-art img{width:100%;height:100%;object-fit:cover}
 .fluid-playlist-layout{display:grid;grid-template-columns:210px minmax(0,1fr);gap:28px}.fluid-playlist-browser{border-right:1px solid var(--fm-line);padding-right:20px;min-width:0}.fluid-playlist-list{display:flex;flex-direction:column;gap:5px;max-height:55vh;overflow:auto}.fluid-playlist-button{display:flex;align-items:center;gap:12px;border:1px solid transparent;border-radius:6px;background:transparent;color:inherit;text-align:left;cursor:pointer;padding:12px;min-width:0}.fluid-playlist-button:hover{background:var(--fm-soft)}.fluid-playlist-button[data-active=true]{background:var(--fm-soft);border-color:var(--fm-line)}.fluid-playlist-button>svg{flex:none;color:var(--ui-accent)}.fluid-playlist-button strong{display:block;font-size:12px;overflow-wrap:anywhere}.fluid-playlist-button span span{display:block;font-size:10px;color:var(--ui-text-secondary)}.fluid-playlist-editor{min-width:0}.fluid-playlist-heading{display:flex;gap:20px;align-items:center;padding:8px 0 22px;border-bottom:1px solid var(--fm-line)}.fluid-playlist-heading .fluid-collection-icon{width:80px;height:80px}.fluid-library-title{font-size:clamp(24px,3cqw,38px);letter-spacing:-.045em;line-height:1.1;margin:0;overflow-wrap:anywhere}.fluid-library-facts{font-size:11px;color:var(--ui-text-secondary);margin:10px 0 0}.fluid-playlist-toolbar{display:flex;flex-direction:column;gap:12px;padding:20px 0}.fluid-editor-filters{display:flex;gap:12px;align-items:center;margin:6px 0 18px}.fluid-selection-bar{display:flex;gap:10px;align-items:center;background:var(--fm-soft);padding:10px;margin-bottom:12px}.fluid-library-hero{display:flex;gap:24px;align-items:center;border-bottom:1px solid var(--fm-line);padding:0 0 24px;margin-bottom:24px}.fluid-library-cover{width:140px;aspect-ratio:1;flex:none;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center;border-radius:8px}.fluid-device-list{display:grid;gap:8px}.fluid-device{display:flex;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--fm-line);min-width:0}.fluid-device-copy{flex:1;min-width:0}.fluid-device-copy strong{font-size:12px;display:block;overflow-wrap:anywhere}.fluid-device-copy span{font-size:11px;color:var(--ui-text-secondary)}.fluid-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.fluid-switch-row{display:flex;gap:12px;align-items:flex-start;margin:16px 0;cursor:pointer}.fluid-switch-row strong{display:block;font-size:12px}.fluid-switch-row small{display:block;font-size:11px;color:var(--ui-text-secondary);margin-top:5px}.fluid-switch-row input{margin-top:4px;accent-color:var(--ui-accent)}.fluid-boundaries dt{font-weight:650;margin:16px 0 4px}.fluid-boundaries dd{margin:0;color:var(--ui-text-secondary);font-size:12px}.fluid-settings-grid hr{border:0;border-top:1px solid var(--fm-line);margin:22px 0}
-.fluid-player{display:grid;grid-template-columns:minmax(160px,1fr) minmax(230px,1.3fr) minmax(160px,.8fr);gap:24px;align-items:center;padding:14px 24px;border-top:1px solid var(--fm-line);background:var(--ui-bg-secondary);min-width:0}.fluid-player-track{display:flex;gap:12px;align-items:center;min-width:0}.fluid-player-cover{width:48px;height:48px;border-radius:5px;overflow:hidden;background:var(--fm-soft);display:grid;place-items:center;flex:none}.fluid-player-title{display:block;font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.fluid-player-subtitle{display:block;font-size:10px;color:var(--ui-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:3px 0}.fluid-player-source{display:block;font-size:9px;color:var(--ui-accent)}.fluid-player-controls{display:flex;gap:12px;align-items:center;justify-content:center}.fluid-primary-action{width:38px!important;height:38px!important;min-width:38px!important;border-radius:50%!important;padding:0!important}.fluid-player-center{min-width:0}.fluid-player-progress{display:grid;grid-template-columns:36px minmax(0,1fr) 36px;gap:10px;align-items:center;font:10px/1.5 var(--font-mono,monospace);color:var(--ui-text-secondary);margin-top:8px}.fluid-player-progress>span:last-child{text-align:right}.fluid-range{height:16px;width:100%;min-width:0;accent-color:var(--ui-accent);cursor:pointer;margin:0}.fluid-player-hint{font-size:10px;color:var(--ui-text-tertiary);text-align:center;margin:8px 0 0}.fluid-player-side{display:flex;flex-direction:column;gap:6px;align-items:flex-end;min-width:0}.fluid-player-device{font-size:10px;color:var(--ui-text-secondary);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fluid-volume{display:flex;align-items:center;gap:6px;width:170px;max-width:100%}.fluid-volume-value{font:10px var(--font-mono,monospace);color:var(--ui-text-secondary);min-width:30px;text-align:right}.fluid-volume-compact{width:118px}.fluid-volume-compact .fluid-range{width:60px;flex:none}.fluid-volume-compact .fluid-volume-value{font-size:9px;min-width:25px}.fluid-statusbar{display:flex;height:100%;align-items:center;gap:3px;min-width:0}.fluid-statusbar-title{font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fluid-status-dot{margin-right:6px}.fluid-statusbar button{flex:none}
+.fluid-player-controls{display:flex;gap:12px;align-items:center;justify-content:center}.fluid-player-progress{display:grid;grid-template-columns:36px minmax(0,1fr) 36px;gap:10px;align-items:center;font:10px/1.5 var(--font-mono,monospace);color:var(--ui-text-secondary);margin-top:8px}.fluid-player-progress>span:last-child{text-align:right}.fluid-range{height:16px;width:100%;min-width:0;accent-color:var(--ui-accent);cursor:pointer;margin:0}.fluid-player-hint{font-size:10px;color:var(--ui-text-tertiary);text-align:center;margin:8px 0 0}.fluid-volume{display:flex;align-items:center;gap:6px;width:170px;max-width:100%}.fluid-volume-value{font:10px var(--font-mono,monospace);color:var(--ui-text-secondary);min-width:30px;text-align:right}.fluid-volume-compact{width:150px}.fluid-volume-compact .fluid-range{width:auto;flex:1;min-width:70px}.fluid-volume-compact .fluid-volume-value{font-size:9px;min-width:25px}
+.fluid-bottom-bar{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;align-items:center;min-height:68px;padding:8px 12px;border-top:1px solid var(--fm-line);background:var(--fm-panel);min-width:0}
+.fluid-bottom-item{display:flex;gap:10px;align-items:center;min-width:0}
+.fluid-bottom-center{display:flex;flex-direction:column;gap:2px;align-items:center;min-width:0;width:min(420px,42cqw)}
+.fluid-bottom-center .fluid-player-progress{margin-top:0;width:100%}
+.fluid-bottom-center .fluid-live-line{margin:0;font-size:10px;color:var(--ui-text-tertiary)}
+.fluid-bottom-right{display:flex;gap:10px;align-items:center;justify-content:flex-end;min-width:0}
+@container fluid (max-width:720px){.fluid-bottom-bar{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"item right" "center center";min-height:96px}.fluid-bottom-item{grid-area:item}.fluid-bottom-center{grid-area:center;width:100%}.fluid-bottom-right{grid-area:right}}
+@container fluid (max-width:460px){.fluid-bottom-bar{grid-template-columns:1fr;grid-template-areas:"item" "center" "right";min-height:112px}.fluid-bottom-right{justify-content:flex-start}.fluid-bottom-right .fluid-volume{width:100%}}
 .fluid-dialog{position:fixed;inset:0;margin:auto;height:fit-content;width:min(560px,calc(100vw - 32px));max-height:85vh;overflow:auto;border:1px solid var(--fm-line);border-radius:12px;background:var(--ui-bg-elevated,var(--ui-bg-secondary));background:rgb(from var(--ui-bg-elevated,var(--ui-bg-secondary)) r g b / 1);color:var(--ui-text-primary);padding:24px;box-shadow:0 24px 90px color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.fluid-dialog::backdrop{background:color-mix(in srgb,var(--ui-bg-primary) 65%,transparent);backdrop-filter:blur(4px)}.fluid-dialog-actions{display:flex;justify-content:flex-end;gap:10px;align-items:center;margin-top:24px}.fluid-segmented{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--fm-line);padding-bottom:10px}.fluid-segmented button{border:0;border-radius:5px;padding:8px 12px;background:transparent;color:var(--ui-text-secondary);cursor:pointer}.fluid-segmented button[aria-pressed=true]{background:var(--fm-soft);color:var(--ui-text-primary)}.fluid-picker-list{max-height:340px;overflow:auto}.fluid-picker-row{display:grid;grid-template-columns:20px 40px minmax(0,1fr);gap:12px;align-items:center;padding:10px;border-bottom:1px solid var(--fm-line);cursor:pointer}.fluid-picker-row:hover{background:var(--fm-soft)}.fluid-log-list{display:grid;gap:8px;margin-top:18px}.fluid-log-row{display:grid;grid-template-columns:75px 50px minmax(80px,.6fr) minmax(0,1fr);gap:12px;padding:14px;border:1px solid var(--fm-line);border-radius:6px;font:10px/1.6 var(--font-mono,monospace)}.fluid-log-row[data-level=error]{border-left:3px solid var(--ui-accent)}.fluid-log-row time,.fluid-log-level{color:var(--ui-text-tertiary)}.fluid-log-row pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ui-text-secondary)}
-.fluid-visualizer{position:relative;height:130px;width:100%;min-width:0;background:var(--fm-soft);border-radius:6px;overflow:hidden}.fluid-visualizer canvas{display:block;width:100%;height:100%}.fluid-viz-hint{position:absolute;inset:0;display:grid;place-items:center;font-size:11px;text-align:center;color:var(--ui-text-secondary);padding:12px;pointer-events:none}.fluid-visualizer-compact{width:74px;height:22px;background:transparent;border-radius:0;flex:none}.fluid-visualizer-compact .fluid-viz-hint{font-size:8px;padding:0}.fluid-viz-select{background:var(--ui-bg-secondary);border:1px solid var(--fm-line);border-radius:4px;color:var(--ui-text-secondary);font-size:10px;padding:4px;min-width:0}.fluid-viz-select-compact{max-width:76px;font-size:9px;padding:1px}.fluid-mini-player{container:mini / inline-size;height:100%;overflow:auto;padding:18px;min-width:0}.fluid-mini-art{width:min(100%,200px);aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border-radius:8px;overflow:hidden;margin:0 auto 18px}.fluid-mini-art>svg{width:48px;height:48px;color:var(--ui-accent)}.fluid-mini-title{font-size:20px;letter-spacing:-.035em;line-height:1.2;text-align:center;margin:0;overflow-wrap:anywhere}.fluid-mini-subtitle{font-size:12px;text-align:center;color:var(--ui-text-secondary);margin:8px 0 18px;overflow-wrap:anywhere}.fluid-mini-player>.fluid-volume{margin:18px auto}.fluid-mini-visual-controls{display:flex;gap:8px;align-items:center;margin:20px 0 12px}.fluid-mini-visual-controls>.fluid-select{padding:7px;flex:1}.fluid-mini-player .fluid-notice{margin-top:14px}.fluid-viz-settings{margin-top:18px}
+.fluid-mini-player{container:mini / inline-size;height:100%;overflow:auto;padding:18px;min-width:0}.fluid-mini-art{width:min(100%,200px);aspect-ratio:1;display:grid;place-items:center;background:var(--fm-soft);border-radius:8px;overflow:hidden;margin:0 auto 18px}.fluid-mini-art>svg{width:48px;height:48px;color:var(--ui-accent)}.fluid-mini-title{font-size:20px;letter-spacing:-.035em;line-height:1.2;text-align:center;margin:0;overflow-wrap:anywhere}.fluid-mini-subtitle{font-size:12px;text-align:center;color:var(--ui-text-secondary);margin:8px 0 18px;overflow-wrap:anywhere}.fluid-mini-player>.fluid-volume{margin:18px auto}.fluid-mini-player .fluid-notice{margin-top:14px}
 .fluid-save-source{display:flex;align-items:center;gap:12px;margin:18px 0}.fluid-save-destinations{border:0;min-width:0;margin:20px 0}.fluid-save-choice{width:100%;border:1px solid var(--fm-line);margin:6px 0}.fluid-save-choice[aria-pressed=true]{border-color:var(--ui-accent);background:var(--fm-soft)}.fluid-save-destinations legend{font-size:12px;font-weight:650;margin-bottom:8px}.fluid-save-destinations .fluid-playlist-list{max-height:220px}.fluid-queue-context{padding:20px 12px 24px 24px;border-left:2px solid var(--ui-accent);background:var(--fm-panel);margin:0 0 18px 14px}.fluid-queue-row>.fluid-row-actions{flex-wrap:wrap;justify-content:flex-end}
-@container fluid (max-width:1080px){.fluid-playlist-layout{grid-template-columns:1fr;gap:20px}.fluid-playlist-browser{border-right:0;border-bottom:1px solid var(--fm-line);padding:0 0 16px}.fluid-playlist-browser>.fluid-input{max-width:320px}.fluid-playlist-browser .fluid-playlist-list{flex-direction:row;overflow:auto;max-height:120px}.fluid-playlist-browser .fluid-playlist-button{flex:0 0 170px}.fluid-playlist-toolbar{flex-direction:row;justify-content:space-between;flex-wrap:wrap}.fluid-settings-grid{grid-template-columns:1fr}.fluid-page-head{flex-wrap:wrap}.fluid-player{gap:16px;padding:12px 16px}}
-@container fluid (max-width:800px){.fluid-shell{grid-template-columns:144px minmax(0,1fr)}.fluid-sidebar{padding:20px 8px}.fluid-brand{padding:0 6px}.fluid-brand small{display:none}.fluid-content{padding:24px 18px}.fluid-now-card{grid-template-columns:110px minmax(0,1fr);gap:20px;padding:20px 0}.fluid-now-cover{width:110px}.fluid-source-links{grid-template-columns:1fr}.fluid-source-links>button{padding:14px 8px;border-right:0;border-bottom:1px solid var(--fm-line)}.fluid-track-row{grid-template-columns:24px 36px minmax(0,1fr) auto;gap:8px}.fluid-track-row>.fluid-source-tag,.fluid-track-row>.fluid-track-duration{display:none}.fluid-player{grid-template-columns:minmax(0,1fr) minmax(220px,1fr)}.fluid-player-side{grid-column:1/-1;flex-direction:row;justify-content:flex-end}.fluid-player-device{margin-right:auto}.fluid-editor-filters{flex-wrap:wrap}.fluid-log-row{grid-template-columns:70px 50px minmax(0,1fr)}.fluid-log-row pre{grid-column:1/-1}}
-@container fluid (max-width:580px){.fluid-shell{display:flex;flex-direction:column}.fluid-sidebar{flex:none;display:block;padding:8px;border-right:0;border-bottom:1px solid var(--fm-line);overflow:visible}.fluid-brand,.fluid-nav-label,.fluid-sidebar-foot{display:none}.fluid-nav-group{flex-direction:row;overflow:auto;gap:3px}.fluid-nav-group+.fluid-nav-group{margin-top:3px}.fluid-nav-button{flex:none;padding:7px 9px;font-size:11px;min-height:30px;gap:6px}.fluid-content{padding:22px 14px;flex:1;min-height:0}.fluid-now-card{grid-template-columns:1fr}.fluid-now-cover{display:none}.fluid-page-title{font-size:28px}.fluid-page-subtitle{font-size:12px}.fluid-track-row{grid-template-columns:20px 32px minmax(0,1fr);gap:8px}.fluid-track-row>.fluid-row-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.fluid-mini-cover{width:32px;height:32px}.fluid-track-row{padding:12px 2px}.fluid-row-title{font-size:12px}.fluid-row-detail{font-size:10px}.fluid-playlist-heading{gap:14px}.fluid-playlist-heading .fluid-collection-icon{width:48px;height:48px}.fluid-library-title{font-size:25px}.fluid-player{grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:10px 12px}.fluid-player-track{grid-column:1}.fluid-player-center{grid-column:1/-1;grid-row:2}.fluid-player-side{grid-column:2;grid-row:1}.fluid-player-side .fluid-player-device{display:none}.fluid-player .fluid-volume{width:118px}.fluid-player-cover{width:36px;height:36px}.fluid-player-source{font-size:8px}.fluid-player-title{font-size:11px}.fluid-player-subtitle{display:none}.fluid-player-progress{margin-top:5px}.fluid-library-cover{width:90px}.fluid-library-hero{gap:14px}.fluid-section-head{flex-wrap:wrap}.fluid-filter{max-width:none}.fluid-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.fluid-queue-row{grid-template-columns:32px minmax(0,1fr)}.fluid-queue-row>.fluid-row-actions{grid-column:2}.fluid-panel-pad{padding:16px}}
-.fluid-mini-summary{display:flex;gap:12px;align-items:center;margin-bottom:18px}.fluid-mini-summary .fluid-mini-art{width:48px;height:48px;margin:0;flex:none}.fluid-mini-summary .fluid-mini-art>svg{width:24px;height:24px}.fluid-mini-summary .fluid-mini-title{font-size:16px;text-align:left;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.fluid-mini-summary .fluid-mini-subtitle{font-size:11px;text-align:left;margin:6px 0 0}.fluid-mini-player>.fluid-section-head{margin-bottom:12px}.fluid-mini-player>.fluid-volume{margin:12px auto}.fluid-mini-visual-controls{margin-top:12px}.fluid-mini-player>.fluid-visualizer{height:110px}
-@container mini (max-width:210px){.fluid-mini-visual-controls{flex-wrap:wrap}.fluid-mini-art{width:100px}.fluid-mini-title{font-size:16px}}
-@media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-statusbar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@container fluid (max-width:1080px){.fluid-playlist-layout{grid-template-columns:1fr;gap:20px}.fluid-playlist-browser{border-right:0;border-bottom:1px solid var(--fm-line);padding:0 0 16px}.fluid-playlist-browser>.fluid-input{max-width:320px}.fluid-playlist-browser .fluid-playlist-list{flex-direction:row;overflow:auto;max-height:120px}.fluid-playlist-browser .fluid-playlist-button{flex:0 0 170px}.fluid-playlist-toolbar{flex-direction:row;justify-content:space-between;flex-wrap:wrap}.fluid-settings-grid{grid-template-columns:1fr}.fluid-page-head{flex-wrap:wrap}}
+@container fluid (max-width:800px){.fluid-content{padding:24px 18px}.fluid-track-row{grid-template-columns:24px 36px minmax(0,1fr) auto;gap:8px}.fluid-track-row>.fluid-source-tag,.fluid-track-row>.fluid-track-duration{display:none}.fluid-editor-filters{flex-wrap:wrap}.fluid-log-row{grid-template-columns:70px 50px minmax(0,1fr)}.fluid-log-row pre{grid-column:1/-1}}
+@container fluid (max-width:580px){.fluid-brand,.fluid-nav-label,.fluid-nav-button{flex:none;padding:7px 9px;font-size:11px;min-height:30px;gap:6px}.fluid-content{padding:22px 14px;flex:1;min-height:0}.fluid-page-title{font-size:28px}.fluid-page-subtitle{font-size:12px}.fluid-track-row{grid-template-columns:20px 32px minmax(0,1fr);gap:8px}.fluid-track-row>.fluid-row-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.fluid-mini-cover{width:32px;height:32px}.fluid-track-row{padding:12px 2px}.fluid-row-title{font-size:12px}.fluid-row-detail{font-size:10px}.fluid-playlist-heading{gap:14px}.fluid-playlist-heading .fluid-collection-icon{width:48px;height:48px}.fluid-library-title{font-size:25px}.fluid-player-progress{margin-top:5px}.fluid-library-cover{width:90px}.fluid-library-hero{gap:14px}.fluid-section-head{flex-wrap:wrap}.fluid-filter{max-width:none}.fluid-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.fluid-queue-row{grid-template-columns:32px minmax(0,1fr)}.fluid-queue-row>.fluid-row-actions{grid-column:2}.fluid-panel-pad{padding:16px}}
+.fluid-mini-summary{display:flex;gap:12px;align-items:center;margin-bottom:18px}.fluid-mini-summary .fluid-mini-art{width:48px;height:48px;margin:0;flex:none}.fluid-mini-summary .fluid-mini-art>svg{width:24px;height:24px}.fluid-mini-summary .fluid-mini-title{font-size:16px;text-align:left;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.fluid-mini-summary .fluid-mini-subtitle{font-size:11px;text-align:left;margin:6px 0 0}.fluid-mini-player>.fluid-section-head{margin-bottom:12px}.fluid-mini-player>.fluid-volume{margin:12px auto}
+@container mini (max-width:210px){.fluid-mini-art{width:100px}.fluid-mini-title{font-size:16px}}
+@container mini (max-width:520px){.fluid-youtube-player{grid-template-columns:1fr;overflow:auto}.fluid-youtube-frame{height:auto;aspect-ratio:16/9}.fluid-youtube-side{overflow:visible}.fluid-mini-player:not(.fluid-youtube-player){display:flex;padding:12px;overflow:auto}.fluid-mini-player:not(.fluid-youtube-player)>.fluid-mini-summary,.fluid-mini-player:not(.fluid-youtube-player)>.fluid-player-controls,.fluid-mini-player:not(.fluid-youtube-player)>.fluid-player-progress,.fluid-mini-player:not(.fluid-youtube-player)>.fluid-player-hint,.fluid-mini-player:not(.fluid-youtube-player)>.fluid-volume,.fluid-mini-player:not(.fluid-youtube-player)>.fluid-mini-links{margin:0;justify-self:auto}}
+.fluid-root,.fluid-mini-player,.fluid-title-popover{--fm-night:color-mix(in srgb,var(--ui-bg-primary) 92%, transparent);--fm-graphite:var(--ui-bg-secondary);--fm-ink:var(--ui-text-primary);--fm-coral:var(--ui-accent);--fm-violet:var(--ui-accent);--fm-line:var(--ui-stroke-secondary)}
+.fluid-app{display:grid;grid-template-rows:auto minmax(0,1fr);background:transparent;color:var(--fm-ink)}
+.fluid-topbar{height:42px;display:flex;align-items:center;gap:18px;padding:0 clamp(12px,2cqw,24px);border-bottom:1px solid var(--fm-line);background:var(--fm-graphite)}
+.fluid-wordmark{display:flex;align-items:center;gap:9px;border:0;background:transparent;color:var(--fm-ink);font:700 14px/1 inherit;letter-spacing:-.02em;cursor:pointer}.fluid-wordmark svg{color:var(--fm-coral)}
+.fluid-primary-nav{display:flex;gap:3px;min-width:0}.fluid-primary-nav .fluid-nav-button{min-height:30px;padding:6px 12px;border-radius:4px;font-size:12px}.fluid-primary-nav .fluid-nav-button[data-active=true]{box-shadow:inset 0 -2px var(--fm-coral);background:transparent;color:var(--fm-ink)}
+.fluid-content{padding:14px clamp(12px,2cqw,26px) 28px}.fluid-content-inner{max-width:1360px}.fluid-page-head{margin:16px 0 12px}.fluid-page-title{font-size:clamp(18px,1.8cqw,23px)}
+.fluid-now-band{display:grid;grid-template-columns:160px minmax(240px,1fr) minmax(220px,.65fr);gap:clamp(16px,2cqw,28px);align-items:center;min-height:154px;padding:14px 0 18px;border-bottom:1px solid var(--fm-line)}
+.fluid-orbit{position:relative;width:160px;min-width:160px;aspect-ratio:1;border-radius:50%;padding:9px;background:var(--fm-graphite);border:1px solid var(--fm-line);box-shadow:5px 8px 22px color-mix(in srgb,var(--ui-text-primary) 10%,transparent)}.fluid-orbit::after{content:'';position:absolute;inset:46%;border-radius:50%;background:var(--fm-night);border:1px solid var(--fm-line)}.fluid-orbit-art{width:100%;height:100%;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:var(--fm-night)}.fluid-orbit-art img{width:100%;height:100%;object-fit:cover}.fluid-orbit-art svg{width:54px;height:54px;color:var(--fm-violet)}.fluid-orbit[data-playing=true]{animation:fluid-spin 22s linear infinite}@keyframes fluid-spin{to{transform:rotate(360deg)}}
+.fluid-source-chip{display:inline-flex;width:max-content;padding:3px 7px;border:1px solid var(--fm-line);border-radius:3px;color:var(--ui-text-secondary);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.fluid-source-chip[data-source=radio]{color:var(--fm-coral)}.fluid-source-chip[data-source=spotify],.fluid-source-chip[data-source=youtube]{color:var(--fm-violet)}
+.fluid-now-title{font-size:clamp(21px,2.4cqw,31px);line-height:1.08;letter-spacing:-.03em;margin:6px 0 4px}.fluid-now-subtitle{margin:0 0 10px;color:var(--ui-text-secondary);font-size:12px}.fluid-now-main .fluid-player-controls{justify-content:flex-start}.fluid-live-line{color:var(--fm-coral);font-size:11px;letter-spacing:.1em;text-transform:uppercase}.fluid-device-line{color:var(--ui-text-secondary);font-size:11px}
+.fluid-up-next{align-self:stretch;padding:8px 12px;border-left:1px solid var(--fm-line);min-width:0}.fluid-next-row{width:100%;display:flex;align-items:center;gap:8px;padding:6px 0;border:0;border-bottom:1px solid var(--fm-line);background:transparent;color:inherit;text-align:left;cursor:pointer;min-width:0}.fluid-next-row>span{min-width:0}.fluid-next-row strong,.fluid-next-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fluid-next-row small{color:var(--ui-text-secondary);font-size:10px;margin-top:3px}
+.fluid-secondary-tabs{display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--fm-line);margin-bottom:14px}
+.fluid-compact-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0}.fluid-panel-pad{padding:14px}.fluid-section-head{margin-bottom:10px}.fluid-searchbar{margin:10px 0}.fluid-history-time{font-size:9px;color:var(--ui-text-tertiary);white-space:nowrap}.fluid-youtube-results{margin-top:12px}.fluid-secondary-tabs button{flex:none;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-secondary);padding:9px 12px;cursor:pointer}.fluid-secondary-tabs button[aria-selected=true]{color:var(--fm-ink);border-bottom-color:var(--fm-violet)}
+.fluid-titlebar{position:relative;display:flex;align-items:center;gap:2px;width:210px;max-width:210px;height:22px;overflow:visible}.fluid-titlebar-summary{display:flex;align-items:center;gap:4px;flex:1 1 auto;min-width:0;max-width:176px;height:20px;padding:2px 5px!important;overflow:hidden}.fluid-titlebar>button:not(.fluid-titlebar-summary){flex:none}.fluid-titlebar-source{display:none}.fluid-titlebar-title{display:block;min-width:0;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:1}.fluid-title-popover{position:absolute;z-index:1000;right:0;top:calc(100% + 8px);width:min(390px,calc(100vw - 24px));max-height:min(680px,calc(100vh - 72px));overflow:auto;padding:18px;border:1px solid var(--fm-line);border-radius:8px;background:var(--ui-bg-elevated,var(--ui-bg-secondary));color:var(--fm-ink);box-shadow:8px 16px 46px color-mix(in srgb,var(--ui-text-primary) 16%,transparent)}.fluid-popover-now{display:grid;grid-template-columns:76px minmax(0,1fr);gap:14px;align-items:center}.fluid-orbit-small{width:76px;min-width:76px;padding:7px}.fluid-popover-title{display:block;font-size:17px;line-height:1.2;margin:7px 0 2px}.fluid-title-popover .fluid-player-controls{justify-content:flex-start;margin:16px 0}.fluid-title-popover .fluid-volume{margin:12px 0}.fluid-popover-upnext{margin-top:14px;border-top:1px solid var(--fm-line)}.fluid-popover-upnext h3{font-size:12px}.fluid-source-shortcuts,.fluid-mini-links{display:flex;gap:7px;flex-wrap:wrap;margin-top:16px}.fluid-youtube-title{display:block;margin:8px 0 16px}.fluid-youtube-compact{padding:0}.fluid-settings-grid{align-items:start}
+.fluid-mini-player{background:transparent;color:var(--fm-ink)}.fluid-mini-player:not(.fluid-youtube-player){display:grid;grid-template-rows:minmax(0,1fr) 40px;height:100%;padding:6px 8px;overflow:hidden}.fluid-mini-body{min-height:0;overflow:hidden}.fluid-mini-body>.fluid-mini-summary{margin:0}.fluid-mini-body>.fluid-player-progress{margin:7px 0 0}.fluid-mini-body>.fluid-player-hint{margin:6px 0 0}.fluid-mini-body>.fluid-notice{margin:6px 0 0;padding:7px 8px;font-size:10px}.fluid-mini-controls{display:grid;grid-template-columns:auto minmax(150px,1fr) auto;align-items:center;gap:9px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-mini-controls .fluid-player-controls{justify-self:start;gap:5px}.fluid-mini-controls>.fluid-volume,.fluid-mini-controls>.fluid-mini-volume{width:auto;min-width:150px;margin:0}.fluid-mini-controls .fluid-volume-compact .fluid-range,.fluid-mini-controls .fluid-mini-volume .fluid-range{width:auto;flex:1;min-width:70px}.fluid-mini-controls>.fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:4px;margin:0}.fluid-mini-controls>.fluid-mini-links button{padding-inline:7px}.fluid-mini-art{border-radius:50%}.fluid-mini-links{justify-content:center}.fluid-youtube-player{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 40px;gap:6px;height:100%;padding:6px 8px;overflow:hidden}.fluid-youtube-frame-wrap{min-width:0;min-height:0;height:100%;overflow:hidden;display:grid;place-items:stretch}.fluid-youtube-frame{display:block;width:100%;height:100%;min-height:0;border:1px solid var(--fm-line);border-radius:5px;background:var(--ui-bg-secondary)}.fluid-youtube-frame-loading{display:grid;place-content:center;text-align:center;color:var(--ui-text-secondary);font-size:12px}.fluid-youtube-side{min-width:0;min-height:0;overflow:hidden;padding:3px 2px}.fluid-youtube-summary{margin:0}.fluid-youtube-summary .fluid-mini-title,.fluid-youtube-summary .fluid-mini-subtitle{text-align:left}.fluid-youtube-summary .fluid-mini-title{font-size:14px;line-height:1.18;margin-top:5px}.fluid-youtube-summary .fluid-mini-subtitle{font-size:10px;line-height:1.35;margin:5px 0 0}.fluid-youtube-side .fluid-notice{margin:8px 0 0;padding:7px 8px;font-size:10px}.fluid-youtube-controls{grid-column:1/-1;display:grid;grid-template-columns:1fr minmax(110px,.7fr) 1fr;align-items:center;gap:10px;min-width:0;border-top:1px solid var(--fm-line);padding-top:5px}.fluid-youtube-controls .fluid-player-controls{justify-self:start;gap:6px}.fluid-mini-volume{display:flex;align-items:center;gap:7px;min-width:0}.fluid-youtube-controls .fluid-mini-links{justify-self:end;justify-content:flex-end;flex-wrap:nowrap;gap:5px;margin:0}
+@container mini (max-width:360px){.fluid-mini-controls{grid-template-columns:auto 1fr;grid-template-areas:"controls links" "volume volume"}.fluid-mini-controls>.fluid-player-controls{grid-area:controls}.fluid-mini-controls>.fluid-volume{grid-area:volume;width:100%;min-width:0}.fluid-mini-controls>.fluid-mini-links{grid-area:links}.fluid-mini-controls .fluid-mini-links button{padding-inline:7px}}
+@container mini (max-width:280px){.fluid-mini-controls .fluid-volume-value{display:none}.fluid-mini-controls>.fluid-mini-links button{padding-inline:6px}}
+@container fluid (max-width:980px){.fluid-now-band{grid-template-columns:96px minmax(0,1fr)}.fluid-up-next{grid-column:1/-1;border-left:0;border-top:1px solid var(--fm-line);padding:8px 0}.fluid-orbit{width:96px;min-width:96px}}
+@container fluid (max-width:720px){.fluid-topbar{gap:10px;padding:0 8px}.fluid-wordmark span{display:none}.fluid-primary-nav{flex:1;justify-content:space-between}.fluid-primary-nav .fluid-nav-button{padding:5px 7px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);gap:12px;min-height:0}.fluid-orbit{width:72px;min-width:72px;padding:6px}.fluid-now-title{font-size:22px}.fluid-content{padding:12px 10px 24px}.fluid-page-head{margin-top:12px}.fluid-track-row{grid-template-columns:20px 36px minmax(0,1fr);}.fluid-track-row>.fluid-row-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.fluid-track-row>.fluid-source-tag,.fluid-track-row>.fluid-track-duration{display:none}}
+@container fluid (max-width:460px){.fluid-topbar{height:auto;min-height:42px}.fluid-primary-nav .fluid-nav-button{font-size:11px}.fluid-now-band{grid-template-columns:72px minmax(0,1fr);padding-top:10px}.fluid-orbit{width:72px;min-width:72px}.fluid-up-next{grid-column:1/-1}.fluid-now-main .fluid-volume{width:100%}.fluid-page-title{font-size:20px}.fluid-log-row{grid-template-columns:1fr}.fluid-log-row pre{grid-column:1}.fluid-titlebar-source{display:none}}
+.fluid-mini-player{container:mini / size}
+.fluid-mini-body{overflow:auto}
+.fluid-youtube-player{grid-template-rows:minmax(200px,1fr) auto;overflow:auto}
+.fluid-youtube-frame-wrap{min-height:200px}
+.fluid-youtube-frame{min-width:200px;min-height:200px}
+.fluid-mini-expand-note{display:none;margin:0;padding:6px 8px;border-left:2px solid var(--ui-accent);background:var(--fm-soft);color:var(--ui-text-secondary);font-size:10px;line-height:1.5}
+@container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
+@container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
+@container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
+.fluid-queue-origin{display:block;font-size:9px;color:var(--ui-text-tertiary);letter-spacing:.04em;margin-top:2px;text-transform:uppercase}
+.fluid-queue-row[data-selectable=true]{grid-template-columns:20px 40px minmax(0,1fr) auto}
+.fluid-queue-row input[type=checkbox]{accent-color:var(--ui-accent);width:16px;height:16px;margin:0}
+.fluid-session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center;min-width:0}
+@container fluid (max-width:580px){.fluid-queue-row[data-selectable=true]{grid-template-columns:18px 32px minmax(0,1fr)}.fluid-queue-row[data-selectable=true]>.fluid-row-actions{grid-column:3}.fluid-session-row{grid-template-columns:1fr}.fluid-session-row>.fluid-row-actions{justify-content:flex-start;flex-wrap:wrap}}
+.fluid-player-extras{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0 2px;border-top:1px solid var(--fm-line);font-size:11px;min-width:0}
+.fluid-resume-offer{display:flex;flex-wrap:wrap;align-items:center;gap:8px;color:var(--ui-text-secondary);min-width:0}
+.fluid-sleep-chip{display:inline-flex;align-items:center;gap:6px;color:var(--ui-text-secondary)}
+.fluid-sleep-chip[data-armed=true]{color:var(--ui-accent)}
+.fluid-bookmark-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--fm-line);min-width:0}
+.fluid-history-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:end}
+.fluid-filter-field{display:flex;flex-direction:column;gap:3px;font-size:10px;color:var(--ui-text-tertiary);min-width:0}
+.fluid-filter-field .fluid-input{min-width:0}
+.fluid-history-pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fluid-health-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border-bottom:1px solid var(--fm-line);align-items:center;min-width:0}
+.fluid-health-row[data-state=ready] .fluid-row-title{color:var(--ui-text-primary)}
+.fluid-health-row[data-state=degraded] .fluid-row-title{color:var(--ui-accent)}
+.fluid-health-row[data-state=unavailable] .fluid-row-title{color:var(--ui-text-secondary)}
+@container fluid (max-width:580px){.fluid-health-row{grid-template-columns:1fr}.fluid-health-row>.fluid-row-actions{justify-content:flex-start;flex-wrap:wrap}}
+@container fluid (max-width:580px){.fluid-player-extras{padding:4px 0 2px}.fluid-history-filters{flex-direction:column;align-items:stretch}.fluid-bookmark-row{grid-template-columns:auto minmax(0,1fr)}.fluid-bookmark-row>.fluid-row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}}
+@media(prefers-reduced-motion:reduce){.fluid-root *,.fluid-mini-player *,.fluid-titlebar *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 `
 
 function Icon({ kind }) {
@@ -294,7 +688,7 @@ function Icon({ kind }) {
     playlist: 'M4 6h10M4 11h10M4 16h7M18 5v11M15.5 19a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5',
     search: 'M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM16 16l5 5', queue: 'M4 6h12M4 12h12M4 18h8M19 16v6M16 19h6', volume: 'M5 10v4h4l5 4V6l-5 4zM18 9c1 2 1 4 0 6',
     shuffle: 'M4 7h3c4 0 5 10 9 10h4M17 14l3 3-3 3M4 17h3c1.5 0 2.5-1.4 3.4-3M15 7h5M17 4l3 3-3 3', repeat: 'M4 8l3-3 3 3M7 5h9a4 4 0 0 1 4 4v2M20 16l-3 3-3-3M17 19H8a4 4 0 0 1-4-4v-2',
-    trash: 'M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14', logs: 'M5 5h14M5 10h14M5 15h9M5 20h12', settings: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19 13.5l2 1.5-2 3.5-2.4-1a8 8 0 0 1-2.1 1.2L14.2 21h-4.4l-.3-2.3a8 8 0 0 1-2.1-1.2l-2.4 1L3 15l2-1.5a8 8 0 0 1 0-3L3 9l2-3.5 2.4 1a8 8 0 0 1 2.1-1.2L9.8 3h4.4l.3 2.3a8 8 0 0 1 2.1 1.2l2.4-1L21 9l-2 1.5a8 8 0 0 1 0 3z'
+    trash: 'M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14', logs: 'M5 5h14M5 10h14M5 15h9M5 20h12', clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18M12 7v5l3 2', bookmark: 'M7 4h10v16l-5-4-5 4z', edit: 'M4 20l4-1L20 7l-3-3L5 16l-1 4zM14 6l3 3', settings: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19 13.5l2 1.5-2 3.5-2.4-1a8 8 0 0 1-2.1 1.2L14.2 21h-4.4l-.3-2.3a8 8 0 0 1-2.1-1.2l-2.4 1L3 15l2-1.5a8 8 0 0 1 0-3L3 9l2-3.5 2.4 1a8 8 0 0 1 2.1-1.2L9.8 3h4.4l.3 2.3a8 8 0 0 1 2.1 1.2l2.4-1L21 9l-2 1.5a8 8 0 0 1 0 3z'
   }
   return jsx('svg', { viewBox: '0 0 24 24', width: 15, height: 15, fill: kind === 'play' || kind === 'next' || kind === 'previous' ? 'currentColor' : 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, children: jsx('path', { d: paths[kind] || paths.music }) })
 }
@@ -304,20 +698,52 @@ function Action({ label, kind, onClick, disabled = false, compact = false, prima
 }
 
 /* CONTROLLER_START */
-function createController(ctx) {
+function createController(ctx, hostCapabilities = {}) {
+  // Owned first-party watch capability is negotiated at registration from the
+  // PUBLIC SDK namespace; absent capability is an honest unavailable state,
+  // never a hidden reduced-scope fallback or an external app.
+  const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
+  let youtubeEngine = 'embed'
+  let watchAttempts = 0
+  // The active YouTube surface registers its real command channel here; the
+  // shared transport drives it instead of provider-specific copies.
+  let youtubeCommandSink = null
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
-  const storedPlaylists = normalizePlaylistState(ctx.storage.get('playlistState', { version: 2, playlists: [] }))
+  const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
+  const storedPlaylists = normalizePlaylistState(rawStoredPlaylistState)
+  const rawPlaylistRoot = rawStoredPlaylistState && typeof rawStoredPlaylistState === 'object' ? rawStoredPlaylistState : { version: 2, playlists: [] }
+  const rawPlaylistEntries = Array.isArray(rawPlaylistRoot.playlists) ? rawPlaylistRoot.playlists : []
+  const rawLegacyPlaylists = new Map()
+  storedPlaylists.playlists.forEach((entry, at) => {
+    if (entry.legacy && rawPlaylistEntries[at] && typeof rawPlaylistEntries[at] === 'object') rawLegacyPlaylists.set(entry.id, rawPlaylistEntries[at])
+  })
   const queue = atom(storedSelection.items)
   const index = atom(storedSelection.index)
   const favorites = atom(normalizeQueue(ctx.storage.get('favorites', [])))
   const volume = atom(clampVolume(ctx.storage.get('volume', .5)))
-  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'home')))
+  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'browse')))
   const selectedPlaylist = atom(safeText(ctx.storage.get('selectedPlaylist', '')))
   const undoState = atom(null)
+  const queueUndo = atom(null)
+  const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
+  const resumeOffer = atom(null)
+  const bookmarks = atom([])
+  const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
+  const historyRetention = atom(0)
+  const historyFilters = atom({ query: '', source: '', since: '', until: '' })
+  const historyOffset = atom(0)
+  const sourceHealth = atom({})
+  const retryState = atom({})
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
+  let sleepInterval = null
+  let sleepDeadline = 0
+  let sleepBound = null
+  let sleepEndedFor = null
+  let lastResumeSaveAt = 0
+  const retryBudgets = new Map()
   let spotifyStartedUri = ''
   let localRefreshVersion = 0
   const status = atom('idle')
@@ -326,27 +752,23 @@ function createController(ctx) {
   const spotify = atom({ connected: false, title: '', subtitle: '', playing: false })
   const spotifyAuth = atom({ state: 'loading', authenticated: false, needsClientId: false, detail: '' })
   const spotifyDevices = atom([])
-  const radioMeter = atom('idle')
-  const statusVisualizer = atom(ctx.storage.get('statusVisualizer', true) !== false)
-  const miniVisualizer = atom(ctx.storage.get('miniVisualizer', true) !== false)
-  const visualizerStyle = atom(['bars', 'wave', 'mirror'].includes(ctx.storage.get('visualizerStyle', 'bars')) ? ctx.storage.get('visualizerStyle', 'bars') : 'bars')
-  const visualConsumers = new Set()
-  let visualBuffer = null
-  let visualReads = 0
+  const spotifyFailure = atom(null)
+  const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
+  const titlebarOpen = atom(false)
+  const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
   const sessionTracks = atom([])
   const localRoots = atom([])
+  const history = atom([])
+  const historyTotal = atom(0)
   const shuffle = atom(false)
   const repeat = atom('off')
   const spotifyAutoplay = atom(Boolean(ctx.storage.get('spotifyAutoplay', false)))
   let audio = null
   let audioSource = null
-  let context = null
-  let mediaSource = null
-  let analyser = null
-  let gain = null
+
   let disposed = false
   let radioGeneration = 0
   let radioTimeout = null
@@ -363,8 +785,11 @@ function createController(ctx) {
   let requestSequence = 0
   let spotifyProgressAnchor = null
   let spotifyQueueGuard = null
+  let youtubeQueueGuard = null
+  let youtubeHistoryRecorded = false
   let transition = 0
   let transitionChain = Promise.resolve()
+  let lastHistory = { key: '', at: 0 }
   const localRegistry = new Map()
 
   const addLog = (level, event, detail = {}) => {
@@ -409,9 +834,13 @@ function createController(ctx) {
     ctx.storage.set('volume', volume.get())
     ctx.storage.set('spotifyAutoplay', spotifyAutoplay.get())
   }
-  const persistPlaylists = () => ctx.storage.set('playlistState', { version: 3, playlists: playlists.get() })
+  const playlistStorageState = entries => ({
+    ...rawPlaylistRoot,
+    version: 3,
+    playlists: entries.map(entry => rawLegacyPlaylists.get(entry.id) || entry)
+  })
+  const persistPlaylists = () => ctx.storage.set('playlistState', playlistStorageState(playlists.get()))
   persist()
-  persistPlaylists()
   const revokeLocal = item => {
     if (item?.source !== 'local' || !item.objectUrl) return
     try { URL.revokeObjectURL(item.objectUrl) } catch { /* Session object URL cleanup is best-effort. */ }
@@ -433,15 +862,73 @@ function createController(ctx) {
         throw failure
       }
       if (!quiet) addLog('info', 'api.success', { requestId, method, route, status: Number(response?.status_code || response?.data?.status_code) || 200, durationMs: Date.now() - started, ...diagnosticBody(options?.body) })
+      if (sourceHealth.get().backend?.state === 'unavailable') recordHealth('backend', 'ready', 'Backend reachable again.')
       return response && Object.prototype.hasOwnProperty.call(response, 'data') ? response.data : response
     } catch (error) {
       const failure = new Error(userFacingError(error, 'FluidMusic could not reach its backend. Retry after Hermes finishes reloading.'))
       failure.statusCode = Number(error?.statusCode) || 0
       addLog('error', 'api.failure', { requestId, method, route, status: failure.statusCode, durationMs: Date.now() - started, error: failure.message, ...diagnosticBody(options?.body) })
+      recordHealth('backend', 'unavailable', 'A backend request failed. Hermes may be reloading or offline.', 'retry')
       throw failure
     }
   }
   const spotifyRequest = request
+  const recordHistory = item => {
+    const serialized = serializePlaylistItem(item)
+    if (!serialized) return
+    const key = `${serialized.source}:${serialized.id || serialized.uri || serialized.url || serialized.title}`
+    const now = Date.now()
+    if (lastHistory.key === key && now - lastHistory.at < 5000) return
+    lastHistory = { key, at: now }
+    void request('/history', { method: 'POST', body: { item: serialized } })
+      .then(data => {
+        const entry = data?.entry
+        if (entry?.item) history.set([{ id: entry.id, playedAt: safeText(entry.played_at), item: normalizeQueueItem(entry.item) }, ...history.get()].filter(value => value.item).slice(0, 500))
+      })
+      .catch(() => {})
+  }
+  const refreshHistory = async (filters = null, offset = 0) => {
+    if (filters) historyFilters.set({ query: safeText(filters.query), source: safeText(filters.source), since: safeText(filters.since), until: safeText(filters.until) })
+    const active = historyFilters.get()
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0))
+    historyOffset.set(safeOffset)
+    const params = new URLSearchParams({ limit: '50', offset: String(safeOffset) })
+    if (active.query) params.set('query', active.query)
+    if (active.source) params.set('source', active.source)
+    if (active.since) params.set('since', active.since)
+    if (active.until) params.set('until', active.until)
+    const data = await request(`/history?${params.toString()}`)
+    const entries = (Array.isArray(data?.items) ? data.items : []).map(entry => {
+      const item = normalizeQueueItem(entry?.item)
+      return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
+    }).filter(Boolean)
+    history.set(entries)
+    historyTotal.set(Math.max(0, Number(data?.total) || 0))
+    return entries
+  }
+  const clearHistory = async () => {
+    await request('/history', { method: 'DELETE' })
+    history.set([])
+    historyTotal.set(0)
+    historyOffset.set(0)
+  }
+  const removeHistoryEntry = async id => {
+    await request(`/history/${Number(id)}`, { method: 'DELETE' })
+    history.set(history.get().filter(entry => entry.id !== Number(id)))
+    historyTotal.set(Math.max(0, historyTotal.get() - 1))
+  }
+  const loadHistoryRetention = async () => {
+    const data = await request('/history/retention')
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    return historyRetention.get()
+  }
+  const setHistoryRetention = async days => {
+    const data = await request('/history/retention', { method: 'PUT', body: { days } })
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    message.set(Number(data?.removed) > 0 ? `Retention updated: ${data.removed} older entry(s) removed.` : 'History retention updated.')
+    await refreshHistory(null, 0).catch(() => {})
+    return historyRetention.get()
+  }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
     // An explicit user choice is authoritative even while Spotify's device list is stale.
@@ -474,6 +961,21 @@ function createController(ctx) {
     })
   }
 
+  function armYouTubeQueueGuard(item, token = transition) {
+    youtubeQueueGuard = item?.source === 'youtube' ? { token, itemId: item.id, advancing: false } : null
+  }
+
+  function requestYouTubeQueueAdvance() {
+    const guard = youtubeQueueGuard
+    if (!guard || guard.token !== transition || guard.itemId !== current()?.id || guard.advancing) return
+    guard.advancing = true
+    addLog('state', 'youtube.hermes-queue-advance', { item: guard.itemId })
+    void next().catch(error => {
+      guard.advancing = false
+      message.set(error?.message || 'FluidMusic could not advance to the next queue item.')
+    })
+  }
+
   function updateSpotifyProgress() {
     const anchor = spotifyProgressAnchor
     if (!anchor || current()?.source !== 'spotify') return
@@ -482,7 +984,10 @@ function createController(ctx) {
     progress.set({ positionMs, durationMs: anchor.durationMs })
     const guard = spotifyQueueGuard
     if (anchor.playing && anchor.durationMs > 0 && positionMs >= anchor.durationMs && guard?.expectedUri === anchor.uri) {
-      requestHermesQueueAdvance('projected-end', anchor.uri)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(current())) {
+        finishSleepAtEndOfItem(current())
+        void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+      } else requestHermesQueueAdvance('projected-end', anchor.uri)
     }
   }
 
@@ -511,86 +1016,86 @@ function createController(ctx) {
       audio = null
       audioSource = null
     }
-    if (gain) gain.disconnect()
-    if (analyser) analyser.disconnect()
-    if (mediaSource) mediaSource.disconnect()
-    gain = null
-    analyser = null
-    visualBuffer = null
-    mediaSource = null
-    if (context?.state === 'running') void context.suspend()
-    radioMeter.set('idle')
+
   }
 
-  async function startRadio(item, analyse, token) {
+  async function startRadio(item, _analyse, token) {
     stopInternalAudio()
     if (!item || item.source !== 'radio' || disposed || token !== transition) return
     const generation = radioGeneration
+    let historyRecorded = false
+    // Radio Browser directory etiquette: register one click per play attempt
+    // for directory stations (canonical UUID ids). Presets and custom streams
+    // are not directory entries. Fire-and-forget and failure-tolerant: this
+    // never gates playback and never proxies the stream itself.
+    const stationId = safeText(item.id)
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stationId)) {
+      void ctx.rest(`/radio/click/${encodeURIComponent(stationId)}`, { method: 'POST' }).catch(() => {})
+    }
     const element = new Audio()
     audio = element
     audioSource = 'radio'
     element.preload = 'none'
-    element.volume = analyse ? 1 : volume.get()
-    if (analyse) element.crossOrigin = 'anonymous'
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
+    element.volume = volume.get()
     progress.set({ positionMs: 0, durationMs: 0 })
     status.set('loading')
     const isCurrent = () => !disposed && generation === radioGeneration && element === audio
-    const finishFailure = () => {
+    const finishFailure = (detail = '') => {
       if (!isCurrent()) return
-      if (analyse) {
-        void startRadio(item, false, token)
-        return
-      }
+
       status.set('error')
-      message.set('This HTTPS radio stream could not connect. Choose another station or retry.')
+      message.set(detail || 'This HTTPS radio stream could not connect. Choose another station or retry.')
+      recordHealth('radio', 'degraded', detail || 'This HTTPS radio stream could not connect.', 'retry')
+    }
+    // Report the REAL failure boundary from the media element instead of one
+    // generic notice: network reachability, decode/codec support, and
+    // unsupported format-or-origin (the honest codec/CORS boundary) differ.
+    const reportMediaError = () => {
+      const code = Number(element.error?.code) || 0
+      const detail = code === 2 ? 'The radio stream could not be reached (network boundary). Check the connection, then retry or choose another station.'
+        : code === 3 ? 'This radio stream could not be decoded here (codec boundary). Try another station or format.'
+        : code === 4 ? 'This stream is not playable here — its format or origin is unsupported (codec/CORS boundary). Try another station.'
+        : ''
+      finishFailure(detail)
     }
     radioTimeout = setTimeout(finishFailure, 15000)
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       clearTimeout(radioTimeout)
+      recordHealth('radio', 'ready', 'Live stream playing.')
       radioTimeout = null
       status.set('playing')
-      message.set(analyse ? '' : 'Audio is playing. Analyser unavailable; this display is static.')
+      message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('pause', () => { if (isCurrent() && !element.ended && status.get() === 'playing') status.set('paused') })
-    element.addEventListener('error', finishFailure)
-    element.addEventListener('ended', finishFailure)
+    element.addEventListener('error', reportMediaError)
+    element.addEventListener('ended', () => finishFailure('The live stream ended unexpectedly. Retry to reconnect.'))
     element.src = item.streamUrl
     try {
-      if (analyse) {
-        context ??= new AudioContext()
-        gain = context.createGain()
-        gain.gain.value = volume.get()
-        mediaSource = context.createMediaElementSource(element)
-        mediaSource.connect(gain)
-        gain.connect(context.destination)
-        syncAnalyser()
-        await context.resume()
-      }
       await element.play()
     } catch {
       finishFailure()
     }
   }
 
-  async function startLocal(item, token, analyse = Boolean(item?.objectUrl)) {
+  async function startLocal(item, token) {
     stopInternalAudio()
     if (!item || item.source !== 'local' || disposed || token !== transition) return
     const sources = [item.objectUrl, ...(Array.isArray(item.playbackUrls) ? item.playbackUrls : localPlaybackUrls(item.filePath))].filter(Boolean)
     if (item.unavailable || !sources.length) {
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder to restore it.')
+      recordHealth('local', 'degraded', 'A local track is missing. Rescan its folder.', 'rescan')
       return
     }
     const generation = radioGeneration
+    let historyRecorded = false
     const element = new Audio()
     audio = element
     audioSource = 'local'
     element.preload = 'metadata'
-    if (analyse) element.crossOrigin = 'anonymous'
     element.volume = volume.get()
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
     progress.set({ positionMs: 0, durationMs: Math.max(0, Number(item.durationMs) || 0) })
     status.set('loading')
     let sourceIndex = 0
@@ -605,8 +1110,6 @@ function createController(ctx) {
         if (isCurrent() && sourceIndex + 1 < sources.length) {
           sourceIndex += 1
           await playSource()
-        } else if (isCurrent() && analyse) {
-          await startLocal(item, token, false)
         } else if (isCurrent()) {
           status.set('error')
           message.set('Hermes could not start this local audio file. Rescan it or check Chromium format support.')
@@ -616,30 +1119,28 @@ function createController(ctx) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       played = true
-      if (analyse && !mediaSource) {
-        try {
-          context ??= new AudioContext()
-          gain = context.createGain()
-          gain.gain.value = volume.get()
-          mediaSource = context.createMediaElementSource(element)
-          element.volume = 1
-          mediaSource.connect(gain)
-          gain.connect(context.destination)
-          syncAnalyser()
-          void context.resume().catch(() => { if (isCurrent()) void startLocal(item, token, false) })
-        } catch { void startLocal(item, token, false); return }
-      }
+      sleepEndedFor = null
       status.set('playing')
       message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('loadedmetadata', () => {
       if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
     })
     element.addEventListener('timeupdate', () => {
-      if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+      if (isCurrent()) {
+        progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+        saveResumePosition(false)
+      }
     })
-    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) status.set('paused') })
-    element.addEventListener('ended', () => { if (isCurrent()) void next() })
+    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) { status.set('paused'); saveResumePosition(false) } })
+    element.addEventListener('ended', () => {
+      if (!isCurrent()) return
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) { finishSleepAtEndOfItem(item); return }
+      if (sleepEndedFor === item.id) return
+      void next()
+    })
     element.addEventListener('error', () => {
       if (!isCurrent()) return
       if (!played && sourceIndex + 1 < sources.length) {
@@ -647,7 +1148,7 @@ function createController(ctx) {
         void playSource()
         return
       }
-      if (analyse && !played) { void startLocal(item, token, false); return }
+
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder and retry.')
     })
@@ -677,6 +1178,7 @@ function createController(ctx) {
         repeat: safeText(state.repeat_state, 'off')
       }
       spotify.set(snapshot)
+      spotifyFailure.set(null)
       shuffle.set(snapshot.shuffle)
       repeat.set(['off', 'context', 'track'].includes(snapshot.repeat) ? snapshot.repeat : 'off')
       const fingerprint = `${snapshot.playing}:${snapshot.uri}:${snapshot.device}`
@@ -701,8 +1203,12 @@ function createController(ctx) {
         status.set(snapshot.playing ? 'playing' : 'paused')
         if (snapshot.device) message.set('')
       }
+      recordHealth('spotify', snapshot.connected ? 'ready' : 'unknown', snapshot.connected ? 'Spotify Connect responded.' : 'No active Connect session reported.', snapshot.connected ? '' : 'choose-device')
       return snapshot
     } catch (error) {
+      const failure = classifySpotifyFailure(error)
+      spotifyFailure.set(failure)
+      recordHealth('spotify', ['auth-required', 'insufficient-scope'].includes(failure.reason) ? 'unavailable' : 'degraded', failure.message, failure.action)
       if (token === transition && current()?.source === 'spotify') {
         status.set('error')
         message.set(error?.message || 'Spotify Connect state could not be confirmed.')
@@ -715,10 +1221,12 @@ function createController(ctx) {
     try {
       const snapshot = normalizeSpotifyAuth(await spotifyRequest('/spotify/auth/status'))
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', snapshot.authenticated ? 'ready' : 'unavailable', snapshot.authenticated ? 'Spotify sign-in confirmed.' : 'Not signed in to Spotify.', snapshot.authenticated ? '' : 'reconnect')
       return snapshot
     } catch (error) {
       const snapshot = { state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication status is unavailable.' }
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', 'unavailable', 'Spotify authentication status is unavailable.', 'reconnect')
       return snapshot
     }
   }
@@ -750,6 +1258,7 @@ function createController(ctx) {
       }
       spotifyDevices.set([])
       clearSpotifyDeviceSelection()
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (isSpotifyAuthFailure(error)) {
         spotifyAuth.set({ state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication has expired. Reconnect to continue.' })
       }
@@ -762,6 +1271,7 @@ function createController(ctx) {
   function clearAuthPoll() { if (authTimer) clearTimeout(authTimer); authTimer = null }
   async function pollSpotifyAuth() {
     const snapshot = await refreshSpotifyAuth()
+    if (disposed) { clearAuthPoll(); return snapshot }
     if (snapshot.authenticated || snapshot.state === 'failed') { clearAuthPoll(); return snapshot }
     authAttempts += 1
     if (authAttempts >= 80) {
@@ -797,10 +1307,17 @@ function createController(ctx) {
 
   async function refreshLocalLibrary() {
     const version = ++localRefreshVersion
-    const [rootsData, tracksData] = await Promise.all([
-      request('/local/roots'),
-      request('/local/tracks?include_missing=true&limit=5000&offset=0')
-    ])
+    let rootsData
+    let tracksData
+    try {
+      [rootsData, tracksData] = await Promise.all([
+        request('/local/roots'),
+        request('/local/tracks?include_missing=true&limit=5000&offset=0')
+      ])
+    } catch (error) {
+      recordHealth('local', 'degraded', 'The local library could not be read. Rescan or retry.', 'rescan')
+      throw error
+    }
     if (disposed || version !== localRefreshVersion) return { roots: localRoots.get(), tracks: localTracks.get() }
     const roots = Array.isArray(rootsData?.roots) ? rootsData.roots : []
     const tracks = (Array.isArray(tracksData?.items) ? tracksData.items : []).map(localTrackItem).filter(Boolean)
@@ -815,6 +1332,7 @@ function createController(ctx) {
     })
     queue.set(hydrateLocalReferences(queue.get()))
     persist()
+    recordHealth('local', 'ready', `${tracks.length} indexed track(s) in ${roots.length} approved folder(s).`)
     return { roots, tracks }
   }
 
@@ -827,17 +1345,18 @@ function createController(ctx) {
       supported.forEach(file => {
         const objectUrl = URL.createObjectURL(file)
         const item = normalizeQueueItem({ source: 'local', id: `session:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, title: file.name.replace(/\.[^.]+$/, ''), subtitle: 'Opened file · this session only', objectUrl, mimeType: file.type })
-        if (item) opened.push(item)
+        if (item) opened.push({ ...item, origin: 'session' })
         else URL.revokeObjectURL(objectUrl)
       })
     } catch (error) { opened.forEach(revokeLocal); throw new Error(userFacingError(error, 'Those files could not be opened.')) }
+    if (opened.length) rememberQueueEdit('Open files')
     const before = queue.get().length
     opened.forEach(item => localRegistry.set(item.id, item))
     sessionTracks.set([...sessionTracks.get(), ...opened])
     queue.set([...queue.get(), ...opened])
     if (index.get() < 0 && opened.length) { index.set(before); status.set('paused') }
     persist()
-    message.set(opened.length ? `Opened ${opened.length} audio file(s). Select Play to listen with visualization. Session files are not saved to playlists and must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
+    message.set(opened.length ? `Opened ${opened.length} audio file(s). Session files must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
     return opened.length
   }
 
@@ -872,6 +1391,11 @@ function createController(ctx) {
     if (item?.source === 'spotify') {
       await spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() })
     }
+    if (item?.source === 'youtube') {
+      // The embed surface owns the engine; leaving the item clears its reported
+      // state so a stale iframe snapshot can never describe the next source.
+      youtube.set({ ...youtube.get(), playing: false, ended: false })
+    }
   }
 
   function runTransition(work) {
@@ -886,6 +1410,11 @@ function createController(ctx) {
   async function startSelected(nextIndex, token, contextPosition = null) {
     const item = queue.get()[nextIndex]
     if (!item || token !== transition || disposed) return
+    const previousItem = current()
+    if (previousItem && previousItem.id !== item.id) saveResumePosition(true)
+    if (sleepBound && (sleepBound.id !== item.id || sleepBound.source !== item.source)) cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.')
+    sleepEndedFor = null
+    void loadResumeContext(item, token)
     index.set(nextIndex)
     persist()
     message.set('')
@@ -893,6 +1422,7 @@ function createController(ctx) {
       spotifyProgressAnchor = null
       spotifyQueueGuard = null
     }
+    if (item.source !== 'youtube') youtubeQueueGuard = null
     if (item.source === 'radio') {
       await startRadio(item, true, token)
       return
@@ -901,12 +1431,24 @@ function createController(ctx) {
       await startLocal(item, token)
       return
     }
+    if (item.source === 'youtube') {
+      armYouTubeQueueGuard(item, token)
+      youtubeEngine = 'embed'
+      watchAttempts = 0
+      youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
+      progress.set({ positionMs: 0, durationMs: item.durationMs })
+      status.set('paused')
+      message.set('YouTube is loading in the FluidMusic player pane.')
+      youtubeHistoryRecorded = false
+      return
+    }
     if (item.source === 'spotify') {
       armSpotifyQueueGuard(item, token)
       status.set('loading')
       try {
         const payload = Number.isInteger(contextPosition) ? { context_uri: item.uri, offset: contextPosition } : spotifyPlayPayload(item)
         await spotifyRequest('/play', { method: 'POST', body: spotifyCommandBody(payload) })
+        recordHistory(item)
         spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -938,6 +1480,7 @@ function createController(ctx) {
     return runTransition(async token => {
       if (token !== transition) return
       const item = current()
+      saveResumePosition(true)
       if (!item) { status.set('idle'); return }
 
       if (item.source === 'radio') {
@@ -960,12 +1503,19 @@ function createController(ctx) {
         }
         return
       }
+      if (item.source === 'youtube') {
+        const playing = Boolean(youtube.get().playing)
+        const sent = youtubeCommandSink ? youtubeCommandSink(playing ? 'pauseVideo' : 'playVideo', []) : false
+        if (!sent && token === transition) message.set('The YouTube player is not ready yet. Open the player pane or retry.')
+        return
+      }
       const pause = status.get() === 'playing'
       status.set('loading')
       try {
         if (!pause) armSpotifyQueueGuard(item, token)
         const resume = spotifyStartedUri === item.uri
         await spotifyRequest(pause ? '/pause' : '/play', { method: 'POST', body: spotifyCommandBody(pause || resume ? {} : spotifyPlayPayload(item)) })
+        if (!pause) recordHistory(item)
         if (!pause) spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -1016,11 +1566,18 @@ function createController(ctx) {
       progress.set({ positionMs: target, durationMs })
       return
     }
+    if (item?.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('seekTo', [Math.round(target / 1000)]) : false
+      if (sent) progress.set({ positionMs: target, durationMs })
+      else message.set('The YouTube player is not ready yet. Open the player pane or retry.')
+      return
+    }
     if (item?.source === 'spotify') {
       await spotifyRequest('/seek', { method: 'PUT', body: spotifyCommandBody({ position_ms: Math.round(target) }) })
       progress.set({ positionMs: target, durationMs })
       await refreshSpotify()
     }
+
   }
 
   async function setShuffle(value) {
@@ -1037,8 +1594,14 @@ function createController(ctx) {
     repeat.set(state)
   }
 
-  function add(item, play = false) {
-    const normalized = normalizeQueueItem(item)
+  function add(item, play = false, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (normalized?.source === 'local' && normalized.localTrackId && !normalized.objectUrl) {
+      // Durable history/queue references carry only the library ID; replay
+      // revalidates availability against the CURRENT indexed library.
+      const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+      if (linked) normalized = normalizeQueueItem({ ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs, unavailable: linked.unavailable })
+    }
     if (!normalized) {
       message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.')
       return false
@@ -1051,6 +1614,8 @@ function createController(ctx) {
       localRegistry.set(normalized.id, normalized)
       if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
     }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Add to queue')
     const next = [...queue.get(), normalized]
     queue.set(next)
     if (index.get() === -1) {
@@ -1065,6 +1630,7 @@ function createController(ctx) {
   function remove(at) {
     const items = queue.get()
     if (!Number.isInteger(at) || at < 0 || at >= items.length) return Promise.resolve(false)
+    rememberQueueEdit('Remove from queue')
     if (at !== index.get()) {
       queue.set(items.filter((_, position) => position !== at))
       if (at < index.get()) index.set(index.get() - 1)
@@ -1108,6 +1674,7 @@ function createController(ctx) {
     const items = [...queue.get()]
     const target = at + direction
     if (!Number.isInteger(at) || !Number.isInteger(direction) || at < 0 || at >= items.length || target < 0 || target >= items.length) return
+    rememberQueueEdit('Reorder queue')
     ;[items[at], items[target]] = [items[target], items[at]]
     const currentIndex = index.get()
     queue.set(items)
@@ -1126,12 +1693,7 @@ function createController(ctx) {
     if (next > 0) { unmutedVolume = next; ctx.storage.set('unmutedVolume', next) }
     const version = ++volumeVersion
     if (volumeTimer) clearTimeout(volumeTimer)
-    if (audio && !gain) audio.volume = next
-    if (gain) {
-      const now = context?.currentTime || 0
-      gain.gain.cancelAndHoldAtTime?.(now)
-      gain.gain.setTargetAtTime(next, now, .015)
-    }
+    if (audio) audio.volume = next
     if (current()?.source === 'spotify') {
       const body = spotifyCommandBody({ volume_percent: Math.round(next * 100) })
       volumeTimer = setTimeout(() => {
@@ -1139,6 +1701,8 @@ function createController(ctx) {
         void spotifyRequest('/volume', { method: 'PUT', body }).catch(error => { if (version === volumeVersion) message.set(error?.message || 'Spotify volume could not be changed.') })
       }, 180)
     }
+    if (current()?.source === 'youtube' && youtubeCommandSink) youtubeCommandSink('setVolume', [Math.round(next * 100)])
+
     persist()
   }
 
@@ -1154,11 +1718,13 @@ function createController(ctx) {
   function clearQueue() {
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Clear queue')
       await stopActive(current())
       if (token !== transition) return false
       queue.set([])
       index.set(-1)
       spotifyQueueGuard = null
+      youtubeQueueGuard = null
       spotifyProgressAnchor = null
       spotifyStartedUri = ''
       progress.set({ positionMs: 0, durationMs: 0 })
@@ -1177,13 +1743,18 @@ function createController(ctx) {
   function createPlaylist(name, description = '') {
     undoState.set(null)
     const now = new Date().toISOString()
-    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled playlist'), description: safeText(description), createdAt: now, updatedAt: now, items: [] }
+    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled collection'), description: safeText(description), createdAt: now, updatedAt: now, items: [], legacy: false }
     playlists.set([...playlists.get(), playlist])
     persistPlaylists()
     return playlist
   }
 
+  function isEditablePlaylist(id) {
+    return playlists.get().some(entry => entry.id === id && !entry.legacy)
+  }
+
   function updatePlaylist(id, changes = {}) {
+    if (!isEditablePlaylist(id)) return null
     undoState.set(null)
     let updated = null
     playlists.set(playlists.get().map(entry => {
@@ -1197,7 +1768,7 @@ function createController(ctx) {
 
   function deletePlaylist(id) {
     const before = playlists.get()
-    if (!before.some(entry => entry.id === id)) return false
+    if (!before.some(entry => entry.id === id && !entry.legacy)) return false
     rememberPlaylistEdit('Delete playlist')
     playlists.set(before.filter(entry => entry.id !== id))
     persistPlaylists()
@@ -1206,7 +1777,7 @@ function createController(ctx) {
 
   function duplicatePlaylist(id) {
     const original = playlists.get().find(entry => entry.id === id)
-    if (!original) return null
+    if (!original || original.legacy) return null
     const copy = createPlaylist(`${original.name} copy`, original.description)
     const items = original.items.map(item => ({ ...item }))
     playlists.set(playlists.get().map(entry => entry.id === copy.id ? { ...entry, items } : entry))
@@ -1215,9 +1786,11 @@ function createController(ctx) {
   }
 
   function addToPlaylist(id, value) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     const normalized = normalizeQueueItem(value)
     if (!normalized) return false
+    if (normalized.source !== 'local') { message.set('New FluidMusic collections are local-only. Use Up Next for cross-source listening.'); return false }
     if (normalized.source === 'local' && !normalized.localTrackId) { message.set('Session files cannot be saved to playlists. Index their folder to create persistent references.'); return false }
     if (normalized.source === 'local' && !normalized.unavailable) {
       localRegistry.set(normalized.id, normalized)
@@ -1239,6 +1812,7 @@ function createController(ctx) {
   }
 
   function moveInPlaylist(id, at, direction) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
@@ -1271,9 +1845,10 @@ function createController(ctx) {
     const nextIndex = items.slice(0, startAt).filter(item => !item.unavailable).length
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Play collection')
       await stopActive(current())
       if (token !== transition) return false
-      queue.set(playable.map(item => ({ ...item })))
+      queue.set(playable.map(item => ({ ...item, origin: 'collection' })))
       index.set(nextIndex)
       persist()
       await startSelected(nextIndex, token)
@@ -1286,8 +1861,9 @@ function createController(ctx) {
     const items = playlistItems(id)
     const playable = items.filter(item => !item.unavailable)
     if (!playable.length) { message.set('No playable tracks to add. Your queue has not changed.'); return 0 }
+    rememberQueueEdit('Add collection')
     const before = queue.get().length
-    queue.set([...queue.get(), ...playable.map(item => ({ ...item }))])
+    queue.set([...queue.get(), ...playable.map(item => ({ ...item, origin: 'collection' }))])
     if (index.get() < 0) { index.set(before); status.set('paused') }
     persist()
     message.set(`Added ${playable.length} item(s) to the queue.${items.length > playable.length ? ` Skipped ${items.length - playable.length} missing track(s).` : ''}`)
@@ -1295,7 +1871,12 @@ function createController(ctx) {
   }
 
   function saveQueueAsPlaylist(name) {
-    const items = queue.get().filter(item => item.source !== 'local' || item.localTrackId).map(serializePlaylistItem).filter(Boolean)
+    const queued = queue.get()
+    if (queued.some(item => item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Remove cloud, radio, YouTube, and session-only items before saving this queue.')
+      return null
+    }
+    const items = queued.map(serializePlaylistItem).filter(Boolean)
     if (!items.length) { message.set('There are no persistent items to save.'); return null }
     const playlist = createPlaylist(name)
     playlists.set(playlists.get().map(entry => entry.id === playlist.id ? { ...entry, items } : entry))
@@ -1304,16 +1885,22 @@ function createController(ctx) {
   }
 
   function addManyToPlaylist(id, values) {
+    if (!isEditablePlaylist(id)) return 0
+    const raw = Array.isArray(values) ? values : []
+    const items = raw.map(normalizeQueueItem)
+    if (!raw.length || items.some(item => !item || item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Nothing was saved.')
+      return 0
+    }
     undoState.set(null)
-    const items = (Array.isArray(values) ? values : []).map(normalizeQueueItem).filter(Boolean)
     let count = 0
     // Commit once, preserving duplicate occurrences and their order.
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
-      const stored = items.filter(item => item.source !== 'local' || item.localTrackId).map(item => {
-        if (item.source === 'local' && !item.unavailable) {
+      const stored = items.map(item => {
+        if (!item.unavailable) {
           localRegistry.set(item.id, item)
-          if (item.localTrackId) localRegistry.set(item.localTrackId, item)
+          localRegistry.set(item.localTrackId, item)
         }
         return serializePlaylistItem(item)
       }).filter(Boolean)
@@ -1338,6 +1925,7 @@ function createController(ctx) {
   }
 
   function removePlaylistItems(id, positions) {
+    if (!isEditablePlaylist(id)) return 0
     const selected = new Set(positions.filter(Number.isInteger))
     if (!selected.size) return 0
     rememberPlaylistEdit('Remove tracks')
@@ -1354,7 +1942,7 @@ function createController(ctx) {
 
   function deduplicatePlaylist(id) {
     const playlist = playlists.get().find(entry => entry.id === id)
-    if (!playlist) return 0
+    if (!playlist || playlist.legacy) return 0
     const seen = new Set()
     const duplicates = []
     playlist.items.forEach((item, at) => {
@@ -1366,7 +1954,11 @@ function createController(ctx) {
   }
 
   function exportPlaylists(id = '') {
-    return JSON.stringify({ format: 'fluid-music', ...normalizePlaylistState({ playlists: playlists.get().filter(entry => !id || entry.id === id) }) }, null, 2)
+    const entries = playlists.get().filter(entry => !id || entry.id === id).map(entry => {
+      const raw = rawLegacyPlaylists.get(entry.id)
+      return raw || normalizePlaylistState({ playlists: [entry] }).playlists[0]
+    })
+    return JSON.stringify({ format: 'fluid-music', version: 3, playlists: entries }, null, 2)
   }
 
   function importPlaylists(text) {
@@ -1380,7 +1972,11 @@ function createController(ctx) {
     const accepted = normalized.playlists.reduce((count, entry) => count + entry.items.length, 0)
     if (accepted !== supplied) throw new Error('The file contains unsupported or invalid tracks. Nothing was imported.')
     rememberPlaylistEdit('Import playlists')
-    const imported = normalized.playlists.map(entry => ({ ...entry, id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}` }))
+    const imported = normalized.playlists.map((entry, at) => {
+      const id = `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+      if (entry.legacy) rawLegacyPlaylists.set(id, { ...data.playlists[at], id })
+      return { ...entry, id }
+    })
     playlists.set([...playlists.get(), ...imported])
     persistPlaylists()
     return imported
@@ -1398,50 +1994,161 @@ function createController(ctx) {
   }
 
 
-  function syncAnalyser() {
-    if (!mediaSource || !gain || disposed) return
-    if (visualConsumers.size && !analyser) {
-      analyser = context.createAnalyser()
-      analyser.fftSize = 512
-      analyser.smoothingTimeConstant = .72
-      // Analysis is a side tap. Never break or reroute source → gain → speakers.
-      mediaSource.connect(analyser)
-      radioMeter.set('analyser')
-    } else if (!visualConsumers.size && analyser) {
-      mediaSource.disconnect(analyser)
-      analyser.disconnect()
-      analyser = null
-      visualBuffer = null
-      radioMeter.set('ready')
+  function addYouTubeItem(value, select = true) {
+    const item = normalizeQueueItem(value)
+    if (!item || item.source !== 'youtube') throw new Error('Choose a valid YouTube video.')
+    const before = queue.get().length
+    if (!add(item, false)) return false
+    if (select) void playAt(before)
+    message.set(`Added “${item.title}” from YouTube.`)
+    return true
+  }
+
+  async function addYouTubeUrl(url, select = true) {
+    const data = await request('/youtube/resolve', { method: 'POST', body: { url } })
+    return addYouTubeItem(data?.item, select)
+  }
+
+  async function searchYouTube(query) {
+    const data = await request(`/youtube/search?q=${encodeURIComponent(query)}&limit=12`)
+    return (Array.isArray(data?.items) ? data.items : []).map(normalizeQueueItem).filter(item => item?.source === 'youtube')
+  }
+
+  async function resolveYouTubeEmbedUrl(item) {
+    const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error('This YouTube item has an invalid video ID.')
+    const data = await request(`/youtube/embed-host?video_id=${encodeURIComponent(videoId)}`)
+    const url = safeText(data?.url)
+    if (!url.startsWith('http://127.0.0.1:')) throw new Error('FluidMusic returned an invalid YouTube player URL.')
+    return url
+  }
+
+  async function refreshQueuedYouTubeMetadata() {
+    const stale = queue.get().filter(item => item.source === 'youtube' && (item.title === 'YouTube video' || item.subtitle === 'Embedded player'))
+    if (!stale.length) return
+    let changed = false
+    for (const item of stale) {
+      if (disposed) return
+      try {
+        const data = await request('/youtube/resolve', { method: 'POST', body: { url: item.url } })
+        if (disposed) return
+        const resolved = normalizeQueueItem(data?.item)
+        if (!resolved) continue
+        queue.set(queue.get().map(value => value.id === item.id ? resolved : value))
+        if (current()?.id === resolved.id) youtube.set({ ...youtube.get(), title: resolved.title, subtitle: resolved.subtitle, artwork: resolved.artwork, item: resolved })
+        changed = true
+      } catch { /* Old queue labels remain usable when metadata is temporarily unavailable. */ }
     }
+    if (changed && !disposed) persist()
   }
-
-  function acquireVisualizer() {
-    const consumer = Symbol('visualizer')
-    visualConsumers.add(consumer)
-    syncAnalyser()
-    return () => { visualConsumers.delete(consumer); syncAnalyser() }
-  }
-
-  function visualSamples(style = 'wave') {
-    if (!visualConsumers.size || !analyser || status.get() !== 'playing' || disposed) return null
-    const length = style === 'wave' ? analyser.fftSize : analyser.frequencyBinCount
-    if (!visualBuffer || visualBuffer.length !== length) visualBuffer = new Uint8Array(length)
-    if (style === 'wave') analyser.getByteTimeDomainData(visualBuffer)
-    else analyser.getByteFrequencyData(visualBuffer)
-    visualReads++
-    return visualBuffer
-  }
-  function radioSamples() { return visualSamples('wave') }
-  function setStatusVisualizer(value) { statusVisualizer.set(Boolean(value)); ctx.storage.set('statusVisualizer', Boolean(value)) }
-  function setMiniVisualizer(value) { miniVisualizer.set(Boolean(value)); ctx.storage.set('miniVisualizer', Boolean(value)) }
-  function setVisualizerStyle(value) { if (['bars', 'wave', 'mirror'].includes(value)) { visualizerStyle.set(value); ctx.storage.set('visualizerStyle', value) } }
-  const visualDiagnostics = () => ({ consumers: visualConsumers.size, analyser: Boolean(analyser), reads: visualReads })
 
   const spotifyTrack = track => normalizeQueueItem({
     source: 'spotify', id: track?.id, title: track?.name, subtitle: (track?.artists || []).map(artist => artist.name).join(', '), uri: track?.uri,
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
+
+  function setYouTubeCommandSink(sink) {
+    youtubeCommandSink = !disposed && typeof sink === 'function' ? sink : null
+  }
+
+  function reportYouTubeState(state) {
+    // Embed bridge adapter: surface relay reports bind to the exact selected
+    // occurrence and the current transition generation; stale or foreign
+    // reports are ignored, and completion advances the queue exactly once.
+    if (!state || typeof state !== 'object' || disposed) return false
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
+    if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.engine && state.engine !== youtubeEngine) return false
+    if (state.kind === 'ready') {
+      youtube.set({ ...youtube.get(), status: 'ready', error: '', reason: '' })
+      return true
+    }
+    const guard = youtubeQueueGuard
+    if (guard && guard.token !== transition) return false
+    if (state.kind === 'error' || state.kind === 'autoplay-blocked') {
+      const failure = classifyYouTubeFailure(state.kind === 'error' ? { kind: 'player-error', errorCode: state.errorCode } : { kind: 'autoplay-blocked' })
+      youtube.set({ ...youtube.get(), status: failure.reason === 'autoplay-blocked' ? 'paused' : 'error', reason: failure.reason, error: failure.message, action: failure.action, retryable: failure.retryable, fallbackEligible: failure.fallbackEligible })
+      recordHealth('youtube', failure.retryable ? 'degraded' : 'unavailable', failure.message, failure.action)
+      if (failure.message) message.set(`${failure.message} ${failure.remedy}`.trim())
+      return true
+    }
+    if (state.kind !== 'state') return false
+    youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
+    if (state.playing) recordHealth('youtube', 'ready', 'YouTube player reporting playback.')
+    progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    saveResumePosition(false)
+    status.set(state.playing ? 'playing' : 'paused')
+    if (state.playing && !youtubeHistoryRecorded) {
+      youtubeHistoryRecorded = true
+      recordHistory(item)
+    }
+    if (state.ended) {
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) finishSleepAtEndOfItem(item)
+      else requestYouTubeQueueAdvance()
+    }
+    return true
+  }
+
+  function attemptYouTubeWatchFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube' || youtubeEngine === 'watch') return false
+    if (!youtube.get().fallbackEligible) return false
+    if (!watchCapability.available) {
+      youtube.set({ ...youtube.get(), watchUnavailable: true })
+      message.set('First-party watch fallback needs an owned host view capability this Hermes build does not provide. Skip or choose another video.')
+      recordHealth('youtube', 'degraded', 'Owned first-party watch view is not available on this host.', 'diagnose')
+      return false
+    }
+    if (watchAttempts >= 1) {
+      message.set('The first-party watch fallback was already tried for this video. Skip or choose another video.')
+      return false
+    }
+    watchAttempts += 1
+    youtubeEngine = 'watch'
+    // Position and the once-per-transition history flag survive the switch;
+    // exactly one engine is active because the surface renders either/or.
+    youtube.set({ ...youtube.get(), engine: 'watch', status: 'switching', error: '', reason: '' })
+    status.set('loading')
+    message.set('Switching player…')
+    return true
+  }
+
+  async function assessSpotifyLocalPlayback() {
+    let product = ''
+    try {
+      const data = await request('/spotify/local-capability')
+      product = safeText(data?.account_product)
+    } catch { product = '' }
+    let sdkPresent = false
+    let emeSupported = false
+    let checked = false
+    try {
+      if (typeof window !== 'undefined') {
+        sdkPresent = typeof window.Spotify?.Player === 'function'
+        if (typeof navigator !== 'undefined' && typeof navigator.requestMediaKeySystemAccess === 'function') {
+          try {
+            await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }] }])
+            emeSupported = true
+          } catch { emeSupported = false }
+        }
+        checked = true
+      }
+    } catch { checked = false }
+    const capability = spotifyLocalPlaybackCapability({ product, sdkPresent, emeSupported, checked })
+    spotifyLocalCapability.set(capability)
+    return capability
+  }
+
+  function retryYouTube() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return Promise.resolve(false)
+    if (!tryRetry('youtube')) return Promise.resolve(false)
+    youtube.set({ ...youtube.get(), status: 'loading', error: '', reason: '', reloadToken: (Number(youtube.get().reloadToken) || 0) + 1 })
+    return playAt(index.get()).then(() => true)
+  }
 
   async function searchSpotify(query) {
     const data = await spotifyRequest(`/search?q=${encodeURIComponent(query)}&type=track&limit=10&offset=0`)
@@ -1455,7 +2162,8 @@ function createController(ctx) {
     const albums = (data?.albums?.items || []).map(album => normalizeQueueItem({ source: 'spotify', id: album.id, title: album.name, subtitle: (album.artists || []).map(artist => artist.name).join(', '), uri: album.uri, artwork: album.images?.[0]?.url, kind: 'album' })).filter(Boolean)
     const spotifyPlaylists = (data?.playlists?.items || []).filter(Boolean).map(playlist => normalizeQueueItem({ source: 'spotify', id: playlist.id, title: playlist.name, subtitle: playlist.owner?.display_name || 'Spotify playlist', uri: playlist.uri, artwork: playlist.images?.[0]?.url, kind: 'playlist' })).filter(Boolean)
     const artists = (data?.artists?.items || []).map(artist => ({ id: safeText(artist.id), source: 'spotify', kind: 'artist', title: safeText(artist.name, 'Artist'), subtitle: `${Number(artist.followers?.total || 0).toLocaleString()} followers`, artwork: safeText(artist.images?.[0]?.url), uri: safeText(artist.uri), genres: Array.isArray(artist.genres) ? artist.genres.slice(0, 3) : [] }))
-    return { tracks, albums, playlists: spotifyPlaylists, artists }
+    const cursors = { tracks: Boolean(data?.tracks?.next), albums: Boolean(data?.albums?.next), playlists: Boolean(data?.playlists?.next), artists: Boolean(data?.artists?.next) }
+    return { tracks, albums, playlists: spotifyPlaylists, artists, cursors, offset: Math.max(0, Number(offset) || 0) }
   }
 
   async function loadSpotifyPlaylists(offset = 0) {
@@ -1470,17 +2178,33 @@ function createController(ctx) {
     const start = Math.max(0, Math.floor(Number(offset) || 0))
     const data = await spotifyRequest(`/playlists/${encodeURIComponent(id)}/tracks?limit=50&offset=${start}`)
     if (!Array.isArray(data?.items)) throw new Error('Spotify did not return playlist tracks. Retry or reconnect Spotify.')
-    const tracks = data.items.map((entry, at) => {
-      const track = spotifyTrack(entry?.track || entry?.item || entry)
-      if (!track) return null
-      return { ...track, contextUri: `spotify:playlist:${id}`, contextPosition: start + at }
-    }).filter(Boolean)
+    const tracks = [], unavailable = []
+    data.items.forEach((entry, at) => {
+      // An explicit null track/item means removed/unavailable — never fall
+      // back to the wrapper object itself.
+      const raw = entry && typeof entry === 'object' && ('track' in entry || 'item' in entry) ? (entry.track ?? entry.item) : entry
+      const position = start + at
+      const contextUri = `spotify:playlist:${id}`
+      const track = spotifyTrack(raw)
+      if (!track || raw?.is_playable === false || raw?.is_local) {
+        // Unknown/unavailable/restricted entries stay visible at their exact
+        // occurrence position — never silently dropped, never playable.
+        unavailable.push({ ...(track || {}), source: 'spotify', kind: 'unavailable', unavailable: true, playable: false, id: track?.id || `unavailable:${id}:${position}`, title: track?.title || 'Unavailable track', unavailableReason: spotifyEntryUnavailableReason(raw), contextUri, contextPosition: position })
+        return
+      }
+      tracks.push({ ...track, relinked: Boolean(raw?.linked_from), subtitle: raw?.linked_from ? `${track.subtitle} · relinked by Spotify` : track.subtitle, contextUri, contextPosition: position })
+    })
+    const rows = [...tracks, ...unavailable].sort((a, b) => a.contextPosition - b.contextPosition)
     const total = Number.isFinite(data.total) ? Math.max(0, data.total) : start + data.items.length
     const nextOffset = start + data.items.length
-    return { playlist, tracks, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: data.items.length - tracks.length }
+    return { playlist, tracks, unavailable, rows, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: unavailable.length }
   }
 
   function playSpotifyPlaylistTrack(queueItem, track) {
+    if (track?.unavailable || track?.playable === false) {
+      message.set(track?.unavailableReason || 'That entry is unavailable on Spotify.')
+      return Promise.resolve(false)
+    }
     if (!/^spotify:playlist:[A-Za-z0-9]+$/.test(queueItem?.uri || '') || track?.contextUri !== queueItem.uri || !Number.isInteger(track.contextPosition) || track.contextPosition < 0 || track.contextPosition > 10000) {
       message.set('Refresh this Spotify playlist before choosing the track.')
       return Promise.resolve(false)
@@ -1502,41 +2226,26 @@ function createController(ctx) {
   async function resolvePlaylistSave(item, mode, options = {}) {
     const normalized = normalizeQueueItem(item)
     if (!normalized) throw new Error('Choose a supported track or playlist.')
-    if (normalized.source === 'local' && !normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
+    if (normalized.source !== 'local') throw new Error('New FluidMusic collections accept indexed local tracks only.')
+    if (!normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
     const checkCancelled = () => { if (disposed || options.signal?.aborted) throw new Error('Save cancelled. Nothing was changed.') }
     checkCancelled()
-    if (mode !== 'tracks' || !/^spotify:playlist:/.test(normalized.uri || '')) return { items: [serializePlaylistItem(normalized)], skipped: 0 }
-    const items = []
-    let offset = 0, skipped = 0, expectedTotal = null
-    do {
-      checkCancelled()
-      const page = await loadSpotifyPlaylist(normalized, offset)
-      checkCancelled()
-      if (page.total > 10000 || (expectedTotal !== null && expectedTotal !== page.total)) throw new Error('This playlist is too large or changed while loading. Nothing was saved; retry with a stable playlist of up to 10,000 items.')
-      expectedTotal = page.total
-      skipped += page.skipped
-      items.push(...page.tracks.map(track => serializePlaylistItem({ ...track, contextUri: '' })))
-      options.onProgress?.({ loaded: page.nextOffset, total: page.total })
-      if (!page.next) break
-      if (page.nextOffset <= offset || page.nextOffset >= 10000) throw new Error('Spotify pagination could not complete. Nothing was saved; retry.')
-      offset = page.nextOffset
-    } while (true)
-    if (!items.length) throw new Error('This Spotify playlist has no supported tracks to save.')
-    return { items, skipped }
+    return { items: [serializePlaylistItem(normalized)], skipped: 0 }
   }
 
   async function saveToPlaylist({ id = '', name = '', item, mode = 'tracks', signal, onProgress } = {}) {
     // Resolve all pages first. No empty destination or partial copy is published on failure/cancel.
     if (!id && !safeText(name)) throw new Error('Enter a playlist name.')
-    if (id && !playlists.get().some(entry => entry.id === id)) throw new Error('Choose an existing destination playlist.')
+    if (id && playlists.get().some(entry => entry.id === id && entry.legacy)) throw new Error('Legacy mixes are read-only and cannot be save destinations.')
+    if (id && !playlists.get().some(entry => entry.id === id && !entry.legacy)) throw new Error('Choose an existing writable local collection.')
     const resolved = await resolvePlaylistSave(item, mode, { signal, onProgress })
     if (disposed || signal?.aborted) throw new Error('Save cancelled. Nothing was changed.')
     const existing = playlists.get()
     if (id && !existing.some(entry => entry.id === id)) throw new Error('The destination was deleted. Nothing was saved.')
     const now = new Date().toISOString()
     const destinationId = id || `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
-    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items }]
-    const state = { version: 3, playlists: next }
+    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items, legacy: false }]
+    const state = playlistStorageState(next)
     ctx.storage.set('playlistState', state)
     if (JSON.stringify(ctx.storage.get('playlistState', null)) !== JSON.stringify(state)) throw new Error('Playlist storage could not confirm the save. Check available storage and retry.')
     undoState.set(null)
@@ -1546,6 +2255,10 @@ function createController(ctx) {
 
   function restartSpotifyPolling() {
     if (spotifyTimer) clearInterval(spotifyTimer)
+    spotifyTimer = null
+    // A disposed controller must never resurrect polling (late surface
+    // unmount/remount after plugin disposal is not playback intent).
+    if (disposed) return
     spotifyTimer = setInterval(() => {
       void refreshSpotify()
       void refreshSpotifyDevices()
@@ -1575,38 +2288,486 @@ function createController(ctx) {
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
   void refreshLocalLibrary().catch(() => {})
+  void refreshHistory().catch(() => {})
+  void loadHistoryRetention().catch(() => {})
+  void refreshQueuedYouTubeMetadata()
   ctx.onDispose(() => {
     disposed = true
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
+    clearInterval(sleepInterval)
+    sleepInterval = null
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
+    youtubeCommandSink = null
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
-    if (context) void context.close()
+
   })
+
+  // ---- Queue editing, one-step undo and provenance (FM-20) ----
+  function rememberQueueEdit(label) {
+    queueUndo.set({ label, queue: queue.get().map(item => ({ ...item })), index: index.get() })
+  }
+
+  function addNext(item, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (!normalized) { message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.'); return false }
+    if (normalized.source === 'local' && normalized.unavailable) { message.set('That local track is unavailable. Rescan its music folder first.'); return false }
+    if (normalized.source === 'local') {
+      localRegistry.set(normalized.id, normalized)
+      if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
+    }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Play next')
+    const items = queue.get()
+    const at = index.get()
+    const insertAt = at >= 0 && at < items.length ? at + 1 : items.length
+    queue.set([...items.slice(0, insertAt), normalized, ...items.slice(insertAt)])
+    if (index.get() < 0) { index.set(insertAt); status.set('paused') }
+    persist()
+    message.set(`Added “${normalized.title}” to play next.`)
+    return true
+  }
+
+  function removeQueueItems(positions) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size) return false
+    rememberQueueEdit('Remove selected')
+    const at = index.get()
+    const previous = current()
+    const removingCurrent = set.has(at)
+    const nextItems = items.filter((_, p) => !set.has(p))
+    let nextIndex = -1
+    if (nextItems.length) {
+      if (!removingCurrent) {
+        nextIndex = at - [...set].filter(p => p < at).length
+      } else {
+        const after = items.findIndex((_, p) => p > at && !set.has(p))
+        const before = items.map((_, p) => p).filter(p => p < at && !set.has(p)).pop()
+        nextIndex = nextItems.indexOf(items[after >= 0 ? after : before])
+      }
+    }
+    const wasPlaying = ['playing', 'loading'].includes(status.get())
+    return runTransition(async token => {
+      if (token !== transition) return false
+      if (removingCurrent) await stopActive(previous)
+      if (token !== transition) return false
+      queue.set(nextItems)
+      index.set(nextIndex)
+      persist()
+      if (!nextItems.length) { status.set('idle'); message.set(''); return true }
+      if (removingCurrent) {
+        progress.set({ positionMs: 0, durationMs: 0 })
+        spotifyQueueGuard = null
+        spotifyProgressAnchor = null
+        if (wasPlaying) await startSelected(nextIndex, token)
+        else { status.set('paused'); message.set(`Removed ${set.size} item(s). Press play to resume.`) }
+      } else message.set(`Removed ${set.size} item(s) from the queue.`)
+      return true
+    })
+  }
+
+  function moveQueueItems(positions, direction) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size || (direction !== -1 && direction !== 1)) return false
+    if ((direction === -1 && Math.min(...set) === 0) || (direction === 1 && Math.max(...set) === items.length - 1)) return false
+    rememberQueueEdit('Move selected')
+    const next = [...items]
+    const order = [...set].sort((a, b) => direction === -1 ? a - b : b - a)
+    for (const p of order) { const t = p + direction; [next[p], next[t]] = [next[t], next[p]] }
+    const currentItem = items[index.get()]
+    const nextIndex = currentItem ? next.indexOf(currentItem) : index.get()
+    queue.set(next)
+    if (nextIndex >= 0) index.set(nextIndex)
+    persist()
+    return true
+  }
+
+  function clearUpcoming() {
+    const items = queue.get()
+    const at = index.get()
+    if (at < 0 || at >= items.length - 1) return false
+    rememberQueueEdit('Clear upcoming')
+    queue.set(items.slice(0, at + 1))
+    persist()
+    message.set('Cleared everything after the current item. The current item keeps playing.')
+    return true
+  }
+
+  function undoQueueEdit() {
+    const saved = queueUndo.get()
+    if (!saved) return false
+    queueUndo.set(null)
+    const previous = current()
+    const restored = saved.queue[saved.index] || null
+    queue.set(saved.queue)
+    index.set(saved.index)
+    persist()
+    const sameOccurrence = previous && restored && previous.id === restored.id && previous.source === restored.source
+    if (sameOccurrence) { message.set(`Undone: ${saved.label}.`); return true }
+    if (!previous) {
+      status.set(saved.queue.length ? 'paused' : 'idle')
+      message.set(`Undone: ${saved.label}.`)
+      return true
+    }
+    // The edit changed which occurrence is current: stop the engine the edit
+    // started and pause honestly. Undo never auto-resumes playback.
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(previous)
+      if (token === transition) { status.set(saved.queue.length ? 'paused' : 'idle'); message.set(`Undone: ${saved.label}. Press play to resume.`) }
+      return true
+    })
+  }
+
+  // ---- Resumable listening sessions (FM-20): safe-reference snapshots ----
+  const persistSessions = () => ctx.storage.set('listeningSessions', listeningSessions.get())
+
+  function saveListeningSession(name) {
+    const queued = queue.get()
+    // Session-only opened files have no durable reference: skip them honestly
+    // instead of persisting dead unavailable entries.
+    const durable = queued.filter(item => item && !(item.source === 'local' && !item.localTrackId))
+    const items = durable.map(serializePlaylistItem).filter(Boolean)
+    const skipped = queued.length - items.length
+    if (!items.length) { message.set('There are no durable items to save. Index session-only files first.'); return null }
+    const session = { id: makeId('session', Date.now().toString(36)), name: safeText(name, 'Listening session').slice(0, 120), createdAt: new Date().toISOString(), items }
+    listeningSessions.set([session, ...listeningSessions.get()].slice(0, 50))
+    persistSessions()
+    message.set(`Saved “${session.name}” (${items.length} item(s)${skipped ? `, ${skipped} session-only skipped` : ''}).`)
+    return session
+  }
+
+  function listeningSessionPreview(id) {
+    const session = listeningSessions.get().find(entry => entry.id === id)
+    if (!session) return null
+    const rows = session.items.map(reference => {
+      const normalized = normalizeQueueItem(reference)
+      if (!normalized) return { item: reference, available: false, reason: 'Unsupported reference' }
+      if (normalized.source === 'local') {
+        const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+        if (!linked || linked.unavailable) return { item: normalized, available: false, reason: 'Missing local file · rescan its folder' }
+        return { item: { ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs }, available: true }
+      }
+      return { item: normalized, available: true }
+    })
+    return { session, rows, unavailable: rows.filter(row => !row.available) }
+  }
+
+  function restoreListeningSession(id, mode) {
+    const preview = listeningSessionPreview(id)
+    if (!preview) return false
+    const playable = preview.rows.filter(row => row.available).map(row => row.item)
+    if (!playable.length) { message.set('Nothing in this session is currently available. Rescan local folders or reconnect providers, then try again.'); return false }
+    const skipped = preview.rows.length - playable.length
+    if (mode === 'append') {
+      rememberQueueEdit('Append session')
+      const before = queue.get().length
+      queue.set([...queue.get(), ...playable])
+      if (index.get() < 0) { index.set(before); status.set('paused') }
+      persist()
+      message.set(`Appended ${playable.length} item(s)${skipped ? `; ${skipped} unavailable skipped` : ''}. Press play to listen.`)
+      return true
+    }
+    rememberQueueEdit('Restore session')
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(current())
+      if (token !== transition) return false
+      queue.set(playable)
+      index.set(0)
+      status.set('paused')
+      persist()
+      message.set(`Restored “${preview.session.name}” (${playable.length} item(s)${skipped ? `, ${skipped} unavailable skipped` : ''}). Press play to listen.`)
+      return true
+    })
+  }
+
+  function deleteListeningSession(id) {
+    const before = listeningSessions.get()
+    const next = before.filter(entry => entry.id !== id)
+    if (next.length === before.length) return false
+    listeningSessions.set(next)
+    persistSessions()
+    return true
+  }
+
+  // ---- Long-form resume, bookmarks and source-aware sleep timer (FM-21) ----
+  const monotonicNow = () => (typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now())
+
+  function sleepBoundMatches(item) {
+    return Boolean(sleepBound && item && sleepBound.id === item.id && sleepBound.source === item.source)
+  }
+
+  function loadResumeContext(item, token) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) {
+      if (token === transition && current()?.id === item.id) { resumeOffer.set(null); bookmarks.set([]) }
+      return Promise.resolve()
+    }
+    return Promise.all([
+      request(`/resume?media_key=${encodeURIComponent(key)}`).catch(() => null),
+      request(`/bookmarks?media_key=${encodeURIComponent(key)}`).catch(() => null),
+    ]).then(([resumeData, bookmarkData]) => {
+      if (token !== transition || current()?.id !== item.id) return
+      const saved = normalizeResumePosition(resumeData?.resume)
+      const position = saved && saved.mediaKey === key ? saved.positionMs : 0
+      const duration = saved && saved.mediaKey === key && saved.durationMs > 0 ? saved.durationMs : Number(item.durationMs) || 0
+      // Explicit Resume/Start over only — never an automatic seek on selection.
+      const offerable = position >= 15000 && (duration <= 0 || position < duration - 15000)
+      resumeOffer.set(offerable ? { mediaKey: key, positionMs: position, durationMs: duration, title: item.title } : null)
+      bookmarks.set((Array.isArray(bookmarkData?.items) ? bookmarkData.items : []).map(normalizeBookmark).filter(Boolean))
+    })
+  }
+
+  function saveResumePosition(force = false) {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (!force && monotonicNow() - lastResumeSaveAt < 15000) return
+    const { positionMs, durationMs } = progress.get()
+    if (positionMs < 15000) return
+    if (durationMs > 0 && positionMs >= durationMs - 15000) return
+    lastResumeSaveAt = monotonicNow()
+    void request('/resume', { method: 'PUT', body: { media_key: key, position_ms: Math.round(positionMs), duration_ms: Math.round(durationMs) } }).catch(() => {})
+  }
+
+  function clearResumeOnEnded(item) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (current()?.id === item.id) resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+  }
+
+  function resumeHere() {
+    const offer = resumeOffer.get()
+    if (!offer || mediaKeyFor(current()) !== offer.mediaKey) return false
+    resumeOffer.set(null)
+    void seekTo(offer.positionMs)
+    message.set(`Resumed at ${formatPositionMs(offer.positionMs)}.`)
+    return true
+  }
+
+  function startOver() {
+    const offer = resumeOffer.get()
+    const key = offer && mediaKeyFor(current()) === offer.mediaKey ? offer.mediaKey : mediaKeyFor(current())
+    if (!key) return false
+    resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+    void seekTo(0)
+    message.set('Starting over from the beginning.')
+    return true
+  }
+
+  const sortBookmarks = entries => [...entries].sort((a, b) => a.positionMs - b.positionMs || a.id - b.id)
+
+  function refreshBookmarks() {
+    const key = mediaKeyFor(current())
+    if (!key) { bookmarks.set([]); return Promise.resolve([]) }
+    return request(`/bookmarks?media_key=${encodeURIComponent(key)}`)
+      .then(data => {
+        const items = (Array.isArray(data?.items) ? data.items : []).map(normalizeBookmark).filter(Boolean)
+        if (mediaKeyFor(current()) === key) bookmarks.set(items)
+        return items
+      })
+      .catch(() => [])
+  }
+
+  async function addBookmark(label = '') {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) { message.set('Bookmarks are available for long-form YouTube and local items (10 minutes or longer).'); return null }
+    const positionMs = Math.round(progress.get().positionMs)
+    try {
+      const data = await request('/bookmarks', { method: 'POST', body: { media_key: key, position_ms: positionMs, label } })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark && mediaKeyFor(current()) === key) bookmarks.set(sortBookmarks([...bookmarks.get(), bookmark]))
+      message.set(`Bookmark saved at ${formatPositionMs(positionMs)}.`)
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be saved.')); return null }
+  }
+
+  async function editBookmark(id, changes = {}) {
+    const body = {}
+    if (changes.positionMs !== undefined) body.position_ms = Math.round(Number(changes.positionMs) || 0)
+    if (changes.label !== undefined) body.label = changes.label
+    try {
+      const data = await request(`/bookmarks/${Number(id)}`, { method: 'PUT', body })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark) bookmarks.set(sortBookmarks(bookmarks.get().map(entry => entry.id === bookmark.id ? bookmark : entry)))
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be updated.')); return null }
+  }
+
+  async function deleteBookmark(id) {
+    try {
+      await request(`/bookmarks/${Number(id)}`, { method: 'DELETE' })
+      bookmarks.set(bookmarks.get().filter(entry => entry.id !== Number(id)))
+      return true
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be deleted.')); return false }
+  }
+
+  function jumpToBookmark(id) {
+    const bookmark = bookmarks.get().find(entry => entry.id === Number(id))
+    if (!bookmark) return false
+    void seekTo(bookmark.positionMs)
+    message.set(`Jumped to ${formatPositionMs(bookmark.positionMs)}${bookmark.label ? ` · ${bookmark.label}` : ''}.`)
+    return true
+  }
+
+  function disarmSleepTimer() {
+    if (sleepInterval) { clearInterval(sleepInterval); sleepInterval = null }
+    sleepDeadline = 0
+    sleepBound = null
+    sleepTimer.set({ mode: 'off', remainingMs: 0, label: '' })
+  }
+
+  function cancelSleepTimer(reason = 'Sleep timer cancelled.') {
+    if (sleepTimer.get().mode === 'off') return false
+    disarmSleepTimer()
+    message.set(reason)
+    return true
+  }
+
+  function pauseForSleep() {
+    const item = current()
+    if (!item) return
+    if (item.source === 'radio') { stopInternalAudio(); status.set('paused'); return }
+    if (item.source === 'local') { if (audio) audio.pause(); status.set('paused'); return }
+    if (item.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('pauseVideo', []) : false
+      if (!sent) message.set('The YouTube player is not ready, so the sleep timer could not pause it.')
+      return
+    }
+    if (item.source === 'spotify') void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+  }
+
+  function finishSleepAtEndOfItem(item) {
+    // Consume the advance guards so repeated ended reports can never push the
+    // queue forward after the sleep timer chose to stop at this item.
+    sleepEndedFor = item?.id || null
+    if (youtubeQueueGuard) youtubeQueueGuard.advancing = true
+    spotifyProgressAnchor = null
+    spotifyQueueGuard = null
+    disarmSleepTimer()
+    status.set('paused')
+    message.set('Sleep timer finished at the end of the item. Playback paused.')
+  }
+
+  function sleepTick() {
+    if (disposed) { disarmSleepTimer(); return }
+    const state = sleepTimer.get()
+    if (state.mode !== 'duration') return
+    if (!sleepBoundMatches(current())) { cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.'); return }
+    const remainingMs = Math.max(0, sleepDeadline - monotonicNow())
+    if (remainingMs <= 0) {
+      disarmSleepTimer()
+      pauseForSleep()
+      message.set('Sleep timer finished. Playback paused.')
+      return
+    }
+    sleepTimer.set({ ...state, remainingMs })
+  }
+
+  function armSleepTimer(mode, minutes = 0) {
+    const item = current()
+    if (!item) { message.set('Choose something to play before starting a sleep timer.'); return false }
+    if (mode === 'end-of-item') {
+      if (item.source === 'radio') { message.set('Live radio has no end-of-item. Choose a duration instead.'); return false }
+      disarmSleepTimer()
+      sleepBound = { id: item.id, source: item.source }
+      sleepTimer.set({ mode: 'end-of-item', remainingMs: 0, label: 'End of item' })
+      message.set(`Sleep timer armed: pause at the end of “${item.title}”.`)
+      return true
+    }
+    const bounded = boundedSleepMinutes(minutes)
+    if (!bounded) { message.set(`Choose 1–${SLEEP_MAX_CUSTOM_MIN} minutes for the sleep timer.`); return false }
+    disarmSleepTimer()
+    sleepBound = { id: item.id, source: item.source }
+    sleepDeadline = monotonicNow() + bounded * 60000
+    sleepTimer.set({ mode: 'duration', remainingMs: bounded * 60000, label: `${bounded} min` })
+    sleepInterval = setInterval(sleepTick, 1000)
+    message.set(`Sleep timer armed: pause in ${bounded} minute(s).`)
+    return true
+  }
+
+  // ---- Recovery center: evidence-based health and bounded retries (FM-22) ----
+  function recordHealth(source, state, detail, action = '') {
+    const row = normalizeHealthRow({ source, state, detail, action, lastEvidenceAt: new Date().toISOString() })
+    if (row) sourceHealth.set({ ...sourceHealth.get(), [source]: row })
+  }
+
+  function tryRetry(key) {
+    const now = monotonicNow()
+    const gate = retryGate(retryBudgets.get(key), now)
+    if (!gate.allowed) {
+      message.set(`Retry is cooling down for ${Math.ceil(gate.remainingMs / 1000)}s. Wait, then try again.`)
+      return false
+    }
+    const consumed = retryConsumed(retryBudgets.get(key), now)
+    retryBudgets.set(key, consumed)
+    retryState.set({ ...retryState.get(), [key]: { ...consumed, cooldownUntilWall: consumed.cooldownUntil > 0 ? Date.now() + (consumed.cooldownUntil - now) : 0 } })
+    addLog('state', 'recovery.retry', { key, attempt: gate.attempts + 1, cooldownMs: consumed.cooldownUntil > 0 ? RETRY_COOLDOWN_MS : 0 })
+    return true
+  }
+
+  function retryRadio() {
+    const item = current()
+    if (!item || item.source !== 'radio') return Promise.resolve(false)
+    if (!tryRetry('radio')) return Promise.resolve(false)
+    return playAt(index.get()).then(() => true)
+  }
+
+  function retrySpotify() {
+    if (!tryRetry('spotify')) return Promise.resolve(false)
+    return refreshSpotify().then(() => true).catch(() => false)
+  }
+
+  function copyDiagnostics() {
+    const rows = Object.values(sourceHealth.get()).map(row => `  ${row.source}: ${row.state} — ${row.detail}${row.lastEvidenceAt ? ` (evidence ${row.lastEvidenceAt})` : ''}`)
+    const events = logs.get().slice(0, 40).map(entry => `  ${entry.at} ${entry.level} ${entry.event} ${JSON.stringify(entry.detail)}`)
+    return [
+      'FluidMusic diagnostics (sanitized — no tokens, credentials or raw history)',
+      `Generated: ${new Date().toISOString()}`,
+      `Status: ${status.get()} · Current source: ${current()?.source || 'none'}`,
+      'Source health:',
+      ...(rows.length ? rows : ['  no evidence recorded yet']),
+      'Recent events:',
+      ...(events.length ? events : ['  none']),
+    ].join('\n')
+  }
+
   return {
-    visualSampleRate: () => context?.sampleRate || 0,
-    statusVisualizer, miniVisualizer, visualizerStyle, setStatusVisualizer, setMiniVisualizer, setVisualizerStyle, acquireVisualizer, visualSamples, visualDiagnostics,
-    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute,
+    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, radioMeter, progress, playlists, localTracks, localRoots, shuffle, repeat, spotifyAutoplay,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, radioSamples, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice,
+    queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
+    listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
-    capabilities: () => mediaCapabilities(current()), clearLogs, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
+    capabilities: () => mediaCapabilities(current()), clearLogs, refreshHistory, clearHistory, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
   }
 }
-/* CONTROLLER_END */function WorkspaceButton({ children, primary = false, danger = false, ...props }) {
+/* CONTROLLER_END */
+function WorkspaceButton({ children, primary = false, danger = false, ...props }) {
+  // Button is an optional host SDK export; fall back to a plain button rather
+  // than crashing when a host build does not provide it.
   return h(
-    Button,
+    Button || 'button',
     {
       type: 'button',
-      variant: danger ? 'destructive' : primary ? 'default' : 'secondary',
-      size: 'sm',
+      ...(Button ? { variant: danger ? 'destructive' : primary ? 'default' : 'secondary', size: 'sm' } : {}),
       ...props,
     },
     children,
@@ -1619,7 +2780,6 @@ function PageHead({ kicker, title, subtitle, actions }) {
     h(
       'div',
       {},
-      h('p', { className: 'fluid-kicker' }, kicker),
       h('h1', { className: 'fluid-page-title' }, title),
       h('p', { className: 'fluid-page-subtitle' }, subtitle),
     ),
@@ -1750,17 +2910,14 @@ function Notice({ controller }) {
 }
 function AddToPlaylist({ controller, item }) {
   const [open, setOpen] = useState(false)
-  const sessionOnly = item.source === 'local' && !item.localTrackId
+  if (item.source !== 'local' || !item.localTrackId) return null
   return h(
     'span',
     {},
     h(Action, {
       compact: true,
       kind: 'playlist',
-      disabled: sessionOnly,
-      label: sessionOnly
-        ? 'Session file: index its folder to save in playlists'
-        : `Save ${item.title} to playlist`,
+      label: `Save ${item.title} to playlist`,
       onClick: () => setOpen(true),
     }),
     open &&
@@ -1772,14 +2929,13 @@ function AddToPlaylist({ controller, item }) {
   )
 }
 function SavePlaylistDialog({ controller, item, onClose }) {
-  const playlists = useValue(controller.playlists)
+  const playlists = useValue(controller.playlists).filter(entry => !entry.legacy)
   const [destination, setDestination] = useState(playlists[0]?.id || 'new')
   const [name, setName] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [progress, setProgress] = useState(null)
-  const collection = /^spotify:playlist:/.test(item.uri || '')
-  const [mode, setMode] = useState(collection ? 'tracks' : 'reference')
+
   const operation = useRef(null),
     mounted = useRef(true)
   useEffect(
@@ -1810,7 +2966,7 @@ function SavePlaylistDialog({ controller, item, onClose }) {
         id: destination === 'new' ? '' : destination,
         name,
         item,
-        mode,
+
         signal: abort.signal,
         onProgress: (value) => {
           if (mounted.current) setProgress(value)
@@ -1843,38 +2999,14 @@ function SavePlaylistDialog({ controller, item, onClose }) {
         h(
           'span',
           { className: 'fluid-row-detail' },
-          collection ? 'Spotify playlist' : sourceLabel(item),
+          sourceLabel(item),
         ),
       ),
     ),
     h(
       'form',
       { onSubmit: save },
-      collection &&
-        h(
-          'label',
-          { className: 'fluid-field' },
-          'What to save',
-          h(
-            'select',
-            {
-              className: 'fluid-select',
-              value: mode,
-              disabled: busy,
-              onChange: (event) => setMode(event.target.value),
-            },
-            h('option', { value: 'tracks' }, 'Copy the individual songs'),
-            h('option', { value: 'reference' }, 'Keep as a single Spotify playlist reference'),
-          ),
-        ),
-      collection &&
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          mode === 'tracks'
-            ? 'Copies all supported songs in their current order. You can then edit and mix them in FluidMusic. Spotify itself is not changed.'
-            : 'Saves one context entry. Spotify continues to manage the songs inside it.',
-        ),
+
       h(
         'fieldset',
         { className: 'fluid-save-destinations', disabled: busy },
@@ -1963,6 +3095,7 @@ function TrackRow({
   checked,
   onSelect,
   hideSave = false,
+  origin = '',
 }) {
   return h(
     'div',
@@ -1983,7 +3116,7 @@ function TrackRow({
       h(
         'span',
         { className: 'fluid-row-detail', title: item.subtitle },
-        item.unavailable ? 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
+        item.unavailable ? item.unavailableReason || 'Missing file · rescan its folder' : item.subtitle || sourceLabel(item),
       ),
     ),
     h('span', { className: 'fluid-source-tag' }, item.source),
@@ -2000,7 +3133,7 @@ function TrackRow({
         kind: 'play',
         label: `Play ${item.title}`,
         disabled: item.unavailable,
-        onClick: onPlay || (() => controller.add(item, true)),
+        onClick: onPlay || (() => controller.add(item, true, origin)),
       }),
       h(Action, {
         compact: true,
@@ -2008,8 +3141,15 @@ function TrackRow({
         label: `Add ${item.title} to queue`,
         disabled: item.unavailable,
         onClick: () => {
-          if (controller.add(item)) controller.message.set(`Added “${item.title}” to the queue.`)
+          if (controller.add(item, false, origin)) controller.message.set(`Added “${item.title}” to the queue.`)
         },
+      }),
+      h(Action, {
+        compact: true,
+        kind: 'forward',
+        label: `Play ${item.title} next`,
+        disabled: item.unavailable,
+        onClick: () => controller.addNext(item, origin),
       }),
       !hideSave && h(AddToPlaylist, { controller, item }),
       extraActions,
@@ -2109,11 +3249,12 @@ function Transport({ controller }) {
   const queue = useValue(controller.queue),
     at = useValue(controller.index),
     status = useValue(controller.status),
-    item = queue[at]
+    item = queue[at],
+    capabilities = mediaCapabilities(item)
   return h(
     'div',
     { className: 'fluid-player-controls' },
-    h(Action, {
+    capabilities.previous && h(Action, {
       compact: true,
       kind: 'previous',
       label: 'Previous',
@@ -2124,7 +3265,6 @@ function Transport({ controller }) {
       WorkspaceButton,
       {
         primary: true,
-        className: 'fluid-primary-action',
         disabled: !item,
         onClick: () => void controller.toggle(),
         'aria-label': ['playing', 'loading'].includes(status) ? 'Pause' : 'Play',
@@ -2133,82 +3273,13 @@ function Transport({ controller }) {
         kind: ['playing', 'loading'].includes(status) ? 'pause' : 'play',
       }),
     ),
-    h(Action, {
+    capabilities.next && h(Action, {
       compact: true,
       kind: 'next',
       label: 'Next',
       disabled: !item,
       onClick: () => void controller.next(),
     }),
-  )
-}
-function PlayerDock({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    state = useValue(controller.status),
-    spotify = useValue(controller.spotify),
-    progress = useValue(controller.progress),
-    autoplay = useValue(controller.spotifyAutoplay)
-  const item = queue[at],
-    confirmed =
-      item?.source === 'spotify' &&
-      spotify.title &&
-      (spotify.uri === item.uri || item.kind !== 'track' || autoplay)
-  const display = confirmed
-    ? {
-        ...item,
-        title: spotify.title,
-        subtitle: spotify.subtitle,
-        artwork: spotify.artwork,
-      }
-    : item
-  return h(
-    'footer',
-    { className: 'fluid-player', 'aria-label': 'Persistent player' },
-    h(
-      'div',
-      { className: 'fluid-player-track' },
-      h(Artwork, { item: display, className: 'fluid-player-cover' }),
-      h(
-        'div',
-        { className: 'fluid-row-copy' },
-        h('span', { className: 'fluid-player-title' }, display?.title || 'Ready when you are'),
-        h(
-          'span',
-          { className: 'fluid-player-subtitle' },
-          display?.subtitle || 'Choose a track, station, or playlist',
-        ),
-        h(
-          'span',
-          { className: 'fluid-player-source' },
-          item ? `${sourceLabel(item)} · ${state}` : 'FluidMusic',
-        ),
-      ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-player-center' },
-      h(Transport, { controller }),
-      item?.source !== 'radio' && progress.durationMs > 0
-        ? h(SeekBar, { controller })
-        : h(
-            'p',
-            { className: 'fluid-player-hint' },
-            item?.source === 'radio'
-              ? 'LIVE RADIO'
-              : state === 'loading'
-                ? 'Connecting…'
-                : 'Your music, without leaving your work',
-          ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-player-side' },
-      item?.source === 'spotify' &&
-        spotify.device &&
-        h('span', { className: 'fluid-player-device' }, spotify.device),
-      h(VolumeControl, { controller }),
-    ),
   )
 }
 function QueuePlaylistTracks({ controller, item }) {
@@ -2227,7 +3298,7 @@ function QueuePlaylistTracks({ controller, item }) {
     try {
       const page = await controller.loadSpotifyPlaylist(item, more ? offset : 0)
       if (token !== request.current) return
-      setTracks((previous) => (more ? [...previous, ...page.tracks] : page.tracks))
+      setTracks((previous) => (more ? [...previous, ...(page.rows || page.tracks)] : (page.rows || page.tracks)))
       setTotal(page.total)
       setNext(page.next)
       setOffset(page.nextOffset)
@@ -2260,7 +3331,7 @@ function QueuePlaylistTracks({ controller, item }) {
         h(
           'p',
           { className: 'fluid-section-copy' },
-          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unsupported entries skipped` : ''}. Play starts at that position in Spotify.`,
+          `${tracks.length} loaded${total ? ` / ${total} entries` : ''}${skipped ? ` · ${skipped} unavailable entries listed honestly` : ''}. Play starts at that position in Spotify.`,
         ),
       ),
       h(WorkspaceButton, { disabled: busy, onClick: () => void load() }, 'Refresh tracks'),
@@ -2281,10 +3352,11 @@ function QueuePlaylistTracks({ controller, item }) {
       { className: 'fluid-track-list' },
       tracks.map((track) =>
         h(TrackRow, {
+          origin: 'provider',
           controller,
           item: track,
           at: track.contextPosition,
-          key: `${track.uri}-${track.contextPosition}`,
+          key: `${track.uri || track.id}-${track.contextPosition}`,
           onPlay: () => void controller.playSpotifyPlaylistTrack(item, track),
         }),
       ),
@@ -2292,17 +3364,17 @@ function QueuePlaylistTracks({ controller, item }) {
     busy && h('p', { className: 'fluid-muted', role: 'status' }, 'Loading songs…'),
     !busy &&
       !error &&
-      !tracks.length &&
+      !tracks.some((track) => !track.unavailable) &&
       h(
         Empty,
-        { title: 'No supported songs found' },
+        { title: 'No playable songs found' },
         'Spotify may restrict this playlist or contain unavailable entries.',
       ),
     next &&
       h(WorkspaceButton, { disabled: busy, onClick: () => void load(true) }, 'Load more songs'),
   )
 }
-function QueueEntry({ controller, item, at, current, status, length }) {
+function QueueEntry({ controller, item, at, current, status, length, selectable, checked, onSelect }) {
   const collection = /^spotify:playlist:/.test(item.uri || '')
   const [expanded, setExpanded] = useState(collection && at === current)
   return h(
@@ -2310,7 +3382,13 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     { className: 'fluid-queue-entry' },
     h(
       'div',
-      { className: 'fluid-queue-row', 'data-current': at === current },
+      { className: 'fluid-queue-row', 'data-current': at === current, 'data-selectable': selectable ? 'true' : undefined },
+      selectable && h('input', {
+        type: 'checkbox',
+        checked,
+        onChange: onSelect,
+        'aria-label': `Select ${item.title} (position ${at + 1})`,
+      }),
       h(Artwork, { item, className: 'fluid-mini-cover' }),
       h(
         'button',
@@ -2326,6 +3404,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
           { className: 'fluid-row-detail' },
           `${at === current ? `${status === 'playing' ? 'Playing' : 'Selected'} · ` : ''}${collection ? 'Spotify playlist · choose a song below' : item.unavailable ? 'Missing file' : item.subtitle || sourceLabel(item)}`,
         ),
+        item.origin && queueOriginLabel(item.origin) && h('span', { className: 'fluid-queue-origin' }, queueOriginLabel(item.origin)),
       ),
       h(
         'div',
@@ -2372,7 +3451,7 @@ function QueueEntry({ controller, item, at, current, status, length }) {
     collection && expanded && h(QueuePlaylistTracks, { controller, item }),
   )
 }
-function QueueList({ controller }) {
+function QueueList({ controller, selected, onSelect }) {
   const queue = useValue(controller.queue),
     current = useValue(controller.index),
     status = useValue(controller.status)
@@ -2389,6 +3468,9 @@ function QueueList({ controller }) {
             current,
             status,
             length: queue.length,
+            selectable: Boolean(selected),
+            checked: Boolean(selected?.has(at)),
+            onSelect: () => onSelect?.(at),
           }),
         ),
       )
@@ -2398,134 +3480,10 @@ function QueueList({ controller }) {
         'Use + beside any track or station to build your listening session.',
       )
 }
-function HomePage({ controller, navigate }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    playlists = useValue(controller.playlists),
-    status = useValue(controller.status),
-    spotify = useValue(controller.spotify)
-  const item = queue[at],
-    display =
-      item?.source === 'spotify' && spotify.title && status === 'playing'
-        ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
-        : item
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Your listening space',
-      title: 'Make room for music.',
-      subtitle: 'Build a mix. Find a station. Keep your flow.',
-    }),
-    h(
-      'section',
-      { className: 'fluid-now-card' },
-      h(Artwork, { item: display, className: 'fluid-now-cover' }),
-      h(
-        'div',
-        { className: 'fluid-now-copy' },
-        h(
-          'p',
-          { className: 'fluid-kicker' },
-          item ? `${sourceLabel(item)} · ${status}` : 'Pick your soundtrack',
-        ),
-        h('h2', { className: 'fluid-now-title' }, display?.title || 'A little less silence.'),
-        h(
-          'p',
-          { className: 'fluid-now-subtitle' },
-          display?.subtitle || 'Your library, live radio, and Spotify in one workspace.',
-        ),
-        item
-          ? h(
-              'div',
-              { className: 'fluid-actions' },
-              h(Transport, { controller }),
-              h(WorkspaceButton, { onClick: () => navigate('queue') }, `View queue · ${queue.length}`),
-            )
-          : h(
-              'div',
-              { className: 'fluid-actions' },
-              h(WorkspaceButton, { primary: true, onClick: () => navigate('radio') }, 'Discover radio'),
-              h(WorkspaceButton, { onClick: () => navigate('local') }, 'Add your music'),
-            ),
-      ),
-    ),
-    h(
-      'div',
-      { className: 'fluid-source-links' },
-      [
-        ['search', 'spotify', 'Spotify', 'Search songs, albums & playlists'],
-        ['radio', 'radio', 'Live radio', 'A station for every kind of focus'],
-        ['local', 'local', 'On your device', 'Your folders. Your collection.'],
-      ].map(([view, kind, title, text]) =>
-        h(
-          'button',
-          { type: 'button', key: view, onClick: () => navigate(view) },
-          h(Icon, { kind }),
-          h('span', {}, h('strong', {}, title), h('small', {}, text)),
-          h(Icon, { kind: 'forward' }),
-        ),
-      ),
-    ),
-    h(
-      'section',
-      { className: 'fluid-result-section' },
-      h(
-        'div',
-        { className: 'fluid-section-head' },
-        h('h2', { className: 'fluid-section-title' }, 'Made by you'),
-        h(WorkspaceButton, { onClick: () => navigate('playlists') }, 'Manage playlists'),
-      ),
-      playlists.length
-        ? h(
-            'div',
-            { className: 'fluid-collection-grid' },
-            playlists.slice(0, 6).map((entry) =>
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'fluid-collection-card',
-                  key: entry.id,
-                  onClick: () => {
-                    controller.selectPlaylist(entry.id)
-                    navigate('playlists')
-                  },
-                },
-                h('span', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })),
-                h('strong', {}, entry.name),
-                h('span', {}, `${entry.items.length} items · ${entry.description || 'Your mix'}`),
-              ),
-            ),
-          )
-        : h(
-            Empty,
-            { title: 'Start a collection' },
-            h(WorkspaceButton, { onClick: () => navigate('playlists') }, 'Create your first playlist'),
-          ),
-    ),
-    h(
-      'section',
-      { className: 'fluid-result-section' },
-      h(
-        'div',
-        { className: 'fluid-section-head' },
-        h('h2', { className: 'fluid-section-title' }, 'On the air'),
-        h(WorkspaceButton, { onClick: () => navigate('radio') }, 'Explore radio'),
-      ),
-      h(
-        'div',
-        { className: 'fluid-track-list' },
-        RADIO_PRESETS.map((station, index) =>
-          h(TrackRow, { key: station.id, controller, item: station, at: index }),
-        ),
-      ),
-    ),
-  )
-}
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
-    devices = useValue(controller.spotifyDevices)
+    devices = useValue(controller.spotifyDevices),
+    localCap = useValue(controller.spotifyLocalCapability)
   const [clientId, setClientId] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
@@ -2558,6 +3516,12 @@ function SpotifyConnection({ controller }) {
         h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
         auth.authenticated ? 'Connected' : auth.state,
       ),
+    ),
+    h(
+      'div',
+      { className: 'fluid-local-playback' },
+      h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
     auth.needsClientId &&
       h(
@@ -2653,7 +3617,9 @@ function SearchPage({ controller }) {
     [results, setResults] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [searched, setSearched] = useState('')
+    [searched, setSearched] = useState(''),
+    [offset, setOffset] = useState(0),
+    [next, setNext] = useState(false)
   const request = useRef(0)
   useEffect(
     () => () => {
@@ -2661,18 +3627,25 @@ function SearchPage({ controller }) {
     },
     [],
   )
-  const search = async (event) => {
+  const search = async (event, more = false) => {
     event?.preventDefault()
-    if (busy || query.trim().length < 2 || !auth.authenticated) return
+    const term = more ? searched : query.trim()
+    if (busy || term.length < 2 || !auth.authenticated) return
     const token = ++request.current,
-      term = query.trim()
+      start = more ? offset : 0
     setBusy(true)
     setError('')
     try {
-      const data = await controller.searchSpotifyCatalog(term)
+      const data = await controller.searchSpotifyCatalog(term, start)
       if (token === request.current) {
-        setResults(data)
+        setResults((previous) =>
+          more && previous
+            ? { tracks: [...previous.tracks, ...data.tracks], albums: [...previous.albums, ...data.albums], playlists: [...previous.playlists, ...data.playlists], artists: [...previous.artists, ...data.artists] }
+            : data,
+        )
         setSearched(term)
+        setOffset(start + 10)
+        setNext(Boolean(data.cursors && Object.values(data.cursors).some(Boolean)))
       }
     } catch (reason) {
       if (token === request.current) setError(userFacingError(reason))
@@ -2683,11 +3656,7 @@ function SearchPage({ controller }) {
   return h(
     'div',
     {},
-    h(PageHead, {
-      kicker: 'Discover',
-      title: 'Find your next favourite.',
-      subtitle: 'Search the Spotify catalog. Save individual tracks or whole contexts.',
-    }),
+    h('p', { className: 'fluid-section-copy fluid-spotify-discovery' }, 'Play Spotify results now or add them to your temporary Up Next queue. FluidMusic collections are local-only; your Spotify playlists stay on Spotify.'),
     h(
       'form',
       { className: 'fluid-searchbar', onSubmit: search },
@@ -2722,7 +3691,7 @@ function SearchPage({ controller }) {
                 'div',
                 { className: 'fluid-track-list' },
                 results.tracks.map((item, at) =>
-                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at }),
+                  h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'search' }),
                 ),
               ),
             ),
@@ -2736,11 +3705,11 @@ function SearchPage({ controller }) {
                 h(
                   'div',
                   { className: 'fluid-grid' },
-                  results[kind].map((item) =>
+                  results[kind].map((item, at) =>
                     kind === 'artists'
                       ? h(
                           'article',
-                          { className: 'fluid-media-tile', key: item.id },
+                          { className: 'fluid-media-tile', key: `${item.id}-${at}` },
                           h(Artwork, { item }),
                           h('strong', { className: 'fluid-tile-title' }, item.title),
                           h(
@@ -2759,11 +3728,17 @@ function SearchPage({ controller }) {
                             'Search this artist',
                           ),
                         )
-                      : h(MediaTile, { controller, item, key: item.id }),
+                      : h(MediaTile, { controller, item, key: `${item.id}-${at}` }),
                   ),
                 ),
               ),
           ),
+          next &&
+            h(
+              'div',
+              { className: 'fluid-load-more' },
+              h(WorkspaceButton, { disabled: busy, onClick: () => void search(null, true) }, busy ? 'Loading…' : 'Load more results'),
+            ),
         )
       : auth.authenticated &&
           h(
@@ -2799,7 +3774,7 @@ function SpotifyLibraryPage({ controller }) {
         ? await controller.loadSpotifyPlaylist(playlist, start)
         : await controller.loadSpotifyPlaylists(start)
       if (token !== request.current) return
-      if (playlist) setDetail((previous) => (more ? [...previous, ...data.tracks] : data.tracks))
+      if (playlist) setDetail((previous) => (more ? [...previous, ...(data.rows || data.tracks)] : (data.rows || data.tracks)))
       else setLibrary((previous) => (more ? [...previous, ...data.items] : data.items))
       setNext(data.next)
       setOffset(playlist ? data.nextOffset : start + 50)
@@ -2832,7 +3807,7 @@ function SpotifyLibraryPage({ controller }) {
       title: selected?.name || 'Your library.',
       subtitle:
         selected?.description ||
-        'Your Spotify playlists stay on Spotify. Save tracks to FluidMusic to build a mixed collection.',
+        'Your Spotify playlists stay on Spotify. Play them directly or add a playlist context to your temporary Up Next queue.',
       actions:
         auth.authenticated &&
         h(WorkspaceButton, { onClick: () => void load() }, selected ? 'All playlists' : 'Refresh'),
@@ -2879,7 +3854,7 @@ function SpotifyLibraryPage({ controller }) {
             ? h(
                 'div',
                 { className: 'fluid-track-list' },
-                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at })),
+                detail.map((item, at) => h(TrackRow, { key: `${item.id}-${at}`, controller, item, at, origin: 'provider' })),
               )
             : h(
                 'div',
@@ -2968,6 +3943,7 @@ function RadioPage({ controller }) {
           controller,
           item,
           at,
+          origin: 'search',
           extraActions: h(Action, {
             compact: true,
             kind: 'heart',
@@ -2980,11 +3956,9 @@ function RadioPage({ controller }) {
   return h(
     'div',
     {},
-    h(PageHead, {
-      kicker: 'Tune in',
-      title: 'Something is always playing.',
-      subtitle: 'Live stations for deep work, slow mornings, and everything between.',
-      actions: h(
+    h('div', { className: 'fluid-compact-toolbar' },
+      h('p', { className: 'fluid-muted' }, 'Search live stations or add a trusted HTTPS stream.'),
+      h(
         WorkspaceButton,
         {
           onClick: () => {
@@ -2994,7 +3968,7 @@ function RadioPage({ controller }) {
         },
         'Add a stream',
       ),
-    }),
+    ),
     h(
       'form',
       { className: 'fluid-searchbar', onSubmit: find },
@@ -3137,11 +4111,11 @@ function LocalPage({ controller }) {
         h(
           'div',
           {},
-          h('h2', { className: 'fluid-section-title' }, 'Open files with visualization'),
+          h('h2', { className: 'fluid-section-title' }, 'Open files for this session'),
           h(
             'p',
             { className: 'fluid-section-copy' },
-            'Direct browser playback gives the visualizer real audio samples, without changing your indexed library.',
+            'Play individual files without adding their folder to the persistent library.',
           ),
         ),
         h(WorkspaceButton, { primary: true, onClick: () => files.current?.click() }, 'Open audio files'),
@@ -3152,7 +4126,7 @@ function LocalPage({ controller }) {
         hidden: true,
         multiple: true,
         accept: 'audio/*,.flac,.mp3,.m4a,.aac,.wav,.ogg,.opus,.webm',
-        'aria-label': 'Open audio files for visualization',
+        'aria-label': 'Open session audio files',
         onChange: (event) => {
           try {
             controller.openLocalFiles(event.target.files)
@@ -3179,10 +4153,11 @@ function LocalPage({ controller }) {
               item,
               at,
               key: item.id,
+              origin: 'session',
               onPlay: () => {
                 const queued = controller.queue.get().findIndex((row) => row.id === item.id)
                 if (queued >= 0) void controller.playAt(queued)
-                else controller.add(item, true)
+                else controller.add(item, true, 'session')
               },
             }),
           ),
@@ -3292,7 +4267,7 @@ function LocalPage({ controller }) {
         ? h(
             'div',
             { className: 'fluid-track-list' },
-            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id })),
+            filtered.slice(0, limit).map((item, at) => h(TrackRow, { controller, item, at, key: item.id, origin: 'library' })),
           )
         : h(
             Empty,
@@ -3379,7 +4354,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
     queue = useValue(controller.queue),
     favorites = useValue(controller.favorites),
     auth = useValue(controller.spotifyAuth)
-  const [source, setSource] = useState('queue'),
+  const [source, setSource] = useState('local'),
     [query, setQuery] = useState(''),
     [results, setResults] = useState([]),
     [chosen, setChosen] = useState(new Set()),
@@ -3433,10 +4408,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
       'div',
       { className: 'fluid-segmented', role: 'group', 'aria-label': 'Track source' },
       [
-        ['queue', 'Current queue'],
         ['local', 'Local music'],
-        ['radio', 'Radio'],
-        ['spotify', 'Spotify'],
       ].map(([value, label]) =>
         h(
           'button',
@@ -3577,7 +4549,6 @@ function PlaylistEditor({ controller, playlist }) {
       h(
         'div',
         { className: 'fluid-row-copy' },
-        h('p', { className: 'fluid-kicker' }, 'FluidMusic playlist'),
         h('h2', { className: 'fluid-library-title' }, playlist.name),
         h('p', { className: 'fluid-muted' }, playlist.description || 'A mix made by you.'),
         h(
@@ -3702,6 +4673,7 @@ function PlaylistEditor({ controller, playlist }) {
               selectable: true,
               checked: selected.has(at),
               hideSave: true,
+              origin: 'collection',
               onSelect: () =>
                 setSelected((previous) => {
                   const next = new Set(previous)
@@ -3768,6 +4740,15 @@ function PlaylistEditor({ controller, playlist }) {
       ),
   )
 }
+function LegacyPlaylist({ controller, playlist }) {
+  const items = controller.playlistItems(playlist.id)
+  return h('section', { className: 'fluid-playlist-editor' },
+    h('div', { className: 'fluid-playlist-heading' }, h('div', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })), h('div', {}, h('span', { className: 'fluid-source-chip' }, 'Legacy mix · read only'), h('h2', { className: 'fluid-library-title' }, playlist.name), h('p', { className: 'fluid-muted' }, playlist.description || 'Preserved from FluidMusic v3.'))),
+    h('p', { className: 'fluid-notice' }, 'This mixed collection is preserved without rewriting it. You can play, enqueue, or export it; new FluidMusic collections are local-only.'),
+    h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { primary: true, disabled: !items.length, onClick: () => void controller.playPlaylist(playlist.id) }, 'Play legacy mix'), h(WorkspaceButton, { disabled: !items.length, onClick: () => controller.enqueuePlaylist(playlist.id) }, 'Add to Up Next'), h(WorkspaceButton, { onClick: () => downloadPlaylist(controller, playlist.id) }, 'Export')),
+    h('div', { className: 'fluid-track-list' }, items.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'collection', onPlay: () => void controller.playPlaylist(playlist.id, at), extraActions: null }))),
+  )
+}
 function PlaylistsPage({ controller }) {
   const playlists = useValue(controller.playlists),
     selectedId = useValue(controller.selectedPlaylist),
@@ -3777,6 +4758,8 @@ function PlaylistsPage({ controller }) {
     [error, setError] = useState('')
   const file = useRef(null),
     selected = playlists.find((entry) => entry.id === selectedId) || playlists[0]
+  const localCollections = playlists.filter(entry => !entry.legacy)
+  const legacyCollections = playlists.filter(entry => entry.legacy)
   const filtered = playlists.filter((entry) =>
     `${entry.name} ${entry.description}`.toLowerCase().includes(filter.toLowerCase()),
   )
@@ -3801,18 +4784,13 @@ function PlaylistsPage({ controller }) {
     {},
     h(PageHead, {
       kicker: 'Made by you',
-      title: 'Your playlists.',
-      subtitle: 'Spotify, local tracks, and live radio. Arrange them your way.',
+      title: 'Local collections',
+      subtitle: 'New collections contain indexed local tracks only. Legacy mixes stay readable without migration or data loss.',
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { onClick: () => file.current?.click() }, 'Import'),
-        h(
-          WorkspaceButton,
-          { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) },
-          'Export all',
-        ),
-        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New playlist'),
+        h(WorkspaceButton, { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) }, 'Export all'),
+        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New local collection'),
       ),
     }),
     h('input', {
@@ -3845,7 +4823,7 @@ function PlaylistsPage({ controller }) {
           'aria-label': 'Filter playlists',
           placeholder: 'Find a playlist…',
         }),
-        h('p', { className: 'fluid-muted' }, `${playlists.length} collections`),
+        h('p', { className: 'fluid-muted' }, `${localCollections.length} local · ${legacyCollections.length} legacy`),
         h(
           'div',
           { className: 'fluid-playlist-list' },
@@ -3865,7 +4843,7 @@ function PlaylistsPage({ controller }) {
                 'span',
                 { className: 'fluid-row-copy' },
                 h('strong', {}, entry.name),
-                h('span', {}, `${entry.items.length} items`),
+                h('span', {}, `${entry.items.length} items${entry.legacy ? ' · Legacy mix' : ' · Local only'}`),
               ),
             ),
           ),
@@ -3878,11 +4856,11 @@ function PlaylistsPage({ controller }) {
           ),
       ),
       selected
-        ? h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
+        ? selected.legacy ? h(LegacyPlaylist, { key: selected.id, controller, playlist: selected }) : h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
         : h(
             Empty,
             { title: 'A home for your favourites.' },
-            'Create a playlist, then add tracks from your queue, local library, radio, or Spotify.',
+            'Create a collection, then add indexed tracks from your local library.',
             h(
               'div',
               { className: 'fluid-actions' },
@@ -3900,8 +4878,26 @@ function PlaylistsPage({ controller }) {
 }
 function QueuePage({ controller }) {
   const queue = useValue(controller.queue),
-    [save, setSave] = useState(false),
-    [clear, setClear] = useState(false)
+    current = useValue(controller.index),
+    undo = useValue(controller.queueUndo),
+    sessions = useValue(controller.listeningSessions),
+    [selected, setSelected] = useState(new Set()),
+    [clear, setClear] = useState(false),
+    [clearUpcoming, setClearUpcoming] = useState(false),
+    [saving, setSaving] = useState(false),
+    [sessionName, setSessionName] = useState(''),
+    [restoring, setRestoring] = useState(''),
+    [deleting, setDeleting] = useState('')
+  // Queue edits shift positions: drop any stale selection (PlaylistEditor pattern).
+  useEffect(() => setSelected(new Set()), [queue])
+  const toggleSelect = (at) => setSelected((previous) => {
+    const next = new Set(previous)
+    if (next.has(at)) next.delete(at)
+    else next.add(at)
+    return next
+  })
+  const clearSelection = () => setSelected(new Set())
+  const preview = restoring ? controller.listeningSessionPreview(restoring) : null
   return h(
     'div',
     {},
@@ -3912,7 +4908,9 @@ function QueuePage({ controller }) {
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { disabled: !queue.length, onClick: () => setSave(true) }, 'Save as playlist'),
+        h(WorkspaceButton, { disabled: !undo, onClick: () => { controller.undoQueueEdit(); clearSelection() } }, undo ? `Undo: ${undo.label}` : 'Undo'),
+        h(WorkspaceButton, { disabled: !(current >= 0 && current < queue.length - 1), onClick: () => setClearUpcoming(true) }, 'Clear upcoming'),
+        h(WorkspaceButton, { disabled: !queue.length, onClick: () => { setSessionName(''); setSaving(true) } }, 'Save session'),
         h(
           WorkspaceButton,
           { danger: true, disabled: !queue.length, onClick: () => setClear(true) },
@@ -3920,625 +4918,735 @@ function QueuePage({ controller }) {
         ),
       ),
     }),
-    h(QueueList, { controller }),
-    save &&
-      h(PlaylistForm, {
-        onClose: () => setSave(false),
-        onSave: (name) => {
-          const playlist = controller.saveQueueAsPlaylist(name)
-          if (playlist) controller.message.set(`Saved queue as “${playlist.name}”.`)
-        },
-      }),
+    selected.size > 0 && h(
+      'div',
+      { className: 'fluid-selection-bar', role: 'toolbar', 'aria-label': 'Selected queue items' },
+      h('span', {}, `${selected.size} selected`),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], -1); clearSelection() } }, 'Move up'),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], 1); clearSelection() } }, 'Move down'),
+      h(WorkspaceButton, { danger: true, onClick: () => { void controller.removeQueueItems([...selected]); clearSelection() } }, 'Remove selected'),
+      h(WorkspaceButton, { onClick: clearSelection }, 'Clear selection'),
+    ),
+    h(QueueList, { controller, selected, onSelect: toggleSelect }),
+    h(
+      'section',
+      { className: 'fluid-result-section', 'aria-label': 'Listening sessions' },
+      h('div', { className: 'fluid-section-head' },
+        h('div', {},
+          h('h2', { className: 'fluid-section-title' }, 'Listening sessions'),
+          h('p', { className: 'fluid-section-copy' }, 'Named snapshots of safe source references and order. Restore previews unavailable items and never starts playback automatically.')),
+        h('span', { className: 'fluid-muted' }, `${sessions.length}/50`)),
+      sessions.length
+        ? h('div', { className: 'fluid-track-list' }, sessions.map((session) => h(
+            'div',
+            { className: 'fluid-session-row', key: session.id },
+            h('div', { className: 'fluid-row-copy' },
+              h('span', { className: 'fluid-row-title', title: session.name }, session.name),
+              h('span', { className: 'fluid-row-detail' }, `${session.items.length} item(s)${session.createdAt ? ` · saved ${new Date(session.createdAt).toLocaleDateString()}` : ''}`)),
+            h('div', { className: 'fluid-row-actions' },
+              h(WorkspaceButton, { onClick: () => setRestoring(session.id) }, 'Restore…'),
+              h(Action, { compact: true, kind: 'trash', label: `Delete session ${session.name}`, onClick: () => setDeleting(session.id) })),
+          )))
+        : h('p', { className: 'fluid-muted' }, 'No saved sessions yet. Use “Save session” to snapshot the current queue.'),
+    ),
     clear &&
       h(
         Confirm,
         { title: 'Clear queue', onClose: () => setClear(false), action: () => controller.clearQueue() },
-        'Stop playback and clear this session’s queue? Your saved playlists and files are not changed.',
+        'Stop playback and clear this session’s queue? Your saved playlists, sessions and files are not changed.',
+      ),
+    clearUpcoming &&
+      h(
+        Confirm,
+        { title: 'Clear upcoming', onClose: () => setClearUpcoming(false), action: () => controller.clearUpcoming() },
+        'Remove everything after the current item? The current item keeps playing; saved playlists and sessions are not changed.',
+      ),
+    saving &&
+      h(
+        Modal,
+        { title: 'Save listening session', onClose: () => setSaving(false) },
+        h('form', {
+          onSubmit: (event) => {
+            event.preventDefault()
+            if (controller.saveListeningSession(sessionName)) { setSaving(false); setSessionName('') }
+          },
+        },
+          h('label', { className: 'fluid-field' }, 'Session name',
+            h('input', { className: 'fluid-input', value: sessionName, onChange: (event) => setSessionName(event.target.value), placeholder: 'Late night drive', 'aria-label': 'Session name' })),
+          h('p', { className: 'fluid-muted' }, 'Stores safe source references and order only — no files, handles or credentials. Session-only opened files are skipped.'),
+          h('div', { className: 'fluid-dialog-actions' },
+            h(WorkspaceButton, { onClick: () => setSaving(false) }, 'Cancel'),
+            h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save session')),
+        ),
+      ),
+    preview &&
+      h(
+        Modal,
+        { title: `Restore “${preview.session.name}”`, onClose: () => setRestoring('') },
+        h('p', { className: 'fluid-muted' }, `${preview.rows.length - preview.unavailable.length} of ${preview.rows.length} item(s) available right now.`),
+        preview.unavailable.length > 0 && h('div', { className: 'fluid-track-list' }, preview.unavailable.map((row, at) => h(
+          'div',
+          { className: 'fluid-queue-row', key: `${row.item?.id || 'unknown'}-${at}` },
+          h('div', { className: 'fluid-row-copy' },
+            h('span', { className: 'fluid-row-title' }, row.item?.title || 'Unknown item'),
+            h('span', { className: 'fluid-row-detail' }, row.reason)),
+        ))),
+        h('p', { className: 'fluid-muted' }, 'Unavailable items are skipped. Restoring loads the queue paused — press play when you are ready.'),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setRestoring('') }, 'Cancel'),
+          h(WorkspaceButton, { onClick: () => { controller.restoreListeningSession(preview.session.id, 'append'); setRestoring(''); clearSelection() } }, 'Append to queue'),
+          h(WorkspaceButton, { primary: true, onClick: () => { void controller.restoreListeningSession(preview.session.id, 'replace'); setRestoring(''); clearSelection() } }, 'Replace queue')),
+      ),
+    deleting &&
+      h(
+        Confirm,
+        { title: 'Delete session', onClose: () => setDeleting(''), action: () => controller.deleteListeningSession(deleting) },
+        'Delete this saved listening session? Your queue, collections and files are not changed.',
       ),
   )
 }
-const VISUAL_STYLES = [
-  ['bars', 'Spectrum'],
-  ['wave', 'Waveform'],
-  ['mirror', 'Mirror'],
-]
-function VisualizerStyle({ controller, compact = false }) {
-  const style = useValue(controller.visualizerStyle)
-  return h(
-    'select',
-    {
-      className: compact ? 'fluid-viz-select fluid-viz-select-compact' : 'fluid-select',
-      'aria-label': compact ? 'Status visualizer style' : 'Visualizer style',
-      value: style,
-      onChange: (event) => controller.setVisualizerStyle(event.target.value),
-    },
-    VISUAL_STYLES.map(([value, label]) => h('option', { value, key: value }, label)),
-  )
+function youtubeEmbedUrl(item) {
+  const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return ''
+  const params = new URLSearchParams({ controls: '1', enablejsapi: '1', playsinline: '1', rel: '0' })
+  // The origin parameter must describe the ACTUAL embedding page, never a
+  // guessed foreign origin; opaque origins omit it rather than lie.
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) && location.origin && location.origin !== 'null') params.set('origin', location.origin)
+  return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`
 }
-function VisualizerSettings({ controller }) {
-  const status = useValue(controller.statusVisualizer),
-    mini = useValue(controller.miniVisualizer)
-  return h(
-    'div',
-    { className: 'fluid-viz-settings' },
-    h(
-      'label',
-      { className: 'fluid-switch-row' },
-      h('input', {
-        type: 'checkbox',
-        checked: status,
-        onChange: (event) => controller.setStatusVisualizer(event.target.checked),
-      }),
-      'Status-bar visualizer',
-    ),
-    h(
-      'label',
-      { className: 'fluid-switch-row' },
-      h('input', {
-        type: 'checkbox',
-        checked: mini,
-        onChange: (event) => controller.setMiniVisualizer(event.target.checked),
-      }),
-      'Mini-player visualizer',
-    ),
-    h(VisualizerStyle, { controller }),
-    h(
-      'p',
-      { className: 'fluid-muted' },
-      'Hidden, inactive, and reduced-motion visuals do no sample reads or animation work. When both are inactive, the analyser is disconnected. Move the FluidMusic player pane using Hermes’ layout controls.',
-    ),
-  )
-}
-function AudioVisualizer({ controller, compact = false }) {
-  const ref = useRef(null),
-    style = useValue(controller.visualizerStyle),
-    status = useValue(controller.status),
-    meter = useValue(controller.radioMeter),
-    queue = useValue(controller.queue),
-    at = useValue(controller.index)
-  const source = queue[at]?.source
-  const supported = ['ready', 'analyser'].includes(meter) && source !== 'spotify'
+
+function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
+  const direct = youtubeEmbedUrl(item)
+  const [src, setSrc] = useState('')
   useEffect(() => {
-    const canvas = ref.current,
-      drawing = canvas?.getContext('2d')
-    if (!drawing) return undefined
-    drawing.clearRect(0, 0, canvas.width, canvas.height)
-    if (!supported || status !== 'playing') return undefined
-    const motion = matchMedia('(prefers-reduced-motion: reduce)')
-    let frame = 0,
-      release = null,
-      intersecting = false,
-      lastTime = 0,
-      stopped = false
-    let width = 0,
-      height = 0,
-      color = ''
-    let bands = [], bandRate = 0, bandBins = 0
-    const resize = () => {
-      const box = canvas.getBoundingClientRect(),
-        ratio = Math.min(window.devicePixelRatio || 1, 2)
-      width = Math.max(0, Math.floor(box.width * ratio))
-      height = Math.max(0, Math.floor(box.height * ratio))
-      canvas.width = width
-      canvas.height = height
-      color = getComputedStyle(canvas).getPropertyValue('--ui-accent').trim()
-      reconcile()
-    }
-    const draw = (time) => {
-      if (!release || stopped) return
-      frame = requestAnimationFrame(draw)
-      if (time - lastTime < 1000 / 30) return
-      lastTime = time
-      const samples = controller.visualSamples(style)
-      drawing.clearRect(0, 0, width, height)
-      if (!samples) return
-      drawing.fillStyle = color
-      drawing.strokeStyle = color
-      drawing.lineWidth = 1.5 * Math.min(window.devicePixelRatio || 1, 2)
-      if (style === 'wave') {
-        drawing.beginPath()
-        for (let point = 0; point < samples.length; point++) {
-          const x = (point / (samples.length - 1)) * width,
-            y = (samples[point] / 255) * height
-          point ? drawing.lineTo(x, y) : drawing.moveTo(x, y)
-        }
-        drawing.stroke()
-      } else {
-        const count = compact ? 20 : 48,
-          step = width / count
-        const sampleRate = controller.visualSampleRate()
-        if (sampleRate !== bandRate || samples.length !== bandBins) {
-          bands = spectrumBands(samples.length, sampleRate, count)
-          bandRate = sampleRate
-          bandBins = samples.length
-        }
-        for (let bar = 0; bar < bands.length; bar++) {
-          const { low, high } = bands[bar]
-          // A faint baseline marks every band, including silence; it is not fabricated signal.
-          drawing.globalAlpha = .18
-          drawing.fillRect(bar * step, style === 'mirror' ? height / 2 : height - 1, Math.max(1, step - 2), 1)
-          drawing.globalAlpha = 1
-          let sum = 0
-          for (let i = low; i < high; i++) sum += samples[i] || 0
-          const level = (sum / (high - low) / 255) * height
-          drawing.fillRect(
-            bar * step,
-            style === 'mirror' ? (height - level) / 2 : height - level,
-            Math.max(1, step - 2),
-            level,
-          )
-        }
-      }
-    }
-    function reconcile() {
-      if (stopped) return
-      const active = intersecting && width > 0 && height > 0 && !document.hidden && !motion.matches
-      if (active && !release) {
-        release = controller.acquireVisualizer()
-        frame = requestAnimationFrame(draw)
-      }
-      if (!active && release) {
-        cancelAnimationFrame(frame)
-        release()
-        release = null
-        drawing.clearRect(0, 0, width, height)
-      }
-    }
-    const intersection = new IntersectionObserver((entries) => {
-      intersecting = entries[0]?.isIntersecting || false
-      reconcile()
+    let live = true
+    if (!direct) { setSrc(''); return () => { live = false } }
+    controller.resolveYouTubeEmbedUrl(item).then(url => {
+      if (live) setSrc(url)
+    }).catch(async () => {
+      const getHostOrigin = window.hermesDesktop?.getEmbedHostOrigin
+      if (!live) return
+      if (!getHostOrigin) { setSrc(direct); return }
+      try {
+        const origin = await getHostOrigin()
+        if (!live) return
+        const videoId = safeText(item.id).replace(/^youtube:/, '')
+        const wrapper = new URL(`/youtube/${encodeURIComponent(videoId)}`, origin)
+        wrapper.searchParams.set('controls', '1')
+        wrapper.searchParams.set('enablejsapi', '1')
+        wrapper.searchParams.set('playsinline', '1')
+        wrapper.searchParams.set('rel', '0')
+        setSrc(wrapper.href)
+      } catch { if (live) setSrc(direct) }
     })
-    const observer = new ResizeObserver(resize)
-    intersection.observe(canvas)
-    observer.observe(canvas)
-    document.addEventListener('visibilitychange', reconcile)
-    motion.addEventListener('change', reconcile)
-    resize()
-    return () => {
-      stopped = true
-      cancelAnimationFrame(frame)
-      release?.()
-      intersection.disconnect()
-      observer.disconnect()
-      document.removeEventListener('visibilitychange', reconcile)
-      motion.removeEventListener('change', reconcile)
-    }
-  }, [controller, supported, status, style, compact])
-  const hint =
-    source === 'spotify'
-      ? 'Spotify Connect: audio plays on your device; samples are unavailable.'
-      : meter === 'unavailable'
-        ? source === 'local'
-          ? 'For visualization, reopen this file using Local music → Open audio files. Indexed playback stays available.'
-          : 'This stream does not expose audio samples.'
-        : status !== 'playing'
-          ? 'Visualization resumes during playback.'
-          : 'Audio-reactive visualization. Reduced-motion preferences suspend animation.'
-  return h(
-    'div',
-    { className: compact ? 'fluid-visualizer fluid-visualizer-compact' : 'fluid-visualizer', title: hint },
-    h('canvas', { ref, role: 'img', 'aria-label': `${style} audio visualizer` }),
-    (!supported || status !== 'playing') &&
-      h('span', { className: 'fluid-viz-hint' }, compact ? (source === 'spotify' ? 'REMOTE' : '—') : hint),
+    return () => { live = false }
+  }, [controller, direct, item?.id])
+  return src
+    ? h('iframe', { ref: frameRef, src, title, className: 'fluid-youtube-frame', allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen', loading: 'lazy', referrerPolicy: 'strict-origin-when-cross-origin', scrolling: 'no' })
+    : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
+}
+
+function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
+  // One shared control vocabulary for every provider: the same Transport
+  // actions and the same VolumeControl as the main bottom anchor.
+  return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
+    h('div', { className: 'fluid-player-controls' },
+      h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
+      h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
+      h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
+    ),
+    h(VolumeControl, { controller, compact: true }),
+    h('div', { className: 'fluid-mini-links' },
+      h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Queue'),
+      h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
+    ),
   )
 }
+
+function YouTubeTransport({ controller, frameRef, item }) {
+  const [playing, setPlaying] = useState(false)
+  const [ready, setReady] = useState(false)
+  const readyRef = useRef(false)
+  const videoId = safeText(item?.id).replace(/^youtube:/, '')
+  // Commands are bound to actual player readiness and the frame's real origin;
+  // an issued message is an acknowledgement request, not proof of playback.
+  const send = (func, args = []) => {
+    const frame = frameRef.current
+    const origin = embedFrameOrigin(frame?.src)
+    const message = youTubeCommandMessage(func, args)
+    if (!readyRef.current || !frame?.contentWindow || !origin || !message) return false
+    frame.contentWindow.postMessage(message, origin)
+    return true
+  }
+  useEffect(() => {
+    setPlaying(false)
+    setReady(false)
+    readyRef.current = false
+    let live = true
+    const receive = event => {
+      const frame = frameRef.current
+      if (!live || !frame || event.source !== frame.contentWindow) return
+      const origin = embedFrameOrigin(frame.src)
+      if (!origin || event.origin !== origin) return
+      const parsed = parseYouTubePlayerMessage(event.data, videoId)
+      if (!parsed) return
+      if (parsed.kind === 'ready') {
+        readyRef.current = true
+        setReady(true)
+        send('setVolume', [Math.round(clampVolume(controller.volume.get()) * 100)])
+        return
+      }
+      if (parsed.kind === 'state') setPlaying(parsed.playing)
+      controller.reportYouTubeState({ ...parsed, engine: 'embed' })
+    }
+    window.addEventListener('message', receive)
+    controller.setYouTubeCommandSink(send)
+    const handshake = setInterval(() => {
+      const frame = frameRef.current
+      const origin = embedFrameOrigin(frame?.src)
+      if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
+    }, 500)
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake); controller.setYouTubeCommandSink(null) }
+  }, [videoId, frameRef])
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: () => void controller.toggle() })
+}
+
+function OwnedWatchSurface({ controller, item, capability, controlRef }) {
+  // Thin adapter over the REQUIRED public owned-view contract (see
+  // youTubeWatchCapability). The host owns the persistent isolated session,
+  // genuine provider login and the control bridge; the plugin never injects
+  // scripts into an opaque origin and never borrows the app preview partition.
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null; controller.setYouTubeCommandSink(null) }, [])
+  const attachControl = handle => {
+    controlRef.current = handle
+    controller.setYouTubeCommandSink(handle ? (func, args = []) => {
+      if (func === 'playVideo') { handle.play?.(); return true }
+      if (func === 'pauseVideo') { handle.pause?.(); return true }
+      if (func === 'setVolume') { handle.setVolume?.((Number(args[0]) || 0) / 100); return true }
+      return false
+    } : null)
+  }
+  const View = capability?.OwnedMediaView
+  if (typeof View !== 'function') {
+    return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
+  }
+  return h(View, {
+    ref: attachControl,
+    src: item.url,
+    sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
+    title: item.title || 'YouTube video',
+    className: 'fluid-youtube-frame',
+    onMediaState: state => controller.reportYouTubeState({ ...state, engine: 'watch' }),
+  })
+}
+
 function MiniPlayer({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    spotify = useValue(controller.spotify),
-    status = useValue(controller.status),
-    progress = useValue(controller.progress),
-    show = useValue(controller.miniVisualizer)
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const spotify = useValue(controller.spotify)
+  const status = useValue(controller.status)
+  const progress = useValue(controller.progress)
+  const youtubeState = useValue(controller.youtube)
   const item = queue[at]
-  const display =
-    item?.source === 'spotify' && spotify.title && status === 'playing'
-      ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
-      : item
+  const capabilities = mediaCapabilities(item)
+  const display = item?.source === 'spotify' && spotify.title
+    ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
+    : item
+  const embedUrl = youtubeEmbedUrl(item)
+  const youtubeFrameRef = useRef(null)
+  const watchControlRef = useRef(null)
+  if (embedUrl) {
+    const watching = youtubeState.engine === 'watch'
+    return h(
+      'section',
+      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
+      h('div', { className: 'fluid-youtube-frame-wrap' },
+        watching
+          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      ),
+      // Honest physical minimum: the video never shrinks below 200x200. When
+      // the docked pane is too short, say so and keep controls reachable
+      // instead of pretending everything fits or hiding the video.
+      h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
+      youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
+      youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
+      watching
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => void controller.toggle() })
+        : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
+      youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
+        youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
+        h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
+    )
+  }
   return h(
     'section',
     { className: 'fluid-mini-player', 'aria-label': 'Dockable FluidMusic player' },
-    h(
-      'div',
-      { className: 'fluid-section-head' },
-      h('span', { className: 'fluid-kicker' }, item ? `${sourceLabel(item)} · ${status}` : 'FluidMusic'),
-      h(Action, {
-        compact: true,
-        kind: 'external',
-        label: 'Open Media workspace',
-        onClick: () => host.navigate(ROUTE),
-      }),
-    ),
-    h(
-      'div',
-      { className: 'fluid-mini-summary' },
-      h(Artwork, { item: display, className: 'fluid-mini-art' }),
-      h(
-        'div',
-        { className: 'fluid-row-copy' },
-        h(
-          'h2',
-          { className: 'fluid-mini-title', title: display?.title },
-          display?.title || 'Your soundtrack, anywhere.',
-        ),
-        h(
-          'p',
-          { className: 'fluid-mini-subtitle' },
-          display?.subtitle || (item ? sourceLabel(item) : 'Choose music in the Media workspace.'),
+    h('div', { className: 'fluid-mini-body' },
+      h('div', { className: 'fluid-mini-summary' },
+        h(Artwork, { item: display, className: 'fluid-mini-art' }),
+        h('div', { className: 'fluid-row-copy' },
+          h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'),
+          h('h2', { className: 'fluid-mini-title' }, display?.title || 'Ready when you are'),
+          h('p', { className: 'fluid-mini-subtitle' }, display?.subtitle || 'Choose music in the Media workspace.'),
         ),
       ),
+      capabilities.seek && progress.durationMs > 0
+        ? h(SeekBar, { controller })
+        : h('p', { className: 'fluid-player-hint' }, item?.source === 'radio' ? 'LIVE' : status),
+      h(Notice, { controller }),
     ),
-    h(Transport, { controller }),
-    item?.source !== 'radio' && progress.durationMs > 0
-      ? h(SeekBar, { controller })
-      : h(
-          'p',
-          { className: 'fluid-player-hint' },
-          item?.source === 'radio'
-            ? 'LIVE · no fixed duration'
-            : `${formatClock(progress.positionMs)} / ${formatClock(progress.durationMs)}`,
-        ),
-    h(VolumeControl, { controller }),
-    h(
-      'div',
-      { className: 'fluid-mini-visual-controls' },
-      h(
-        WorkspaceButton,
-        { onClick: () => controller.setMiniVisualizer(!show) },
-        show ? 'Hide visualizer' : 'Show visualizer',
-      ),
-      show && h(VisualizerStyle, { controller }),
+    h(MiniControlBar, { controller, playing: ['playing', 'loading'].includes(status), onToggle: () => void controller.toggle() }),
+  )
+}function YouTubeControls({ controller, compact = false }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState('search')
+  const [searched, setSearched] = useState(false)
+  const [error, setError] = useState('')
+  const request = useRef(0)
+  useEffect(() => () => { request.current += 1 }, [])
+  const submit = async event => {
+    event?.preventDefault()
+    const trimmed = query.trim()
+    if (!trimmed || busy) return
+    const token = ++request.current
+    const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    setError('')
+    setBusy(true)
+    setMode(isUrl ? 'resolve' : 'search')
+    try {
+      if (isUrl) {
+        await controller.addYouTubeUrl(trimmed, true)
+        if (token === request.current) setQuery('')
+      } else {
+        const items = await controller.searchYouTube(trimmed)
+        if (token !== request.current) return
+        setResults(items)
+        setSearched(true)
+      }
+    } catch (reason) {
+      if (token === request.current) setError(userFacingError(reason))
+    } finally {
+      if (token === request.current) setBusy(false)
+    }
+  }
+  return h('section', { className: compact ? 'fluid-youtube fluid-youtube-compact' : 'fluid-panel fluid-panel-pad fluid-youtube' },
+    h('div', { className: 'fluid-section-head' },
+      h('div', {}, h('h2', { className: 'fluid-section-title' }, 'YouTube'), h('p', { className: 'fluid-section-copy' }, 'Search songs or videos, or paste a watch URL. FluidMusic loads the real video title and channel.')),
     ),
-    show && h(AudioVisualizer, { controller }),
-    h(Notice, { controller }),
+    h('form', { className: 'fluid-searchbar', onSubmit: submit },
+      h('input', { className: 'fluid-input', value: query, onChange: event => setQuery(event.target.value), placeholder: 'Search YouTube or paste a watch URL', 'aria-label': 'Search YouTube or paste a watch URL' }),
+      h(WorkspaceButton, { primary: true, type: 'submit', disabled: busy || !query.trim() }, busy ? (mode === 'resolve' ? 'Resolving…' : 'Searching…') : 'Search'),
+    ),
+    error && h('p', { className: 'fluid-error', role: 'alert' }, error),
+    searched && !busy && !error && results.length === 0 && h('p', { className: 'fluid-muted', role: 'status' }, 'No videos found. Try different words or paste a watch URL.'),
+    results.length > 0 && h('div', { className: 'fluid-track-list fluid-youtube-results' }, results.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'search', onPlay: () => controller.addYouTubeItem(item, true) }))),
   )
 }
-function LogsPage({ controller }) {
-  const entries = useValue(controller.logs),
-    [query, setQuery] = useState('')
-  const rows = entries.filter((entry) =>
-    `${entry.event} ${entry.level} ${JSON.stringify(entry.detail)}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  )
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Diagnostics',
-      title: `Logs · ${entries.length}`,
-      subtitle: 'Provider requests, failures, and confirmed playback transitions. No credentials.',
-      actions: h(
-        WorkspaceButton,
-        { disabled: !entries.length, onClick: () => controller.clearLogs() },
-        'Clear logs',
-      ),
-    }),
-    h('input', {
-      className: 'fluid-input',
-      type: 'search',
-      value: query,
-      onChange: (event) => setQuery(event.target.value),
-      'aria-label': 'Filter diagnostics',
-      placeholder: 'Filter events…',
-    }),
-    h(
-      'div',
-      { className: 'fluid-log-list' },
-      rows.map((entry) =>
-        h(
-          'article',
-          { className: 'fluid-log-row', 'data-level': entry.level, key: entry.id },
-          h('time', { dateTime: entry.at }, new Date(entry.at).toLocaleTimeString()),
-          h('span', { className: 'fluid-log-level' }, entry.level),
-          h('strong', {}, entry.event),
-          h('pre', {}, JSON.stringify(entry.detail, null, 2)),
-        ),
-      ),
-    ),
-    !rows.length && h(Empty, { title: 'No matching events' }, 'Use the player to record provider activity.'),
+
+function HistoryPage({ controller }) {
+  const entries = useValue(controller.history)
+  const total = useValue(controller.historyTotal)
+  const filters = useValue(controller.historyFilters)
+  const offset = useValue(controller.historyOffset)
+  const retention = useValue(controller.historyRetention)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [removing, setRemoving] = useState(null)
+  const [draft, setDraft] = useState({ query: filters.query, source: filters.source, since: filters.since, until: filters.until })
+  useEffect(() => { void controller.refreshHistory().catch(() => {}) }, [controller])
+  const applyFilters = () => { void controller.refreshHistory(draft, 0).catch(() => {}) }
+  const resetFilters = () => {
+    const empty = { query: '', source: '', since: '', until: '' }
+    setDraft(empty)
+    void controller.refreshHistory(empty, 0).catch(() => {})
+  }
+  const pageStart = total ? offset + 1 : 0
+  const pageEnd = offset + entries.length
+  return h('section', {},
+    h('div', { className: 'fluid-compact-toolbar' },
+      h('p', { className: 'fluid-muted' }, `${total} recorded play${total === 1 ? '' : 's'}${total ? ` · showing ${pageStart}–${pageEnd}` : ''}`),
+      h(WorkspaceButton, { disabled: !total, onClick: () => setConfirmClear(true) }, 'Clear history')),
+    h('form', { className: 'fluid-history-filters', onSubmit: (event) => { event.preventDefault(); applyFilters() } },
+      h('label', { className: 'fluid-filter-field' }, 'Title',
+        h('input', { className: 'fluid-input', type: 'search', value: draft.query, onChange: event => setDraft({ ...draft, query: event.target.value }), placeholder: 'Search titles…', 'aria-label': 'Filter history by title' })),
+      h('label', { className: 'fluid-filter-field' }, 'Source',
+        h('select', { className: 'fluid-input', value: draft.source, onChange: event => setDraft({ ...draft, source: event.target.value }), 'aria-label': 'Filter history by source' },
+          [['', 'All sources'], ['spotify', 'Spotify'], ['radio', 'Radio'], ['local', 'Local'], ['youtube', 'YouTube']].map(([value, label]) => h('option', { key: value, value }, label)))),
+      h('label', { className: 'fluid-filter-field' }, 'Since',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.since, onChange: event => setDraft({ ...draft, since: event.target.value }), 'aria-label': 'Filter history since date' })),
+      h('label', { className: 'fluid-filter-field' }, 'Until',
+        h('input', { className: 'fluid-input', type: 'date', value: draft.until, onChange: event => setDraft({ ...draft, until: event.target.value }), 'aria-label': 'Filter history until date' })),
+      h('div', { className: 'fluid-actions' },
+        h(WorkspaceButton, { type: 'submit' }, 'Apply'),
+        h(WorkspaceButton, { onClick: resetFilters }, 'Reset'))),
+    h('p', { className: 'fluid-muted' }, retention > 0
+      ? `Retention: entries older than ${retention} days are removed automatically. Change this in Settings › Playback.`
+      : 'Retention: keep forever (up to 5000 entries). Change this in Settings › Playback.'),
+    entries.length ? h('div', { className: 'fluid-track-list' }, entries.map((entry, at) => h(TrackRow, {
+      controller,
+      item: entry.item,
+      at,
+      key: entry.id,
+      hideSave: true,
+      origin: 'history',
+      onPlay: () => controller.add(entry.item, true, 'history'),
+      extraActions: h('div', { className: 'fluid-row-actions' },
+        h('time', { className: 'fluid-history-time', dateTime: entry.playedAt }, entry.playedAt ? new Date(entry.playedAt).toLocaleString() : ''),
+        h(Action, { compact: true, kind: 'trash', label: `Remove ${entry.item.title} from history`, onClick: () => setRemoving(entry) })),
+    }))) : h(Empty, { title: 'Nothing played yet' }, 'Spotify, radio, local music, and YouTube plays will appear here.'),
+    total > 0 && h('div', { className: 'fluid-history-pager' },
+      h(WorkspaceButton, { disabled: offset <= 0, onClick: () => void controller.refreshHistory(null, Math.max(0, offset - 50)).catch(() => {}) }, 'Back'),
+      h(WorkspaceButton, { disabled: offset + entries.length >= total, onClick: () => void controller.refreshHistory(null, offset + 50).catch(() => {}) }, 'Next'),
+      h('span', { className: 'fluid-muted' }, `Page ${Math.floor(offset / 50) + 1} of ${Math.max(1, Math.ceil(total / 50))}`)),
+    confirmClear && h(Confirm, {
+      title: 'Clear history',
+      action: () => controller.clearHistory(),
+      onClose: () => setConfirmClear(false),
+    }, `This removes ${total} recorded play${total === 1 ? '' : 's'} from this profile's listening history. Queues, collections, and provider history are not affected.`),
+    removing && h(Confirm, {
+      title: 'Remove history entry',
+      action: () => controller.removeHistoryEntry(removing.id),
+      onClose: () => setRemoving(null),
+    }, `Remove “${removing.item.title}” from this profile's listening history? The media itself and provider history are not affected.`),
   )
 }
+
+function HistoryRetention({ controller }) {
+  const days = useValue(controller.historyRetention)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => { void controller.loadHistoryRetention().catch(() => {}) }, [controller])
+  return h('div', { className: 'fluid-filter-field' },
+    h('strong', {}, 'History retention'),
+    h('small', { className: 'fluid-muted' }, 'How long this profile keeps played-history entries. Media files, queues and provider history are never touched.'),
+    h('select', {
+      className: 'fluid-input', value: String(days), disabled: busy, 'aria-label': 'History retention',
+      onChange: (event) => {
+        setBusy(true)
+        setError('')
+        void controller.setHistoryRetention(Number(event.target.value))
+          .catch(err => setError(err?.message || 'Retention could not be updated.'))
+          .finally(() => setBusy(false))
+      },
+    }, [[0, 'Keep forever'], [30, '30 days'], [90, '90 days'], [365, '1 year']].map(([value, label]) => h('option', { key: value, value: String(value) }, label))),
+    error && h('p', { className: 'fluid-error', role: 'alert' }, error))
+}
+
+function PlayerExtras({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const offer = useValue(controller.resumeOffer)
+  const sleep = useValue(controller.sleepTimer)
+  const bookmarks = useValue(controller.bookmarks)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const eligible = isLongFormEligible(item)
+  const [sleepOpen, setSleepOpen] = useState(false)
+  const [custom, setCustom] = useState('45')
+  const [bookmarksOpen, setBookmarksOpen] = useState(false)
+  const [label, setLabel] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [editLabel, setEditLabel] = useState('')
+  const [editPosition, setEditPosition] = useState('')
+  if (!item && !offer && sleep.mode === 'off') return null
+  return h('div', { className: 'fluid-player-extras' },
+    offer && h('div', { className: 'fluid-resume-offer', role: 'status' },
+      h('span', {}, `Resume “${offer.title}” at ${formatPositionMs(offer.positionMs)}?`),
+      h(WorkspaceButton, { onClick: () => controller.resumeHere() }, 'Resume'),
+      h(WorkspaceButton, { onClick: () => controller.startOver() }, 'Start over')),
+    eligible && h(WorkspaceButton, { onClick: () => { setLabel(''); setBookmarksOpen(true) } }, `Bookmarks${bookmarks.length ? ` · ${bookmarks.length}` : ''}`),
+    h('button', {
+      type: 'button', className: 'fluid-sleep-chip', 'data-armed': sleep.mode !== 'off' ? 'true' : undefined,
+      'aria-label': sleep.mode === 'duration' ? `Sleep timer: ${formatPositionMs(sleep.remainingMs)} remaining. Open sleep timer controls`
+        : sleep.mode === 'end-of-item' ? 'Sleep timer: end of item. Open sleep timer controls' : 'Open sleep timer',
+      onClick: () => setSleepOpen(true),
+    },
+      h(Icon, { kind: 'clock' }),
+      sleep.mode === 'duration' ? `Sleep · ${formatPositionMs(sleep.remainingMs)}` : sleep.mode === 'end-of-item' ? 'Sleep · end of item' : 'Sleep'),
+    sleep.mode !== 'off' && h(WorkspaceButton, { onClick: () => controller.cancelSleepTimer() }, 'Cancel timer'),
+    sleepOpen && h(Modal, { title: 'Sleep timer', onClose: () => setSleepOpen(false) },
+      h('p', { className: 'fluid-muted' }, 'Pauses only the current player when it finishes. Changing the source cancels the timer; it never takes over another device. The timer is not restored after a reload.'),
+      h('div', { className: 'fluid-actions' },
+        SLEEP_PRESETS_MIN.map(minutes => h(WorkspaceButton, { key: minutes, onClick: () => { if (controller.armSleepTimer('duration', minutes)) setSleepOpen(false) } }, `${minutes} min`)),
+        h(WorkspaceButton, { disabled: item?.source === 'radio', onClick: () => { if (controller.armSleepTimer('end-of-item')) setSleepOpen(false) } }, 'End of item')),
+      item?.source === 'radio' && h('p', { className: 'fluid-muted' }, 'Live radio has no end-of-item; choose a duration.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); if (controller.armSleepTimer('duration', Number(custom))) setSleepOpen(false) } },
+        h('label', { className: 'fluid-field' }, 'Custom minutes (1–720)',
+          h('input', { className: 'fluid-input', type: 'number', min: 1, max: 720, value: custom, onChange: event => setCustom(event.target.value), 'aria-label': 'Custom sleep minutes' })),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setSleepOpen(false) }, 'Close'),
+          h(WorkspaceButton, { primary: true, type: 'submit' }, 'Start'))),
+      sleep.mode !== 'off' && h('div', { className: 'fluid-dialog-actions' },
+        h(WorkspaceButton, { danger: true, onClick: () => { controller.cancelSleepTimer(); setSleepOpen(false) } }, 'Cancel timer'))),
+    bookmarksOpen && h(Modal, { title: `Bookmarks · ${item?.title || ''}`, onClose: () => { setBookmarksOpen(false); setEditing(null) } },
+      h('p', { className: 'fluid-muted' }, 'Timestamp bookmarks for this long-form item. Jump seeks the current player; nothing is downloaded.'),
+      h('form', { onSubmit: (event) => { event.preventDefault(); void controller.addBookmark(label).then(result => { if (result) setLabel('') }) } },
+        h('label', { className: 'fluid-field' }, `Bookmark at ${formatPositionMs(progress.positionMs)}`,
+          h('input', { className: 'fluid-input', value: label, onChange: event => setLabel(event.target.value), placeholder: 'Optional label', 'aria-label': 'Bookmark label' })),
+        h('div', { className: 'fluid-dialog-actions' }, h(WorkspaceButton, { primary: true, type: 'submit' }, 'Add bookmark'))),
+      bookmarks.length ? h('div', { className: 'fluid-track-list' }, bookmarks.map(entry => h('div', { className: 'fluid-bookmark-row', key: entry.id },
+        h(WorkspaceButton, { onClick: () => controller.jumpToBookmark(entry.id) }, formatPositionMs(entry.positionMs)),
+        editing === entry.id
+          ? h('form', { onSubmit: (event) => { event.preventDefault(); void controller.editBookmark(entry.id, { label: editLabel, positionMs: Number(editPosition) * 1000 }).then(result => { if (result) setEditing(null) }) } },
+            h('input', { className: 'fluid-input', value: editLabel, onChange: event => setEditLabel(event.target.value), 'aria-label': 'Bookmark label' }),
+            h('input', { className: 'fluid-input', type: 'number', min: 0, value: editPosition, onChange: event => setEditPosition(event.target.value), 'aria-label': 'Bookmark position in seconds' }),
+            h('div', { className: 'fluid-dialog-actions' },
+              h(WorkspaceButton, { onClick: () => setEditing(null) }, 'Cancel'),
+              h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save')))
+          : h('span', { className: 'fluid-row-title' }, entry.label || 'Untitled bookmark'),
+        h('div', { className: 'fluid-row-actions' },
+          h(Action, { compact: true, kind: 'edit', label: `Edit bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => { setEditing(entry.id); setEditLabel(entry.label); setEditPosition(String(Math.round(entry.positionMs / 1000))) } }),
+          h(Action, { compact: true, kind: 'trash', label: `Delete bookmark at ${formatPositionMs(entry.positionMs)}`, onClick: () => void controller.deleteBookmark(entry.id) })))))
+        : h('p', { className: 'fluid-muted' }, 'No bookmarks yet. Add one at the current position.')),
+  )
+}
+
+function NowPlayingBand({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const status = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const item = queue[at]
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  const upcoming = queue.slice(at + 1, at + 4)
+  return h('section', { className: 'fluid-now-band', 'aria-label': 'Now playing' },
+    h('div', { className: 'fluid-orbit', 'data-playing': status === 'playing' }, h(Artwork, { item: display, className: 'fluid-orbit-art' })),
+    h('div', { className: 'fluid-now-main' },
+      h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'),
+      h('h1', { className: 'fluid-now-title' }, display?.title || 'Choose what plays next'),
+      h('p', { className: 'fluid-now-subtitle' }, display?.subtitle || 'Spotify, live radio, local music, and embedded YouTube playback.'),
+      item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device ? `Playing on ${spotify.device}` : 'Choose an available Spotify Connect device in Settings.'),
+    ),
+    h('aside', { className: 'fluid-up-next', 'aria-label': 'Up next preview' },
+      h('div', { className: 'fluid-section-head' }, h('h2', { className: 'fluid-section-title' }, 'Up Next'), h('span', {}, `${Math.max(0, queue.length - at - 1)}`)),
+      upcoming.length ? upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, onClick: () => void controller.playAt(at + offset + 1) }, h(Artwork, { item: next, className: 'fluid-mini-cover' }), h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next))))) : h('p', { className: 'fluid-muted' }, 'Nothing queued after this.'),
+      h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { onClick: () => controller.setWorkspaceView('queue') }, 'Open Queue')),
+    ),
+  )
+}
+
+function BottomTransport({ controller }) {
+  // The ONE persistent player bar: content scrolls above it, it never scrolls
+  // away. Same capability table and shared components as every other surface.
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const status = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const progress = useValue(controller.progress)
+  const item = queue[at]
+  const capabilities = mediaCapabilities(item)
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  return h('footer', { className: 'fluid-bottom-bar', 'aria-label': 'Player' },
+    h('div', { className: 'fluid-bottom-item' },
+      h(Artwork, { item: display, className: 'fluid-mini-cover' }),
+      h('div', { className: 'fluid-row-copy' },
+        h('span', { className: 'fluid-row-title', title: display?.title || '' }, display?.title || 'Nothing selected'),
+        h('span', { className: 'fluid-row-detail', title: display?.subtitle || '' }, display?.subtitle || 'Choose music in Browse.'),
+      ),
+    ),
+    h('div', { className: 'fluid-bottom-center' },
+      h(Transport, { controller }),
+      capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : h('p', { className: 'fluid-live-line' }, item?.source === 'radio' ? 'LIVE · station broadcast' : item ? status : 'idle'),
+    ),
+    h('div', { className: 'fluid-bottom-right' },
+      capabilities.volume && h(VolumeControl, { controller }),
+      item && h('span', { className: 'fluid-source-chip', 'data-source': item.source }, sourceLabel(item)),
+    ),
+    h(PlayerExtras, { controller }),
+  )
+}
+
+function SecondaryTabs({ label, value, onChange, items }) {
+  return h('div', { className: 'fluid-secondary-tabs', role: 'tablist', 'aria-label': label }, items.map(([id, text]) => h('button', { type: 'button', role: 'tab', key: id, 'aria-selected': value === id, onClick: () => onChange(id) }, text)))
+}
+
+function BrowsePage({ controller }) {
+  const [tab, setTab] = useState('spotify')
+  return h('div', {}, h(PageHead, { title: 'Browse', subtitle: 'Search Spotify, YouTube, or live radio.' }), h(SecondaryTabs, { label: 'Browse sources', value: tab, onChange: setTab, items: [['spotify', 'Spotify'], ['youtube', 'YouTube'], ['radio', 'Radio']] }), tab === 'spotify' ? h(SearchPage, { controller }) : tab === 'youtube' ? h(YouTubeControls, { controller }) : h(RadioPage, { controller }))
+}
+
+function LibraryPage({ controller }) {
+  const [tab, setTab] = useState('spotify')
+  return h('div', {}, h(PageHead, { title: 'Library', subtitle: 'Playlists, local music, collections, and listening history.' }), h(SecondaryTabs, { label: 'Library sources', value: tab, onChange: setTab, items: [['spotify', 'Spotify'], ['local', 'Local'], ['collections', 'Collections'], ['history', 'History']] }), tab === 'spotify' ? h(SpotifyLibraryPage, { controller }) : tab === 'local' ? h(LocalPage, { controller }) : tab === 'history' ? h(HistoryPage, { controller }) : h(PlaylistsPage, { controller }))
+}
+
+function RecoveryPage({ controller, onOpenDiagnostics }) {
+  const health = useValue(controller.sourceHealth)
+  const retries = useValue(controller.retryState)
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const [copied, setCopied] = useState('')
+  const rows = ['spotify', 'youtube', 'local', 'radio', 'backend'].map(source => health[source] || { source, state: 'unknown', detail: 'No evidence yet — health updates only from real requests and playback.', action: '', lastEvidenceAt: '' })
+  const cooldownFor = key => {
+    const entry = retries[key]
+    return entry && entry.cooldownUntilWall > Date.now() ? Math.ceil((entry.cooldownUntilWall - Date.now()) / 1000) : 0
+  }
+  const retryAction = source => {
+    if (source === 'spotify') return () => void controller.retrySpotify()
+    if (source === 'youtube') return () => void controller.retryYouTube()
+    if (source === 'radio') return () => void controller.retryRadio()
+    if (source === 'local') return () => void controller.rescanLocalLibrary().catch(() => {})
+    return () => void controller.refreshHistory().catch(() => {})
+  }
+  const copy = () => {
+    const text = controller.copyDiagnostics()
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => setCopied('Sanitized diagnostics copied.'))
+        .catch(() => setCopied('Clipboard was refused — diagnostics remain in the Diagnostics tab.'))
+    } else setCopied('Clipboard is unavailable here — diagnostics remain in the Diagnostics tab.')
+  }
+  return h('section', { className: 'fluid-panel fluid-panel-pad', 'aria-label': 'Recovery center' },
+    h('div', { className: 'fluid-section-head' },
+      h('div', {},
+        h('h2', { className: 'fluid-section-title' }, 'Recovery'),
+        h('p', { className: 'fluid-section-copy' }, 'One quiet place for source health and bounded retries. Rows reflect the last real evidence — never a fake all-online badge. Retries cool down after three attempts.')),
+      h('div', { className: 'fluid-actions' },
+        h(WorkspaceButton, { onClick: copy }, 'Copy diagnostics'),
+        h(WorkspaceButton, { onClick: onOpenDiagnostics }, 'Open diagnostics'))),
+    copied && h('p', { className: 'fluid-muted', role: 'status' }, copied),
+    h('div', { className: 'fluid-track-list' }, rows.map(row => h('div', { className: 'fluid-health-row', key: row.source, 'data-state': row.state },
+      h('div', { className: 'fluid-row-copy' },
+        h('span', { className: 'fluid-row-title' }, `${sourceLabel({ source: row.source })} · ${row.state}`),
+        h('span', { className: 'fluid-row-detail' }, row.detail),
+        row.lastEvidenceAt && h('span', { className: 'fluid-row-detail' }, `Last evidence: ${new Date(row.lastEvidenceAt).toLocaleString()}`)),
+      h('div', { className: 'fluid-row-actions' },
+        h(WorkspaceButton, { disabled: cooldownFor(row.source) > 0, onClick: retryAction(row.source) }, cooldownFor(row.source) > 0 ? `Retry (${cooldownFor(row.source)}s)` : 'Retry'),
+        row.source === 'spotify' && row.action === 'reconnect' && h(WorkspaceButton, { onClick: () => void controller.startSpotifyAuth() }, 'Reconnect'),
+        row.source === 'local' && h(WorkspaceButton, { onClick: () => void controller.rescanLocalLibrary().catch(() => {}) }, 'Rescan'),
+        queue.length > at + 1 && h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip'))))),
+    h('p', { className: 'fluid-muted' }, 'Skipping advances the queue once; it never edits provider playlists. Diagnostics are sanitized — no tokens, credentials or raw history.'),
+  )
+}
+
 function SettingsPage({ controller }) {
-  const autoplay = useValue(controller.spotifyAutoplay),
-    shuffle = useValue(controller.shuffle),
-    repeat = useValue(controller.repeat),
-    queue = useValue(controller.queue),
-    at = useValue(controller.index)
-  const item = queue[at],
-    polling = controller.polling()
-  const run = (work) => void work().catch((error) => controller.message.set(userFacingError(error)))
-  return h(
-    'div',
-    {},
-    h(PageHead, {
-      kicker: 'Make it yours',
-      title: 'Playback & connections.',
-      subtitle: 'Choose where music plays and what happens next.',
-    }),
-    h(
-      'div',
-      { className: 'fluid-settings-grid' },
-      h(SpotifyConnection, { controller }),
-      h(
-        'section',
-        { className: 'fluid-panel fluid-panel-pad' },
-        h('h2', { className: 'fluid-section-title' }, 'Volume & visuals'),
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          'Volume is always available in the status bar, even outside Media.',
-        ),
-        h(VolumeControl, { controller }),
-        h(VisualizerSettings, { controller }),
-        h('hr', {}),
-        h('h2', { className: 'fluid-section-title' }, 'Spotify continuation'),
-        h(
-          'label',
-          { className: 'fluid-switch-row' },
-          h('input', {
-            type: 'checkbox',
-            checked: autoplay,
-            onChange: (event) => controller.setSpotifyAutoplay(event.target.checked),
-          }),
-          h(
-            'span',
-            {},
-            h('strong', {}, 'Let Spotify continue after a track'),
-            h(
-              'small',
-              {},
-              autoplay
-                ? 'Spotify controls the next song in its context.'
-                : 'FluidMusic advances to the next item in your queue.',
-            ),
-          ),
-        ),
-        item?.source === 'spotify' &&
-          h(
-            'div',
-            { className: 'fluid-actions' },
-            h(
-              WorkspaceButton,
-              { onClick: () => run(() => controller.setShuffle(!shuffle)), 'aria-pressed': shuffle },
-              shuffle ? 'Shuffle on' : 'Shuffle off',
-            ),
-            h(
-              WorkspaceButton,
-              {
-                onClick: () =>
-                  run(() =>
-                    controller.setRepeat(
-                      repeat === 'off' ? 'context' : repeat === 'context' ? 'track' : 'off',
-                    ),
-                  ),
-              },
-              `Repeat: ${repeat}`,
-            ),
-          ),
-        h(
-          'p',
-          { className: 'fluid-muted' },
-          `State checks: ${polling.open}s in Media, ${polling.closed}s elsewhere. Progress advances between checks.`,
-        ),
-      ),
-      h(
-        'section',
-        { className: 'fluid-panel fluid-panel-pad' },
-        h('h2', { className: 'fluid-section-title' }, 'Three sources. Clear boundaries.'),
-        h(
-          'dl',
-          { className: 'fluid-boundaries' },
-          h('dt', {}, 'Spotify'),
-          h(
-            'dd',
-            {},
-            'Remote control of an official Connect device. No audio samples are available here; the visualizer never simulates them.',
-          ),
-          h('dt', {}, 'Radio'),
-          h(
-            'dd',
-            {},
-            'Browser audio, with station ads intact. Audio visualization is available when the stream permits analysis.',
-          ),
-          h('dt', {}, 'Local music'),
-          h(
-            'dd',
-            {},
-            'Audio stays on disk. Saved playlists store stable catalog IDs, never audio bytes or private paths.',
-          ),
-        ),
-      ),
-    ),
+  const [tab, setTab] = useState('providers')
+  const autoplay = useValue(controller.spotifyAutoplay)
+  return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['recovery', 'Recovery'], ['diagnostics', 'Diagnostics']] }),
+    tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) :
+    tab === 'recovery' ? h(RecoveryPage, { controller, onOpenDiagnostics: () => setTab('diagnostics') }) : h(LogsPage, { controller }))
+}
+
+function LogsPage({ controller }) {
+  const entries = useValue(controller.logs)
+  return h('section', { className: 'fluid-panel fluid-panel-pad' },
+    h('div', { className: 'fluid-section-head' }, h('div', {}, h('h2', { className: 'fluid-section-title' }, `Diagnostics · ${entries.length}`), h('p', { className: 'fluid-section-copy' }, 'Sanitized provider commands and playback transitions.')), h(WorkspaceButton, { disabled: !entries.length, onClick: () => controller.clearLogs() }, 'Clear logs')),
+    h('div', { className: 'fluid-log-list' }, entries.map(entry => h('article', { className: 'fluid-log-row', 'data-level': entry.level, key: entry.id }, h('time', { dateTime: entry.at }, new Date(entry.at).toLocaleTimeString()), h('span', { className: 'fluid-log-level' }, entry.level), h('strong', {}, entry.event), h('pre', {}, JSON.stringify(entry.detail, null, 2))))),
+    !entries.length && h(Empty, { title: 'No diagnostics yet' }, 'Provider activity appears here when you use playback controls.'),
   )
 }
-const NAV_PRIMARY = [
-  ['home', 'home', 'Overview'],
-  ['search', 'search', 'Search'],
-  ['library', 'spotify', 'Spotify'],
-  ['radio', 'radio', 'Radio'],
-  ['local', 'local', 'Local music'],
-]
-const NAV_LIBRARY = [
-  ['playlists', 'playlist', 'Playlists'],
-  ['queue', 'queue', 'Queue'],
-  ['settings', 'settings', 'Settings'],
-  ['logs', 'logs', 'Logs'],
-]
-function Sidebar({ controller, view, navigate }) {
-  const queue = useValue(controller.queue),
-    playlists = useValue(controller.playlists),
-    auth = useValue(controller.spotifyAuth)
-  const group = (label, rows) =>
-    h(
-      'div',
-      { className: 'fluid-nav-group' },
-      h('p', { className: 'fluid-nav-label' }, label),
-      rows.map(([id, icon, text]) =>
-        h(
-          'button',
-          {
-            type: 'button',
-            className: 'fluid-nav-button',
-            'data-active': view === id,
-            'aria-current': view === id ? 'page' : undefined,
-            key: id,
-            onClick: () => navigate(id),
-          },
-          h('span', { className: 'fluid-nav-icon' }, h(Icon, { kind: icon })),
-          h('span', {}, text),
-          ['queue', 'playlists'].includes(id) &&
-            h('span', { className: 'fluid-nav-count' }, id === 'queue' ? queue.length : playlists.length),
-        ),
-      ),
-    )
-  return h(
-    'nav',
-    { className: 'fluid-sidebar', 'aria-label': 'FluidMusic' },
-    h(
-      'div',
-      { className: 'fluid-brand' },
-      h(Icon, { kind: 'music' }),
-      h('span', {}, h('strong', {}, 'FluidMusic'), h('small', {}, 'A soundtrack for your work')),
-    ),
-    group('Listen', NAV_PRIMARY),
-    group('Collection', NAV_LIBRARY),
-    h(
-      'div',
-      { className: 'fluid-sidebar-foot' },
-      h(
-        'span',
-        { className: 'fluid-provider-state' },
-        h('i', { className: 'fluid-state-dot', 'data-on': auth.authenticated }),
-        auth.authenticated ? 'Spotify connected' : 'Spotify disconnected',
-      ),
-    ),
+
+const PRIMARY_NAV = [['browse', 'Browse'], ['library', 'Library'], ['queue', 'Queue'], ['settings', 'Settings']]
+function TopNavigation({ controller, view }) {
+  return h('header', { className: 'fluid-topbar' },
+    h('button', { type: 'button', className: 'fluid-wordmark', onClick: () => controller.setWorkspaceView('browse') }, h(Icon, { kind: 'music' }), h('span', {}, 'FluidMusic')),
+    h('nav', { className: 'fluid-primary-nav', 'aria-label': 'FluidMusic' }, PRIMARY_NAV.map(([id, label]) => h('button', { type: 'button', className: 'fluid-nav-button', key: id, 'data-active': view === id, 'aria-current': view === id ? 'page' : undefined, onClick: () => controller.setWorkspaceView(id) }, label))),
   )
 }
+
 function MediaPage({ controller }) {
   const view = useValue(controller.workspaceView)
+  useEffect(() => { controller.setPollingOpen(true); return () => controller.setPollingOpen(false) }, [controller])
+  const pages = { browse: BrowsePage, library: LibraryPage, queue: QueuePage, settings: SettingsPage }
+  const Page = pages[view] || BrowsePage
+  return h('div', { className: 'fluid-root' }, h('main', { className: 'fluid-app' },
+    h(TopNavigation, { controller, view }),
+    h('section', { className: 'fluid-content' }, h('div', { className: 'fluid-content-inner' }, h(Notice, { controller }), view === 'browse' && h(NowPlayingBand, { controller }), h(Page, { controller }))),
+    h(BottomTransport, { controller }),
+  ))
+}
+
+function PlayerPopover({ controller, popoverRef }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const item = queue[at]
+  const progress = useValue(controller.progress)
+  const spotify = useValue(controller.spotify)
+  const state = useValue(controller.status)
+  const capabilities = mediaCapabilities(item)
+  const upcoming = queue.slice(at + 1, at + 4)
+  const display = item?.source === 'spotify' && spotify.title ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork } : item
+  return h('div', { ref: popoverRef, id: 'fluid-title-popover', className: 'fluid-title-popover', role: 'dialog', 'aria-label': 'FluidMusic quick controls' },
+    h('div', { className: 'fluid-popover-now' }, h('div', { className: 'fluid-orbit fluid-orbit-small', 'data-playing': state === 'playing' }, h(Artwork, { item: display, className: 'fluid-orbit-art' })), h('div', { className: 'fluid-row-copy' }, h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'), h('strong', { className: 'fluid-popover-title' }, display?.title || 'Nothing selected'), h('span', { className: 'fluid-row-detail' }, display?.subtitle || 'Open Media to choose something.'))),
+    item && h(Transport, { controller }),
+    capabilities.seek && progress.durationMs > 0 ? h(SeekBar, { controller }) : item?.source === 'radio' && h('p', { className: 'fluid-live-line' }, 'LIVE'),
+    capabilities.volume && h(VolumeControl, { controller }),
+    item?.source === 'spotify' && h('p', { className: 'fluid-device-line' }, spotify.device || 'No confirmed Connect device'),
+    upcoming.length > 0 && h('section', { className: 'fluid-popover-upnext', 'aria-label': 'Up next preview' }, h('h3', {}, 'Up Next'), upcoming.map((next, offset) => h('button', { type: 'button', className: 'fluid-next-row', key: `${next.id}-${offset}`, title: next.title, 'aria-label': `Play ${next.title}`, onClick: () => void controller.playAt(at + offset + 1) }, h('span', {}, h('strong', {}, next.title), h('small', {}, sourceLabel(next)))))),
+    h(Notice, { controller }),
+    h('div', { className: 'fluid-source-shortcuts' }, h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('browse'); HOST_NAVIGATE?.(ROUTE) } }, 'YouTube in Media'), h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); HOST_NAVIGATE?.(ROUTE) } }, 'Open Queue'), h(WorkspaceButton, { disabled: !HOST_NAVIGATE, title: HOST_NAVIGATE ? 'Open Media' : 'Host navigation is unavailable on this build', onClick: () => HOST_NAVIGATE?.(ROUTE) }, 'Open Media')),
+  )
+}
+
+function TitlebarPlayer({ controller }) {
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const state = useValue(controller.status)
+  const spotify = useValue(controller.spotify)
+  const open = useValue(controller.titlebarOpen)
+  const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const popoverRef = useRef(null)
+  const item = queue[at]
+  const title = item?.source === 'spotify' && spotify.title ? spotify.title : item?.title || 'FluidMusic'
   useEffect(() => {
-    controller.setPollingOpen(true)
-    void controller.refreshSpotifyAuth()
-    void controller.refreshSpotifyDevices()
-    return () => controller.setPollingOpen(false)
-  }, [controller])
-  const pages = {
-    home: HomePage,
-    search: SearchPage,
-    library: SpotifyLibraryPage,
-    radio: RadioPage,
-    local: LocalPage,
-    playlists: PlaylistsPage,
-    queue: QueuePage,
-    settings: SettingsPage,
-    logs: LogsPage,
-  }
-  return h(
-    'div',
-    { className: 'fluid-root' },
-    h(
-      'main',
-      { className: 'fluid-app' },
-      h(
-        'div',
-        { className: 'fluid-shell' },
-        h(Sidebar, { controller, view, navigate: controller.setWorkspaceView }),
-        h(
-          'section',
-          { className: 'fluid-content', key: view },
-          h(
-            'div',
-            { className: 'fluid-content-inner' },
-            h(Notice, { controller }),
-            h(pages[view] || HomePage, { controller, navigate: controller.setWorkspaceView }),
-          ),
-        ),
-      ),
-      h(PlayerDock, { controller }),
-    ),
+    if (!open) return undefined
+    const trigger = triggerRef.current
+    const popover = popoverRef.current
+    popover?.querySelector('button:not([disabled]), input:not([disabled]), [tabindex="0"]')?.focus()
+    const dismiss = () => controller.titlebarOpen.set(false)
+    const onKeyDown = event => { if (event.key === 'Escape') { event.preventDefault(); dismiss() } }
+    const onPointerDown = event => { if (!rootRef.current?.contains(event.target)) dismiss() }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+      if (trigger instanceof HTMLElement && trigger.isConnected) setTimeout(() => trigger.isConnected && trigger.focus(), 0)
+    }
+  }, [open, controller])
+  return h('div', { ref: rootRef, className: 'fluid-titlebar' },
+    h(Button || 'button', { ref: triggerRef, type: 'button', ...(Button ? { variant: 'ghost', size: 'micro' } : {}), className: 'fluid-titlebar-summary', title, 'aria-expanded': open, 'aria-haspopup': 'dialog', 'aria-controls': open ? 'fluid-title-popover' : undefined, onClick: () => controller.titlebarOpen.set(!open) }, h('span', { className: 'fluid-status-dot', 'data-state': state, 'aria-hidden': true }), h('span', { className: 'fluid-titlebar-source' }, item ? sourceLabel(item) : 'Media'), h('span', { className: 'fluid-titlebar-title' }, title)),
+    mediaCapabilities(item).play && h(Action, { compact: true, kind: ['playing', 'loading'].includes(state) ? 'pause' : 'play', label: ['playing', 'loading'].includes(state) ? 'Pause' : 'Play', onClick: () => void controller.toggle() }),
+    open && h(PlayerPopover, { controller, popoverRef }),
   )
 }
-function StatusBar({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    status = useValue(controller.status),
-    spotify = useValue(controller.spotify),
-    message = useValue(controller.message),
-    visual = useValue(controller.statusVisualizer)
-  const item = queue[at],
-    active = status === 'playing' || status === 'loading'
-  const title =
-    item?.source === 'spotify' && spotify.title && status === 'playing'
-      ? spotify.title
-      : item?.title || 'FluidMusic'
-  return h(
-    'div',
-    { className: 'fluid-statusbar', 'aria-label': 'FluidMusic controls' },
-    h(
-      Button,
-      {
-        variant: 'ghost',
-        size: 'micro',
-        onClick: () => host.navigate(ROUTE),
-        title: message || `${title} · ${status}`,
-        'aria-label': 'Open FluidMusic',
-      },
-      h('span', { className: 'fluid-status-dot', 'data-state': status }),
-      h('span', { className: 'fluid-statusbar-title' }, title),
-    ),
-    item &&
-      h(Action, {
-        compact: true,
-        label: active ? 'Pause' : 'Play',
-        kind: active ? 'pause' : 'play',
-        onClick: () => void controller.toggle(),
-      }),
-    item && h(Action, { compact: true, label: 'Next', kind: 'next', onClick: () => void controller.next() }),
-    h(VolumeControl, { controller, compact: true }),
-    h(Action, {
-      compact: true,
-      kind: 'wave',
-      label: visual ? 'Hide status visualizer' : 'Show status visualizer',
-      onClick: () => controller.setStatusVisualizer(!visual),
-    }),
-    visual && h(AudioVisualizer, { controller, compact: true }),
-    visual && h(VisualizerStyle, { controller, compact: true }),
-  )
-}
+
 export default {
   id: ID,
   name: 'FluidMusic',
-  description: 'Your listening workspace: Spotify Connect, radio, and local music.',
+  description: 'Source-aware listening for Spotify Connect, radio, local music, and embedded YouTube playback.',
   defaultEnabled: true,
   register(ctx) {
     const style = document.createElement('style')
     style.textContent = CSS
     document.head.append(style)
     ctx.onDispose(() => style.remove())
-    const controller = createController(ctx)
-    ctx.register({
-      id: 'media-route',
-      area: ROUTES_AREA,
-      data: { path: ROUTE },
-      render: () => h(MediaPage, { controller }),
-    })
-    ctx.register({
-      id: 'media-nav',
-      area: SIDEBAR_NAV_AREA,
-      data: { path: ROUTE, label: 'Media', codicon: 'music' },
-    })
-    ctx.register({
-      id: 'media-status',
-      area: STATUSBAR_AREAS.right,
-      order: 18,
-      render: () => h(StatusBar, { controller }),
-    })
-    ctx.register({
-      id: 'mini-player',
-      area: 'panes',
-      title: 'FluidMusic player',
-      data: { placement: 'right', width: '300px', height: '420px' },
-      render: () => h(MiniPlayer, { controller }),
-    })
+    if (!SDK_COMPATIBLE) {
+      // Honest incompatibility surface: no controller, no media commands, no
+      // polling. Never reference the missing exports beyond this message.
+      const renderFallback = () => h('div', { className: 'fluid-root', role: 'alert' },
+        h('main', { className: 'fluid-app' },
+          h('p', { className: 'fluid-error' }, `FluidMusic cannot start on this Hermes build: missing plugin SDK exports (${SDK_MISSING.join(', ')}). Required by host contract v${HOST_CONTRACT.contractVersion}: ${HOST_CONTRACT.required.join(', ')}. Update Hermes, then reopen Media. Your saved data is untouched.`)))
+      if (ROUTES_AREA != null) {
+        ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: renderFallback })
+      } else {
+        ctx.register({ id: 'media-sdk-fallback', area: 'panes', title: 'FluidMusic', data: { placement: 'right', width: '320px', height: '160px' }, render: renderFallback })
+      }
+      return
+    }
+    const controller = createController(ctx, { watchCapability: youTubeWatchCapability(SDK) })
+    ctx.register({ id: 'media-route', area: ROUTES_AREA, data: { path: ROUTE }, render: () => h(MediaPage, { controller }) })
+    if (TITLEBAR_RIGHT != null) {
+      ctx.register({ id: 'media-titlebar', area: TITLEBAR_RIGHT, order: 18, render: () => h(TitlebarPlayer, { controller }) })
+    }
+    // One dockable pane for every source. 320px is the audio-only target width;
+    // 420px keeps the YouTube video above its 200px minimum plus controls. The
+    // pane itself declares shorter-height behavior honestly (see CSS).
+    ctx.register({ id: 'mini-player', area: 'panes', title: 'FluidMusic player', data: { placement: 'right', width: '320px', height: '420px' }, render: () => h(MiniPlayer, { controller }) })
   },
 }

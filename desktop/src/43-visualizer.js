@@ -1,255 +1,195 @@
-const VISUAL_STYLES = [
-  ['bars', 'Spectrum'],
-  ['wave', 'Waveform'],
-  ['mirror', 'Mirror'],
-]
-function VisualizerStyle({ controller, compact = false }) {
-  const style = useValue(controller.visualizerStyle)
-  return h(
-    'select',
-    {
-      className: compact ? 'fluid-viz-select fluid-viz-select-compact' : 'fluid-select',
-      'aria-label': compact ? 'Status visualizer style' : 'Visualizer style',
-      value: style,
-      onChange: (event) => controller.setVisualizerStyle(event.target.value),
-    },
-    VISUAL_STYLES.map(([value, label]) => h('option', { value, key: value }, label)),
-  )
+function youtubeEmbedUrl(item) {
+  const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return ''
+  const params = new URLSearchParams({ controls: '1', enablejsapi: '1', playsinline: '1', rel: '0' })
+  // The origin parameter must describe the ACTUAL embedding page, never a
+  // guessed foreign origin; opaque origins omit it rather than lie.
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) && location.origin && location.origin !== 'null') params.set('origin', location.origin)
+  return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`
 }
-function VisualizerSettings({ controller }) {
-  const status = useValue(controller.statusVisualizer),
-    mini = useValue(controller.miniVisualizer)
-  return h(
-    'div',
-    { className: 'fluid-viz-settings' },
-    h(
-      'label',
-      { className: 'fluid-switch-row' },
-      h('input', {
-        type: 'checkbox',
-        checked: status,
-        onChange: (event) => controller.setStatusVisualizer(event.target.checked),
-      }),
-      'Status-bar visualizer',
-    ),
-    h(
-      'label',
-      { className: 'fluid-switch-row' },
-      h('input', {
-        type: 'checkbox',
-        checked: mini,
-        onChange: (event) => controller.setMiniVisualizer(event.target.checked),
-      }),
-      'Mini-player visualizer',
-    ),
-    h(VisualizerStyle, { controller }),
-    h(
-      'p',
-      { className: 'fluid-muted' },
-      'Hidden, inactive, and reduced-motion visuals do no sample reads or animation work. When both are inactive, the analyser is disconnected. Move the FluidMusic player pane using Hermes’ layout controls.',
-    ),
-  )
-}
-function AudioVisualizer({ controller, compact = false }) {
-  const ref = useRef(null),
-    style = useValue(controller.visualizerStyle),
-    status = useValue(controller.status),
-    meter = useValue(controller.radioMeter),
-    queue = useValue(controller.queue),
-    at = useValue(controller.index)
-  const source = queue[at]?.source
-  const supported = ['ready', 'analyser'].includes(meter) && source !== 'spotify'
+
+function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
+  const direct = youtubeEmbedUrl(item)
+  const [src, setSrc] = useState('')
   useEffect(() => {
-    const canvas = ref.current,
-      drawing = canvas?.getContext('2d')
-    if (!drawing) return undefined
-    drawing.clearRect(0, 0, canvas.width, canvas.height)
-    if (!supported || status !== 'playing') return undefined
-    const motion = matchMedia('(prefers-reduced-motion: reduce)')
-    let frame = 0,
-      release = null,
-      intersecting = false,
-      lastTime = 0,
-      stopped = false
-    let width = 0,
-      height = 0,
-      color = ''
-    let bands = [], bandRate = 0, bandBins = 0
-    const resize = () => {
-      const box = canvas.getBoundingClientRect(),
-        ratio = Math.min(window.devicePixelRatio || 1, 2)
-      width = Math.max(0, Math.floor(box.width * ratio))
-      height = Math.max(0, Math.floor(box.height * ratio))
-      canvas.width = width
-      canvas.height = height
-      color = getComputedStyle(canvas).getPropertyValue('--ui-accent').trim()
-      reconcile()
-    }
-    const draw = (time) => {
-      if (!release || stopped) return
-      frame = requestAnimationFrame(draw)
-      if (time - lastTime < 1000 / 30) return
-      lastTime = time
-      const samples = controller.visualSamples(style)
-      drawing.clearRect(0, 0, width, height)
-      if (!samples) return
-      drawing.fillStyle = color
-      drawing.strokeStyle = color
-      drawing.lineWidth = 1.5 * Math.min(window.devicePixelRatio || 1, 2)
-      if (style === 'wave') {
-        drawing.beginPath()
-        for (let point = 0; point < samples.length; point++) {
-          const x = (point / (samples.length - 1)) * width,
-            y = (samples[point] / 255) * height
-          point ? drawing.lineTo(x, y) : drawing.moveTo(x, y)
-        }
-        drawing.stroke()
-      } else {
-        const count = compact ? 20 : 48,
-          step = width / count
-        const sampleRate = controller.visualSampleRate()
-        if (sampleRate !== bandRate || samples.length !== bandBins) {
-          bands = spectrumBands(samples.length, sampleRate, count)
-          bandRate = sampleRate
-          bandBins = samples.length
-        }
-        for (let bar = 0; bar < bands.length; bar++) {
-          const { low, high } = bands[bar]
-          // A faint baseline marks every band, including silence; it is not fabricated signal.
-          drawing.globalAlpha = .18
-          drawing.fillRect(bar * step, style === 'mirror' ? height / 2 : height - 1, Math.max(1, step - 2), 1)
-          drawing.globalAlpha = 1
-          let sum = 0
-          for (let i = low; i < high; i++) sum += samples[i] || 0
-          const level = (sum / (high - low) / 255) * height
-          drawing.fillRect(
-            bar * step,
-            style === 'mirror' ? (height - level) / 2 : height - level,
-            Math.max(1, step - 2),
-            level,
-          )
-        }
-      }
-    }
-    function reconcile() {
-      if (stopped) return
-      const active = intersecting && width > 0 && height > 0 && !document.hidden && !motion.matches
-      if (active && !release) {
-        release = controller.acquireVisualizer()
-        frame = requestAnimationFrame(draw)
-      }
-      if (!active && release) {
-        cancelAnimationFrame(frame)
-        release()
-        release = null
-        drawing.clearRect(0, 0, width, height)
-      }
-    }
-    const intersection = new IntersectionObserver((entries) => {
-      intersecting = entries[0]?.isIntersecting || false
-      reconcile()
+    let live = true
+    if (!direct) { setSrc(''); return () => { live = false } }
+    controller.resolveYouTubeEmbedUrl(item).then(url => {
+      if (live) setSrc(url)
+    }).catch(async () => {
+      const getHostOrigin = window.hermesDesktop?.getEmbedHostOrigin
+      if (!live) return
+      if (!getHostOrigin) { setSrc(direct); return }
+      try {
+        const origin = await getHostOrigin()
+        if (!live) return
+        const videoId = safeText(item.id).replace(/^youtube:/, '')
+        const wrapper = new URL(`/youtube/${encodeURIComponent(videoId)}`, origin)
+        wrapper.searchParams.set('controls', '1')
+        wrapper.searchParams.set('enablejsapi', '1')
+        wrapper.searchParams.set('playsinline', '1')
+        wrapper.searchParams.set('rel', '0')
+        setSrc(wrapper.href)
+      } catch { if (live) setSrc(direct) }
     })
-    const observer = new ResizeObserver(resize)
-    intersection.observe(canvas)
-    observer.observe(canvas)
-    document.addEventListener('visibilitychange', reconcile)
-    motion.addEventListener('change', reconcile)
-    resize()
-    return () => {
-      stopped = true
-      cancelAnimationFrame(frame)
-      release?.()
-      intersection.disconnect()
-      observer.disconnect()
-      document.removeEventListener('visibilitychange', reconcile)
-      motion.removeEventListener('change', reconcile)
-    }
-  }, [controller, supported, status, style, compact])
-  const hint =
-    source === 'spotify'
-      ? 'Spotify Connect: audio plays on your device; samples are unavailable.'
-      : meter === 'unavailable'
-        ? source === 'local'
-          ? 'For visualization, reopen this file using Local music → Open audio files. Indexed playback stays available.'
-          : 'This stream does not expose audio samples.'
-        : status !== 'playing'
-          ? 'Visualization resumes during playback.'
-          : 'Audio-reactive visualization. Reduced-motion preferences suspend animation.'
-  return h(
-    'div',
-    { className: compact ? 'fluid-visualizer fluid-visualizer-compact' : 'fluid-visualizer', title: hint },
-    h('canvas', { ref, role: 'img', 'aria-label': `${style} audio visualizer` }),
-    (!supported || status !== 'playing') &&
-      h('span', { className: 'fluid-viz-hint' }, compact ? (source === 'spotify' ? 'REMOTE' : '—') : hint),
+    return () => { live = false }
+  }, [controller, direct, item?.id])
+  return src
+    ? h('iframe', { ref: frameRef, src, title, className: 'fluid-youtube-frame', allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen', loading: 'lazy', referrerPolicy: 'strict-origin-when-cross-origin', scrolling: 'no' })
+    : h('div', { className: 'fluid-youtube-frame fluid-youtube-frame-loading', role: 'status' }, 'Preparing YouTube player…')
+}
+
+function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
+  // One shared control vocabulary for every provider: the same Transport
+  // actions and the same VolumeControl as the main bottom anchor.
+  return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
+    h('div', { className: 'fluid-player-controls' },
+      h(Action, { compact: true, kind: 'previous', label: 'Previous', onClick: () => void controller.previous() }),
+      h(WorkspaceButton, { primary: true, onClick: onToggle, disabled, 'aria-label': playing ? 'Pause' : 'Play' }, h(Icon, { kind: playing ? 'pause' : 'play' })),
+      h(Action, { compact: true, kind: 'next', label: 'Next', onClick: () => void controller.next() }),
+    ),
+    h(VolumeControl, { controller, compact: true }),
+    h('div', { className: 'fluid-mini-links' },
+      h(WorkspaceButton, { onClick: () => { controller.setWorkspaceView('queue'); host.navigate(ROUTE) } }, 'Queue'),
+      h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
+    ),
   )
 }
+
+function YouTubeTransport({ controller, frameRef, item }) {
+  const [playing, setPlaying] = useState(false)
+  const [ready, setReady] = useState(false)
+  const readyRef = useRef(false)
+  const videoId = safeText(item?.id).replace(/^youtube:/, '')
+  // Commands are bound to actual player readiness and the frame's real origin;
+  // an issued message is an acknowledgement request, not proof of playback.
+  const send = (func, args = []) => {
+    const frame = frameRef.current
+    const origin = embedFrameOrigin(frame?.src)
+    const message = youTubeCommandMessage(func, args)
+    if (!readyRef.current || !frame?.contentWindow || !origin || !message) return false
+    frame.contentWindow.postMessage(message, origin)
+    return true
+  }
+  useEffect(() => {
+    setPlaying(false)
+    setReady(false)
+    readyRef.current = false
+    let live = true
+    const receive = event => {
+      const frame = frameRef.current
+      if (!live || !frame || event.source !== frame.contentWindow) return
+      const origin = embedFrameOrigin(frame.src)
+      if (!origin || event.origin !== origin) return
+      const parsed = parseYouTubePlayerMessage(event.data, videoId)
+      if (!parsed) return
+      if (parsed.kind === 'ready') {
+        readyRef.current = true
+        setReady(true)
+        send('setVolume', [Math.round(clampVolume(controller.volume.get()) * 100)])
+        return
+      }
+      if (parsed.kind === 'state') setPlaying(parsed.playing)
+      controller.reportYouTubeState({ ...parsed, engine: 'embed' })
+    }
+    window.addEventListener('message', receive)
+    controller.setYouTubeCommandSink(send)
+    const handshake = setInterval(() => {
+      const frame = frameRef.current
+      const origin = embedFrameOrigin(frame?.src)
+      if (frame?.contentWindow && origin) frame.contentWindow.postMessage(youTubeListeningMessage(), origin)
+    }, 500)
+    return () => { live = false; window.removeEventListener('message', receive); clearInterval(handshake); controller.setYouTubeCommandSink(null) }
+  }, [videoId, frameRef])
+  return h(MiniControlBar, { controller, playing: playing && ready, disabled: !ready, onToggle: () => void controller.toggle() })
+}
+
+function OwnedWatchSurface({ controller, item, capability, controlRef }) {
+  // Thin adapter over the REQUIRED public owned-view contract (see
+  // youTubeWatchCapability). The host owns the persistent isolated session,
+  // genuine provider login and the control bridge; the plugin never injects
+  // scripts into an opaque origin and never borrows the app preview partition.
+  useEffect(() => () => { controlRef.current?.dispose?.(); controlRef.current = null; controller.setYouTubeCommandSink(null) }, [])
+  const attachControl = handle => {
+    controlRef.current = handle
+    controller.setYouTubeCommandSink(handle ? (func, args = []) => {
+      if (func === 'playVideo') { handle.play?.(); return true }
+      if (func === 'pauseVideo') { handle.pause?.(); return true }
+      if (func === 'setVolume') { handle.setVolume?.((Number(args[0]) || 0) / 100); return true }
+      return false
+    } : null)
+  }
+  const View = capability?.OwnedMediaView
+  if (typeof View !== 'function') {
+    return h('p', { className: 'fluid-error', role: 'alert' }, 'The owned watch surface is unavailable on this host.')
+  }
+  return h(View, {
+    ref: attachControl,
+    src: item.url,
+    sessionKey: `fluid-music-youtube-${safeText(item.id).replace(/^youtube:/, '')}`,
+    title: item.title || 'YouTube video',
+    className: 'fluid-youtube-frame',
+    onMediaState: state => controller.reportYouTubeState({ ...state, engine: 'watch' }),
+  })
+}
+
 function MiniPlayer({ controller }) {
-  const queue = useValue(controller.queue),
-    at = useValue(controller.index),
-    spotify = useValue(controller.spotify),
-    status = useValue(controller.status),
-    progress = useValue(controller.progress),
-    show = useValue(controller.miniVisualizer)
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const spotify = useValue(controller.spotify)
+  const status = useValue(controller.status)
+  const progress = useValue(controller.progress)
+  const youtubeState = useValue(controller.youtube)
   const item = queue[at]
-  const display =
-    item?.source === 'spotify' && spotify.title && status === 'playing'
-      ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
-      : item
+  const capabilities = mediaCapabilities(item)
+  const display = item?.source === 'spotify' && spotify.title
+    ? { ...item, title: spotify.title, subtitle: spotify.subtitle, artwork: spotify.artwork }
+    : item
+  const embedUrl = youtubeEmbedUrl(item)
+  const youtubeFrameRef = useRef(null)
+  const watchControlRef = useRef(null)
+  if (embedUrl) {
+    const watching = youtubeState.engine === 'watch'
+    return h(
+      'section',
+      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
+      h('div', { className: 'fluid-youtube-frame-wrap' },
+        watching
+          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      ),
+      // Honest physical minimum: the video never shrinks below 200x200. When
+      // the docked pane is too short, say so and keep controls reachable
+      // instead of pretending everything fits or hiding the video.
+      h('p', { className: 'fluid-mini-expand-note', role: 'status' }, 'This pane is too short for the full video. Expand the FluidMusic player to about 360px or more; playback controls stay available below.'),
+      youtubeState.status === 'switching' && h('p', { className: 'fluid-muted', role: 'status' }, 'Switching player…'),
+      youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
+      watching
+        ? h(MiniControlBar, { controller, playing: Boolean(youtubeState.playing), onToggle: () => void controller.toggle() })
+        : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
+      youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
+        youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
+        h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
+    )
+  }
   return h(
     'section',
     { className: 'fluid-mini-player', 'aria-label': 'Dockable FluidMusic player' },
-    h(
-      'div',
-      { className: 'fluid-section-head' },
-      h('span', { className: 'fluid-kicker' }, item ? `${sourceLabel(item)} · ${status}` : 'FluidMusic'),
-      h(Action, {
-        compact: true,
-        kind: 'external',
-        label: 'Open Media workspace',
-        onClick: () => host.navigate(ROUTE),
-      }),
-    ),
-    h(
-      'div',
-      { className: 'fluid-mini-summary' },
-      h(Artwork, { item: display, className: 'fluid-mini-art' }),
-      h(
-        'div',
-        { className: 'fluid-row-copy' },
-        h(
-          'h2',
-          { className: 'fluid-mini-title', title: display?.title },
-          display?.title || 'Your soundtrack, anywhere.',
-        ),
-        h(
-          'p',
-          { className: 'fluid-mini-subtitle' },
-          display?.subtitle || (item ? sourceLabel(item) : 'Choose music in the Media workspace.'),
+    h('div', { className: 'fluid-mini-body' },
+      h('div', { className: 'fluid-mini-summary' },
+        h(Artwork, { item: display, className: 'fluid-mini-art' }),
+        h('div', { className: 'fluid-row-copy' },
+          h('span', { className: 'fluid-source-chip', 'data-source': item?.source || 'idle' }, item ? sourceLabel(item) : 'FluidMusic'),
+          h('h2', { className: 'fluid-mini-title' }, display?.title || 'Ready when you are'),
+          h('p', { className: 'fluid-mini-subtitle' }, display?.subtitle || 'Choose music in the Media workspace.'),
         ),
       ),
+      capabilities.seek && progress.durationMs > 0
+        ? h(SeekBar, { controller })
+        : h('p', { className: 'fluid-player-hint' }, item?.source === 'radio' ? 'LIVE' : status),
+      h(Notice, { controller }),
     ),
-    h(Transport, { controller }),
-    item?.source !== 'radio' && progress.durationMs > 0
-      ? h(SeekBar, { controller })
-      : h(
-          'p',
-          { className: 'fluid-player-hint' },
-          item?.source === 'radio'
-            ? 'LIVE · no fixed duration'
-            : `${formatClock(progress.positionMs)} / ${formatClock(progress.durationMs)}`,
-        ),
-    h(VolumeControl, { controller }),
-    h(
-      'div',
-      { className: 'fluid-mini-visual-controls' },
-      h(
-        WorkspaceButton,
-        { onClick: () => controller.setMiniVisualizer(!show) },
-        show ? 'Hide visualizer' : 'Show visualizer',
-      ),
-      show && h(VisualizerStyle, { controller }),
-    ),
-    show && h(AudioVisualizer, { controller }),
-    h(Notice, { controller }),
+    h(MiniControlBar, { controller, playing: ['playing', 'loading'].includes(status), onToggle: () => void controller.toggle() }),
   )
 }

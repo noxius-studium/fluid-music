@@ -26,6 +26,8 @@ export const Button = ({ children, variant, size, ...props }) =>
     },
     children,
   )
+export const SandboxedFrame = ({ src, title, className, style }) =>
+  React.createElement('iframe', { src, title, className, style, sandbox: 'allow-scripts allow-presentation' })
 export const host = {
   navigate: (path) => {
     window.lastNavigation = path
@@ -33,4 +35,4 @@ export const host = {
 }
 export const ROUTES_AREA = 'routes'
 export const SIDEBAR_NAV_AREA = 'sidebar.nav'
-export const STATUSBAR_AREAS = { right: 'statusBar.right' }
+export const TITLEBAR_AREAS = { right: 'titleBar.right' }

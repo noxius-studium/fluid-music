@@ -51,18 +51,11 @@ class FakeResponse:
 
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Import the API in isolation from a Hermes installation."""
-    client_module = types.ModuleType("plugins.spotify.client")
-    client_module.SpotifyClient = FakeSpotifyClient
-    client_module.SpotifyError = FakeSpotifyError
-    auth_module = types.ModuleType("hermes_cli.auth")
-    auth_module.get_spotify_auth_status = lambda: {"logged_in": False}
-    auth_module.login_spotify_command = lambda _args: None
-    constants_module = types.ModuleType("hermes_cli.auth_constants")
-    constants_module.SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-    auth_spotify_module = types.ModuleType("hermes_cli.auth_spotify")
-    auth_spotify_module._spotify_client_id = lambda: "configured-client-id"
-    auth_spotify_module._spotify_redirect_uri = lambda: "http://127.0.0.1:43827/spotify/callback"
+    """Import the API with the OWNED Spotify provider and labelled doubles.
+
+    No Hermes-core or sibling-plugin Spotify module is injected or imported;
+    the provider interface is doubled at the plugin_api module boundary.
+    """
     hermes_constants_module = types.ModuleType("hermes_constants")
     hermes_constants_module.get_hermes_home = lambda: tmp_path / "hermes-home"
     scope_calls: list[tuple[str, Any]] = []
@@ -91,13 +84,6 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     secret_scope_module.reset_secret_scope = (
         lambda token: scope_calls.append(("secret-reset", token))
     )
-    monkeypatch.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify", types.ModuleType("plugins.spotify"))
-    monkeypatch.setitem(sys.modules, "plugins.spotify.client", client_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_constants", constants_module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.auth_spotify", auth_spotify_module)
     monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_module)
     monkeypatch.setitem(sys.modules, "hermes_cli.env_loader", env_loader_module)
     monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants_module)
@@ -106,6 +92,11 @@ def api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
     module._scope_calls = scope_calls
+    # Labelled doubles for the owned provider interface (FM-09): the lazy
+    # resolver never overwrites explicitly assigned names.
+    module.SpotifyClient = FakeSpotifyClient
+    module.SpotifyError = FakeSpotifyError
+    module._configured_spotify_client_id = lambda: "configured-client-id"
     yield module
     sys.modules.pop("dashboard.plugin_api", None)
 
@@ -292,7 +283,7 @@ def test_spotify_library_and_seek_routes_shape_validated_upstream_requests(api: 
     assert calls == [
         (api._spotify_request, ("PUT", "/me/player/seek"), {"params": {"position_ms": 12_345, "device_id": "phone-1"}}),
         (api._spotify_request, ("GET", "/me/playlists"), {"params": {"limit": 12, "offset": 24}}),
-        (api._spotify_request, ("GET", "/playlists/3cEYpjA9oz9GiPac4AsH4n/items"), {"params": {"limit": 25, "offset": 50}}),
+        (api._spotify_request, ("GET", "/playlists/3cEYpjA9oz9GiPac4AsH4n/tracks"), {"params": {"limit": 25, "offset": 50}}),
         (api._spotify_request, ("GET", "/search"), {"params": {"q": "night drive", "type": "track,album,artist,playlist", "limit": 10, "offset": 20}}),
     ]
 
@@ -496,6 +487,50 @@ def test_router_level_radio_search_uses_fixed_directory_and_filters_unsafe_strea
     assert calls[0][1]["follow_redirects"] is False
 
 
+def test_router_level_radio_click_validates_uuid_and_never_proxies_the_stream(api: Any, monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_get(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append((url, kwargs))
+        return FakeResponse({"url": "https://untrusted.example/redirected.mp3"})
+
+    monkeypatch.setattr(api.httpx, "get", fake_get)
+    bad = run(request(app_for(api), "POST", "/radio/click/not-a-uuid"))
+    assert bad.json() == {"ok": False, "error": "stationuuid must be a UUID"}
+    assert calls == [], "an invalid id never reaches the directory"
+    good = run(request(app_for(api), "POST", "/radio/click/B30B1E1E-6E7E-4A4E-9876-A5BB13BE0C60"))
+    assert good.json() == {"ok": True, "data": {"stationuuid": "b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60", "clicked": True}}
+    assert calls[0][0] == f"{api.RADIO_BROWSER_CLICK_BASE_URL}/b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60"
+    assert calls[0][1]["follow_redirects"] is False, "the 302 stream destination is untrusted and never followed/proxied"
+    assert "url" not in good.json()["data"], "the response never leaks the untrusted stream destination"
+
+
+def test_router_level_radio_click_reports_directory_failure_sanitized(api: Any, monkeypatch: pytest.MonkeyPatch):
+    def fake_get(url: str, **kwargs: Any) -> FakeResponse:
+        raise httpx.HTTPError("connection reset")
+
+    monkeypatch.setattr(api.httpx, "get", fake_get)
+    response = run(request(app_for(api), "POST", "/radio/click/b30b1e1e-6e7e-4a4e-9876-a5bb13be0c60"))
+    assert response.json() == {"ok": False, "error": "Radio Browser click registration failed"}
+
+
+def test_router_level_local_root_removal_keeps_audio_files(api: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    music = tmp_path / "Music"
+    track = music / "Keep.mp3"
+    track.parent.mkdir(parents=True)
+    track.write_bytes(b"ID3-labelled-fixture")
+    database = tmp_path / "state" / "library.sqlite3"
+    monkeypatch.setattr(api, "_local_library", lambda: api.LocalLibrary(database))
+    added = run(request(app_for(api), "POST", "/local/roots", json={"path": str(music)}))
+    assert added.json()["ok"] is True
+    root_id = added.json()["data"]["root"]["id"]
+    removed = run(request(app_for(api), "DELETE", f"/local/roots/{root_id}"))
+    assert removed.json() == {"ok": True, "data": {"removed": True}}
+    assert track.read_bytes() == b"ID3-labelled-fixture", "removing an index root never deletes audio"
+    tracks = run(request(app_for(api), "GET", "/local/tracks"))
+    assert tracks.json()["data"]["total"] == 0
+
+
 def test_local_library_persists_roots_tracks_and_identity_across_moves(api: Any, tmp_path: Path):
     music = tmp_path / "Music"
     album = music / "Artist" / "Album"
@@ -570,9 +605,10 @@ def test_router_exposes_frontend_contract(api: Any):
         ("/local/roots/{root_id}", "DELETE"), ("/local/rescan", "POST"),
         ("/local/tracks", "GET"), ("/local/tracks/{track_id}", "GET"),
         ("/radio/search", "GET"), ("/radio/click/{stationuuid}", "POST"),
+        ("/youtube/embed-host", "GET"), ("/youtube/search", "GET"), ("/youtube/resolve", "POST"),
+        ("/history", "GET"), ("/history", "POST"), ("/history", "DELETE"),
     }
     assert expected <= routes
-    assert not any("youtube" in path.lower() for path, _method in routes)
 
 
 def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
@@ -593,7 +629,8 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
         text=True,
     )
 
-    assert Path(completed.stdout.strip()) == output.resolve()
+    assert Path(completed.stdout.strip().splitlines()[0]) == output.resolve()
+    assert completed.stdout.strip().splitlines()[1].startswith("sha256 ")
     assert output.read_bytes() == second_output.read_bytes()
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
@@ -607,6 +644,9 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
             "fluid-music/dashboard/manifest.json",
             "fluid-music/dashboard/plugin_api.py",
             "fluid-music/dashboard/local_library.py",
+            "fluid-music/dashboard/providers/__init__.py",
+            "fluid-music/dashboard/providers/token_store.py",
+            "fluid-music/dashboard/providers/spotify.py",
             "fluid-music/desktop/plugin.js",
             "fluid-music/README.md",
             "fluid-music/LICENSE",
@@ -614,3 +654,47 @@ def test_release_archive_has_complete_unified_install_tree(tmp_path: Path):
             "fluid-music/docs/limitations.md",
         } <= set(names)
         assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+
+
+def test_youtube_search_and_url_resolution_return_real_metadata(api: Any, monkeypatch: pytest.MonkeyPatch):
+    def fake_extract(target: str, *, flat: bool) -> Any:
+        item = {
+            "id": "D-PaXRCXtzE",
+            "title": "Tomorrowland 2026",
+            "uploader": "Arvin Trance EDM",
+            "duration": 3600,
+            "thumbnail": "https://i.ytimg.com/vi/D-PaXRCXtzE/hqdefault.jpg",
+        }
+        return {"entries": [item]} if flat else item
+
+    monkeypatch.setattr(api, "_youtube_extract", fake_extract)
+    app = app_for(api)
+
+    search = run(request(app, "GET", "/youtube/search?q=tomorrowland"))
+    resolved = run(request(app, "POST", "/youtube/resolve", json={"url": "https://youtu.be/D-PaXRCXtzE"}))
+
+    assert search.json()["data"]["items"][0]["title"] == "Tomorrowland 2026"
+    assert resolved.json()["data"]["item"] == search.json()["data"]["items"][0]
+
+
+def test_playback_history_persists_lists_and_clears(api: Any):
+    app = app_for(api)
+    item = {
+        "id": "youtube:D-PaXRCXtzE",
+        "source": "youtube",
+        "url": "https://www.youtube.com/watch?v=D-PaXRCXtzE",
+        "title": "Tomorrowland 2026",
+        "subtitle": "Arvin Trance EDM",
+        "artwork": "https://i.ytimg.com/vi/D-PaXRCXtzE/hqdefault.jpg",
+    }
+
+    added = run(request(app, "POST", "/history", json={"item": item}))
+    listed = run(request(app, "GET", "/history"))
+    cleared = run(request(app, "DELETE", "/history"))
+    empty = run(request(app, "GET", "/history"))
+
+    assert added.json()["data"]["entry"]["item"]["title"] == "Tomorrowland 2026"
+    assert listed.json()["data"]["total"] == 1
+    assert listed.json()["data"]["items"][0]["item"] == item
+    assert cleared.json()["data"]["removed"] == 1
+    assert empty.json()["data"] == {"items": [], "total": 0}

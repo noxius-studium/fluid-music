@@ -59,7 +59,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
     queue = useValue(controller.queue),
     favorites = useValue(controller.favorites),
     auth = useValue(controller.spotifyAuth)
-  const [source, setSource] = useState('queue'),
+  const [source, setSource] = useState('local'),
     [query, setQuery] = useState(''),
     [results, setResults] = useState([]),
     [chosen, setChosen] = useState(new Set()),
@@ -113,10 +113,7 @@ function PlaylistTrackPicker({ controller, playlist, onClose }) {
       'div',
       { className: 'fluid-segmented', role: 'group', 'aria-label': 'Track source' },
       [
-        ['queue', 'Current queue'],
         ['local', 'Local music'],
-        ['radio', 'Radio'],
-        ['spotify', 'Spotify'],
       ].map(([value, label]) =>
         h(
           'button',
@@ -257,7 +254,6 @@ function PlaylistEditor({ controller, playlist }) {
       h(
         'div',
         { className: 'fluid-row-copy' },
-        h('p', { className: 'fluid-kicker' }, 'FluidMusic playlist'),
         h('h2', { className: 'fluid-library-title' }, playlist.name),
         h('p', { className: 'fluid-muted' }, playlist.description || 'A mix made by you.'),
         h(
@@ -382,6 +378,7 @@ function PlaylistEditor({ controller, playlist }) {
               selectable: true,
               checked: selected.has(at),
               hideSave: true,
+              origin: 'collection',
               onSelect: () =>
                 setSelected((previous) => {
                   const next = new Set(previous)
@@ -448,6 +445,15 @@ function PlaylistEditor({ controller, playlist }) {
       ),
   )
 }
+function LegacyPlaylist({ controller, playlist }) {
+  const items = controller.playlistItems(playlist.id)
+  return h('section', { className: 'fluid-playlist-editor' },
+    h('div', { className: 'fluid-playlist-heading' }, h('div', { className: 'fluid-collection-icon' }, h(Icon, { kind: 'playlist' })), h('div', {}, h('span', { className: 'fluid-source-chip' }, 'Legacy mix · read only'), h('h2', { className: 'fluid-library-title' }, playlist.name), h('p', { className: 'fluid-muted' }, playlist.description || 'Preserved from FluidMusic v3.'))),
+    h('p', { className: 'fluid-notice' }, 'This mixed collection is preserved without rewriting it. You can play, enqueue, or export it; new FluidMusic collections are local-only.'),
+    h('div', { className: 'fluid-actions' }, h(WorkspaceButton, { primary: true, disabled: !items.length, onClick: () => void controller.playPlaylist(playlist.id) }, 'Play legacy mix'), h(WorkspaceButton, { disabled: !items.length, onClick: () => controller.enqueuePlaylist(playlist.id) }, 'Add to Up Next'), h(WorkspaceButton, { onClick: () => downloadPlaylist(controller, playlist.id) }, 'Export')),
+    h('div', { className: 'fluid-track-list' }, items.map((item, at) => h(TrackRow, { controller, item, at, key: `${item.id}-${at}`, hideSave: true, origin: 'collection', onPlay: () => void controller.playPlaylist(playlist.id, at), extraActions: null }))),
+  )
+}
 function PlaylistsPage({ controller }) {
   const playlists = useValue(controller.playlists),
     selectedId = useValue(controller.selectedPlaylist),
@@ -457,6 +463,8 @@ function PlaylistsPage({ controller }) {
     [error, setError] = useState('')
   const file = useRef(null),
     selected = playlists.find((entry) => entry.id === selectedId) || playlists[0]
+  const localCollections = playlists.filter(entry => !entry.legacy)
+  const legacyCollections = playlists.filter(entry => entry.legacy)
   const filtered = playlists.filter((entry) =>
     `${entry.name} ${entry.description}`.toLowerCase().includes(filter.toLowerCase()),
   )
@@ -481,18 +489,13 @@ function PlaylistsPage({ controller }) {
     {},
     h(PageHead, {
       kicker: 'Made by you',
-      title: 'Your playlists.',
-      subtitle: 'Spotify, local tracks, and live radio. Arrange them your way.',
+      title: 'Local collections',
+      subtitle: 'New collections contain indexed local tracks only. Legacy mixes stay readable without migration or data loss.',
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { onClick: () => file.current?.click() }, 'Import'),
-        h(
-          WorkspaceButton,
-          { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) },
-          'Export all',
-        ),
-        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New playlist'),
+        h(WorkspaceButton, { disabled: !playlists.length, onClick: () => downloadPlaylist(controller) }, 'Export all'),
+        h(WorkspaceButton, { primary: true, onClick: () => setCreate(true) }, 'New local collection'),
       ),
     }),
     h('input', {
@@ -525,7 +528,7 @@ function PlaylistsPage({ controller }) {
           'aria-label': 'Filter playlists',
           placeholder: 'Find a playlist…',
         }),
-        h('p', { className: 'fluid-muted' }, `${playlists.length} collections`),
+        h('p', { className: 'fluid-muted' }, `${localCollections.length} local · ${legacyCollections.length} legacy`),
         h(
           'div',
           { className: 'fluid-playlist-list' },
@@ -545,7 +548,7 @@ function PlaylistsPage({ controller }) {
                 'span',
                 { className: 'fluid-row-copy' },
                 h('strong', {}, entry.name),
-                h('span', {}, `${entry.items.length} items`),
+                h('span', {}, `${entry.items.length} items${entry.legacy ? ' · Legacy mix' : ' · Local only'}`),
               ),
             ),
           ),
@@ -558,11 +561,11 @@ function PlaylistsPage({ controller }) {
           ),
       ),
       selected
-        ? h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
+        ? selected.legacy ? h(LegacyPlaylist, { key: selected.id, controller, playlist: selected }) : h(PlaylistEditor, { key: selected.id, controller, playlist: selected })
         : h(
             Empty,
             { title: 'A home for your favourites.' },
-            'Create a playlist, then add tracks from your queue, local library, radio, or Spotify.',
+            'Create a collection, then add indexed tracks from your local library.',
             h(
               'div',
               { className: 'fluid-actions' },
@@ -580,8 +583,26 @@ function PlaylistsPage({ controller }) {
 }
 function QueuePage({ controller }) {
   const queue = useValue(controller.queue),
-    [save, setSave] = useState(false),
-    [clear, setClear] = useState(false)
+    current = useValue(controller.index),
+    undo = useValue(controller.queueUndo),
+    sessions = useValue(controller.listeningSessions),
+    [selected, setSelected] = useState(new Set()),
+    [clear, setClear] = useState(false),
+    [clearUpcoming, setClearUpcoming] = useState(false),
+    [saving, setSaving] = useState(false),
+    [sessionName, setSessionName] = useState(''),
+    [restoring, setRestoring] = useState(''),
+    [deleting, setDeleting] = useState('')
+  // Queue edits shift positions: drop any stale selection (PlaylistEditor pattern).
+  useEffect(() => setSelected(new Set()), [queue])
+  const toggleSelect = (at) => setSelected((previous) => {
+    const next = new Set(previous)
+    if (next.has(at)) next.delete(at)
+    else next.add(at)
+    return next
+  })
+  const clearSelection = () => setSelected(new Set())
+  const preview = restoring ? controller.listeningSessionPreview(restoring) : null
   return h(
     'div',
     {},
@@ -592,7 +613,9 @@ function QueuePage({ controller }) {
       actions: h(
         'div',
         { className: 'fluid-actions' },
-        h(WorkspaceButton, { disabled: !queue.length, onClick: () => setSave(true) }, 'Save as playlist'),
+        h(WorkspaceButton, { disabled: !undo, onClick: () => { controller.undoQueueEdit(); clearSelection() } }, undo ? `Undo: ${undo.label}` : 'Undo'),
+        h(WorkspaceButton, { disabled: !(current >= 0 && current < queue.length - 1), onClick: () => setClearUpcoming(true) }, 'Clear upcoming'),
+        h(WorkspaceButton, { disabled: !queue.length, onClick: () => { setSessionName(''); setSaving(true) } }, 'Save session'),
         h(
           WorkspaceButton,
           { danger: true, disabled: !queue.length, onClick: () => setClear(true) },
@@ -600,20 +623,90 @@ function QueuePage({ controller }) {
         ),
       ),
     }),
-    h(QueueList, { controller }),
-    save &&
-      h(PlaylistForm, {
-        onClose: () => setSave(false),
-        onSave: (name) => {
-          const playlist = controller.saveQueueAsPlaylist(name)
-          if (playlist) controller.message.set(`Saved queue as “${playlist.name}”.`)
-        },
-      }),
+    selected.size > 0 && h(
+      'div',
+      { className: 'fluid-selection-bar', role: 'toolbar', 'aria-label': 'Selected queue items' },
+      h('span', {}, `${selected.size} selected`),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], -1); clearSelection() } }, 'Move up'),
+      h(WorkspaceButton, { onClick: () => { controller.moveQueueItems([...selected], 1); clearSelection() } }, 'Move down'),
+      h(WorkspaceButton, { danger: true, onClick: () => { void controller.removeQueueItems([...selected]); clearSelection() } }, 'Remove selected'),
+      h(WorkspaceButton, { onClick: clearSelection }, 'Clear selection'),
+    ),
+    h(QueueList, { controller, selected, onSelect: toggleSelect }),
+    h(
+      'section',
+      { className: 'fluid-result-section', 'aria-label': 'Listening sessions' },
+      h('div', { className: 'fluid-section-head' },
+        h('div', {},
+          h('h2', { className: 'fluid-section-title' }, 'Listening sessions'),
+          h('p', { className: 'fluid-section-copy' }, 'Named snapshots of safe source references and order. Restore previews unavailable items and never starts playback automatically.')),
+        h('span', { className: 'fluid-muted' }, `${sessions.length}/50`)),
+      sessions.length
+        ? h('div', { className: 'fluid-track-list' }, sessions.map((session) => h(
+            'div',
+            { className: 'fluid-session-row', key: session.id },
+            h('div', { className: 'fluid-row-copy' },
+              h('span', { className: 'fluid-row-title', title: session.name }, session.name),
+              h('span', { className: 'fluid-row-detail' }, `${session.items.length} item(s)${session.createdAt ? ` · saved ${new Date(session.createdAt).toLocaleDateString()}` : ''}`)),
+            h('div', { className: 'fluid-row-actions' },
+              h(WorkspaceButton, { onClick: () => setRestoring(session.id) }, 'Restore…'),
+              h(Action, { compact: true, kind: 'trash', label: `Delete session ${session.name}`, onClick: () => setDeleting(session.id) })),
+          )))
+        : h('p', { className: 'fluid-muted' }, 'No saved sessions yet. Use “Save session” to snapshot the current queue.'),
+    ),
     clear &&
       h(
         Confirm,
         { title: 'Clear queue', onClose: () => setClear(false), action: () => controller.clearQueue() },
-        'Stop playback and clear this session’s queue? Your saved playlists and files are not changed.',
+        'Stop playback and clear this session’s queue? Your saved playlists, sessions and files are not changed.',
+      ),
+    clearUpcoming &&
+      h(
+        Confirm,
+        { title: 'Clear upcoming', onClose: () => setClearUpcoming(false), action: () => controller.clearUpcoming() },
+        'Remove everything after the current item? The current item keeps playing; saved playlists and sessions are not changed.',
+      ),
+    saving &&
+      h(
+        Modal,
+        { title: 'Save listening session', onClose: () => setSaving(false) },
+        h('form', {
+          onSubmit: (event) => {
+            event.preventDefault()
+            if (controller.saveListeningSession(sessionName)) { setSaving(false); setSessionName('') }
+          },
+        },
+          h('label', { className: 'fluid-field' }, 'Session name',
+            h('input', { className: 'fluid-input', value: sessionName, onChange: (event) => setSessionName(event.target.value), placeholder: 'Late night drive', 'aria-label': 'Session name' })),
+          h('p', { className: 'fluid-muted' }, 'Stores safe source references and order only — no files, handles or credentials. Session-only opened files are skipped.'),
+          h('div', { className: 'fluid-dialog-actions' },
+            h(WorkspaceButton, { onClick: () => setSaving(false) }, 'Cancel'),
+            h(WorkspaceButton, { primary: true, type: 'submit' }, 'Save session')),
+        ),
+      ),
+    preview &&
+      h(
+        Modal,
+        { title: `Restore “${preview.session.name}”`, onClose: () => setRestoring('') },
+        h('p', { className: 'fluid-muted' }, `${preview.rows.length - preview.unavailable.length} of ${preview.rows.length} item(s) available right now.`),
+        preview.unavailable.length > 0 && h('div', { className: 'fluid-track-list' }, preview.unavailable.map((row, at) => h(
+          'div',
+          { className: 'fluid-queue-row', key: `${row.item?.id || 'unknown'}-${at}` },
+          h('div', { className: 'fluid-row-copy' },
+            h('span', { className: 'fluid-row-title' }, row.item?.title || 'Unknown item'),
+            h('span', { className: 'fluid-row-detail' }, row.reason)),
+        ))),
+        h('p', { className: 'fluid-muted' }, 'Unavailable items are skipped. Restoring loads the queue paused — press play when you are ready.'),
+        h('div', { className: 'fluid-dialog-actions' },
+          h(WorkspaceButton, { onClick: () => setRestoring('') }, 'Cancel'),
+          h(WorkspaceButton, { onClick: () => { controller.restoreListeningSession(preview.session.id, 'append'); setRestoring(''); clearSelection() } }, 'Append to queue'),
+          h(WorkspaceButton, { primary: true, onClick: () => { void controller.restoreListeningSession(preview.session.id, 'replace'); setRestoring(''); clearSelection() } }, 'Replace queue')),
+      ),
+    deleting &&
+      h(
+        Confirm,
+        { title: 'Delete session', onClose: () => setDeleting(''), action: () => controller.deleteListeningSession(deleting) },
+        'Delete this saved listening session? Your queue, collections and files are not changed.',
       ),
   )
 }

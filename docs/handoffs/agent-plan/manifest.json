@@ -1,0 +1,948 @@
+{
+  "schema_version": 1,
+  "plan_id": "fluid-music-complete-handoff-v1",
+  "product": "FluidMusic",
+  "repository": "noxius-studium/fluid-music",
+  "baseline_commit": "d6e2bf2df08ae455ac5b24a581c3f2212060afb0",
+  "source_session": "local-d9859a03fbbea5223702e27fedd0b7801005041b53b6aff99812872364e6b326",
+  "specification": "MASTER_PLAN.md",
+  "specification_sha256": "6fa72075adf251d9caef13d34e6c61872b1f2119e00dad834b1e02c0b43460ce",
+  "original_task_ids": [
+    "F01",
+    "F02",
+    "F03",
+    "F04",
+    "F05",
+    "F06",
+    "F07",
+    "F08",
+    "F09",
+    "F10",
+    "F11",
+    "F12",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18",
+    "F19",
+    "F20",
+    "F21",
+    "F22",
+    "F23",
+    "F24",
+    "F25",
+    "F26",
+    "F27",
+    "F28",
+    "F29",
+    "F30",
+    "F31",
+    "F32",
+    "F33",
+    "F34",
+    "F35",
+    "F36",
+    "F37",
+    "F38",
+    "F39",
+    "F40"
+  ],
+  "source_assets": [
+    {
+      "path": "plugin.yaml",
+      "baseline_git_blob": "11789e6fd4ccbf8d88d3bc878b1ecb8f09ba27b1",
+      "already_in_repository": true
+    },
+    {
+      "path": "dashboard/manifest.json",
+      "baseline_git_blob": "1fbef416cd7dc4cd8ce91d66fe8a25dc5db27b08",
+      "already_in_repository": true
+    },
+    {
+      "path": "dashboard/plugin_api.py",
+      "baseline_git_blob": "e71831410c1e4b6fe30f9156a87b608778174e0e",
+      "already_in_repository": true
+    },
+    {
+      "path": "dashboard/local_library.py",
+      "baseline_git_blob": "eeef697125e94c0fa88118b1a4f9586056e04220",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/plugin.js",
+      "baseline_git_blob": "40e5c77e79a7958f9d926846b70d31f5c0348c2d",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/00-runtime.js",
+      "baseline_git_blob": "ca9af16109c7f66eb79ff329f6c7add8c4475f0f",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/10-model.js",
+      "baseline_git_blob": "c0d6470f6ae0149f28bfbfa1c2b13fa520da6f22",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/20-styles.js",
+      "baseline_git_blob": "3d0663247b5602f18a3fd1acb5498617dec5f005",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/30-controller.js",
+      "baseline_git_blob": "fa257dee206b6ea5c39812a14a52e4360473a4f1",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/40-ui.js",
+      "baseline_git_blob": "a3de95ad3bcf9f17d4a27324d6a9f0ac9a045013",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/41-library.js",
+      "baseline_git_blob": "92166563d0c34c8d6e7fe84aa9971b5d2aba34c4",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/42-playlists.js",
+      "baseline_git_blob": "f8ccc40ac230c85873aae07f78a03ec844b4e238",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/43-visualizer.js",
+      "baseline_git_blob": "4e423564566c6c167ab2c69c68b9cfd1a1693b0d",
+      "already_in_repository": true
+    },
+    {
+      "path": "desktop/src/44-workspace.js",
+      "baseline_git_blob": "ca6b84bcc5671a48f02f5cb32d0764d64dcbfd5b",
+      "already_in_repository": true
+    },
+    {
+      "path": "scripts/build_desktop.py",
+      "baseline_git_blob": "59306a6c472beb7276e292d3a295161665a481cb",
+      "already_in_repository": true
+    },
+    {
+      "path": "scripts/package.py",
+      "baseline_git_blob": "3ac8d3d34eef29cb417fc2b53af5b1e04eb36b90",
+      "already_in_repository": true
+    },
+    {
+      "path": "PRODUCT.md",
+      "baseline_git_blob": "2c1f53a65e39e00248eddba992abb43c3f1c8680",
+      "already_in_repository": true
+    },
+    {
+      "path": "DESIGN.md",
+      "baseline_git_blob": "cb666576f38a34c7f44802044f203264d2d84551",
+      "already_in_repository": true
+    },
+    {
+      "path": ".impeccable/review/desktop.png",
+      "baseline_git_blob": "134a0148c7a962daea242667982dfd45fbcd533e",
+      "already_in_repository": true
+    },
+    {
+      "path": ".impeccable/review/mobile.png",
+      "baseline_git_blob": "e9b4f63c12e66f364fe660a0a7c85e7bc9966701",
+      "already_in_repository": true
+    },
+    {
+      "path": ".impeccable/review/titlebar-popover.png",
+      "baseline_git_blob": "7044d8eaee6704ad38bacb5684082149a494c2d1",
+      "already_in_repository": true
+    }
+  ],
+  "cards": [
+    {
+      "key": "FM-00",
+      "title": "Verify cloud workspace and preserve the real current baseline",
+      "source_tasks": [
+        "F01",
+        "F25",
+        "F26",
+        "F27",
+        "F28",
+        "F30"
+      ],
+      "body_file": "kanban/FM-00.md",
+      "body_sha256": "ab2ca1712438c9d4da3f5a90aa391b7b01a28e47a133fffddaf465297bacdd1c",
+      "depends_on": [],
+      "initial_status": "blocked",
+      "priority": 100,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-00",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-01",
+      "title": "Reconcile current host SDK/backend compatibility without optional-provider breakage",
+      "source_tasks": [
+        "F13",
+        "F14",
+        "F25",
+        "F29",
+        "F30"
+      ],
+      "body_file": "kanban/FM-01.md",
+      "body_sha256": "1d93bf7a766f1c262a1312c86b3297fbaae3430c134e34dbf5e61eb536b5dc7e",
+      "depends_on": [
+        "FM-00"
+      ],
+      "initial_status": "blocked",
+      "priority": 99,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-01",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-02",
+      "title": "Protect registration-level playback and focus-switch continuity",
+      "source_tasks": [
+        "F07",
+        "F08",
+        "F17",
+        "F18",
+        "F19"
+      ],
+      "body_file": "kanban/FM-02.md",
+      "body_sha256": "a5784e5c8863510f9ca5131cf9002f1074cb93be935eb63177ae0b25fce26657",
+      "depends_on": [
+        "FM-01"
+      ],
+      "initial_status": "blocked",
+      "priority": 98,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-02",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-03",
+      "title": "Finish one-engine handoff and correct Up Next lifecycle",
+      "source_tasks": [
+        "F10",
+        "F17",
+        "F18",
+        "F19"
+      ],
+      "body_file": "kanban/FM-03.md",
+      "body_sha256": "50a62e3ad5943eb11977bd395c979f1f56db1774c4426b3f2b977385b59fad3c",
+      "depends_on": [
+        "FM-02"
+      ],
+      "initial_status": "blocked",
+      "priority": 97,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-03",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-04",
+      "title": "Preserve and finish integrated YouTube command/state bridge",
+      "source_tasks": [
+        "F08",
+        "F09",
+        "F10",
+        "F13",
+        "F14",
+        "F17"
+      ],
+      "body_file": "kanban/FM-04.md",
+      "body_sha256": "a004357370250168e0a4922237866471cbc84614108af8b97bb7f976e9a425f0",
+      "depends_on": [
+        "FM-03"
+      ],
+      "initial_status": "blocked",
+      "priority": 96,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-04",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-05",
+      "title": "Complete YouTube search, URL resolution and real titles",
+      "source_tasks": [
+        "F05",
+        "F13",
+        "F15"
+      ],
+      "body_file": "kanban/FM-05.md",
+      "body_sha256": "507ca68d2af19d4e677358e124083dd7b6f1c0fd9cb7ccb12ebb0df33c2c8470",
+      "depends_on": [
+        "FM-04"
+      ],
+      "initial_status": "blocked",
+      "priority": 95,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-05",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-06",
+      "title": "Finish profile-scoped SQLite played history and clear/replay UX",
+      "source_tasks": [
+        "F05",
+        "F15",
+        "F16",
+        "F19",
+        "F30"
+      ],
+      "body_file": "kanban/FM-06.md",
+      "body_sha256": "4fd077e0a835607ba7a2ca108920ea902b12ba6b77513bdb7335ba5d3315dec2",
+      "depends_on": [
+        "FM-05"
+      ],
+      "initial_status": "blocked",
+      "priority": 94,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-06",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-07",
+      "title": "Diagnose YouTube catalogue failures with a precise recovery matrix",
+      "source_tasks": [
+        "F13",
+        "F14",
+        "F15",
+        "F32",
+        "F38"
+      ],
+      "body_file": "kanban/FM-07.md",
+      "body_sha256": "8710f02bba2476a52b9b62fc8a3363a54946482775dbd080a99ea9405e9fbbe1",
+      "depends_on": [
+        "FM-06"
+      ],
+      "initial_status": "blocked",
+      "priority": 93,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-07",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-08",
+      "title": "Deliver in-plugin first-party YouTube fallback for eligible embed-denied playback",
+      "source_tasks": [
+        "F08",
+        "F13",
+        "F14",
+        "F17",
+        "F18",
+        "F19",
+        "F32",
+        "F33",
+        "F39"
+      ],
+      "body_file": "kanban/FM-08.md",
+      "body_sha256": "eb30cb5fb8584af50828c840862582bba7ca9ab6939c2ff4da2cf2b4e36e33a0",
+      "depends_on": [
+        "FM-07"
+      ],
+      "initial_status": "blocked",
+      "priority": 92,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-08",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-09",
+      "title": "Implement FluidMusic-owned Spotify OAuth, protected tokens and provider client",
+      "source_tasks": [
+        "F23",
+        "F25",
+        "F29",
+        "F30",
+        "F31"
+      ],
+      "body_file": "kanban/FM-09.md",
+      "body_sha256": "7a087ea3cb3c2cc627f03170fd59e05b9a9eefe4f23be677ad8d9010074912dd",
+      "depends_on": [
+        "FM-08"
+      ],
+      "initial_status": "blocked",
+      "priority": 91,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-09",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-10",
+      "title": "Implement Spotify devices, real transport and supported in-plugin playback capability",
+      "source_tasks": [
+        "F09",
+        "F10",
+        "F18",
+        "F19",
+        "F29",
+        "F31"
+      ],
+      "body_file": "kanban/FM-10.md",
+      "body_sha256": "56a8a06dff91005b9f3f01950c8905342009adcc1f6656e286d8dceeae7ad836",
+      "depends_on": [
+        "FM-09"
+      ],
+      "initial_status": "blocked",
+      "priority": 90,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-10",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-11",
+      "title": "Implement Spotify catalogue/library/playlist workflows inside FluidMusic",
+      "source_tasks": [
+        "F05",
+        "F15",
+        "F22",
+        "F29",
+        "F31"
+      ],
+      "body_file": "kanban/FM-11.md",
+      "body_sha256": "f2d08f077f31c3878c0d55cb16772886bbfb6637c75e27df4b8b7c903c7fa201",
+      "depends_on": [
+        "FM-10"
+      ],
+      "initial_status": "blocked",
+      "priority": 89,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-11",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-12",
+      "title": "Unify working bottom transport and make volume usable everywhere",
+      "source_tasks": [
+        "F09",
+        "F10",
+        "F11",
+        "F12",
+        "F24"
+      ],
+      "body_file": "kanban/FM-12.md",
+      "body_sha256": "a166d005964ffebdca1ec590a9f8c712957f8f039b65ce6fb958f698a49c00d8",
+      "depends_on": [
+        "FM-11"
+      ],
+      "initial_status": "blocked",
+      "priority": 88,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-12",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-13",
+      "title": "Complete compact Hermes-themed Media workspace and responsive body",
+      "source_tasks": [
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06",
+        "F09",
+        "F12",
+        "F24"
+      ],
+      "body_file": "kanban/FM-13.md",
+      "body_sha256": "31a2cbfda3b98efb6ea8db1774a8dd7cd56ae6f64a101145af3a60430e22bf47",
+      "depends_on": [
+        "FM-12"
+      ],
+      "initial_status": "blocked",
+      "priority": 87,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-13",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-14",
+      "title": "Finish titlebar popover and dockable mini-player with no extra YouTube pane",
+      "source_tasks": [
+        "F02",
+        "F07",
+        "F08",
+        "F09",
+        "F11",
+        "F12",
+        "F17",
+        "F24"
+      ],
+      "body_file": "kanban/FM-14.md",
+      "body_sha256": "acd53809cc40197df812eb824e47629da1031148712c2121cc3629d90685b735",
+      "depends_on": [
+        "FM-13"
+      ],
+      "initial_status": "blocked",
+      "priority": 86,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-14",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-15",
+      "title": "Preserve radio discovery, pins and source-honest LIVE behavior",
+      "source_tasks": [
+        "F05",
+        "F09",
+        "F10",
+        "F18",
+        "F20"
+      ],
+      "body_file": "kanban/FM-15.md",
+      "body_sha256": "d86052169b6a962ec3f76d21af54d3aafa4b3280c2e90dff5df269533c035525",
+      "depends_on": [
+        "FM-14"
+      ],
+      "initial_status": "blocked",
+      "priority": 85,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-15",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-16",
+      "title": "Preserve approved local-library scanning, IDs and seekable playback",
+      "source_tasks": [
+        "F05",
+        "F09",
+        "F10",
+        "F16",
+        "F21",
+        "F30"
+      ],
+      "body_file": "kanban/FM-16.md",
+      "body_sha256": "156d0f296421979566c19e39d6fb68d2d724031e849941eab0b7f475383b3dd2",
+      "depends_on": [
+        "FM-15"
+      ],
+      "initial_status": "blocked",
+      "priority": 84,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-16",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-17",
+      "title": "Complete safe local collections, legacy mixes and import/export continuity",
+      "source_tasks": [
+        "F05",
+        "F19",
+        "F21",
+        "F22",
+        "F30"
+      ],
+      "body_file": "kanban/FM-17.md",
+      "body_sha256": "23a22f1f0d7169154a012d654572e65c5914896ea52b0d39d4548c3542ea9231",
+      "depends_on": [
+        "FM-16"
+      ],
+      "initial_status": "blocked",
+      "priority": 83,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-17",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-18",
+      "title": "Finish dedicated Settings, truthful status and sanitized diagnostics",
+      "source_tasks": [
+        "F02",
+        "F05",
+        "F06",
+        "F23",
+        "F29",
+        "F30"
+      ],
+      "body_file": "kanban/FM-18.md",
+      "body_sha256": "f69f82929777d4fbe32cff39873b82834d69587b72fdf848dc43143f49c3bf9d",
+      "depends_on": [
+        "FM-17"
+      ],
+      "initial_status": "blocked",
+      "priority": 82,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-18",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-19",
+      "title": "Close keyboard, icon, error and disposal gaps across all surfaces",
+      "source_tasks": [
+        "F10",
+        "F12",
+        "F14",
+        "F17",
+        "F23",
+        "F24"
+      ],
+      "body_file": "kanban/FM-19.md",
+      "body_sha256": "c7e53a32000e184586d348fd507f8ddd91792840da58e85cbbcf81c30d3d686e",
+      "depends_on": [
+        "FM-18"
+      ],
+      "initial_status": "blocked",
+      "priority": 81,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-19",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-20",
+      "title": "Add queue edit/undo/provenance and resumable listening sessions",
+      "source_tasks": [
+        "F19",
+        "F22",
+        "F24",
+        "F34",
+        "F35"
+      ],
+      "body_file": "kanban/FM-20.md",
+      "body_sha256": "8a581e8abe339212d47589a7528d9cf02f6271cbe943291d355b558573d0c51a",
+      "depends_on": [
+        "FM-19"
+      ],
+      "initial_status": "blocked",
+      "priority": 80,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-20",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-21",
+      "title": "Add long-form bookmarks/resume, history filters and sleep timer",
+      "source_tasks": [
+        "F16",
+        "F24",
+        "F35",
+        "F36",
+        "F37"
+      ],
+      "body_file": "kanban/FM-21.md",
+      "body_sha256": "9b54be4b0987e9c3f000409b5ff14db795516e101ff1b6cb473e054a839baae7",
+      "depends_on": [
+        "FM-20"
+      ],
+      "initial_status": "blocked",
+      "priority": 79,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-21",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-22",
+      "title": "Harden recovery, source health, retry bounds and data-safe restart",
+      "source_tasks": [
+        "F14",
+        "F18",
+        "F23",
+        "F26",
+        "F30",
+        "F38",
+        "F40"
+      ],
+      "body_file": "kanban/FM-22.md",
+      "body_sha256": "f7b880374b20dad29053dd2112d7a6d4b802b9f0bd0c7303a66faf877e2367dc",
+      "depends_on": [
+        "FM-21"
+      ],
+      "initial_status": "blocked",
+      "priority": 78,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-22",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-23",
+      "title": "Make Hermes-update compatibility explicit and remove fragile provider/host coupling",
+      "source_tasks": [
+        "F01",
+        "F25",
+        "F29",
+        "F30",
+        "F39",
+        "F40"
+      ],
+      "body_file": "kanban/FM-23.md",
+      "body_sha256": "f2f0045944bd2e493697598e831a0b527ca7181bee8d997aae2d9740ab362b47",
+      "depends_on": [
+        "FM-22"
+      ],
+      "initial_status": "blocked",
+      "priority": 77,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-23",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-24",
+      "title": "Build a complete cloud-to-Desktop artifact and reconcile stale docs",
+      "source_tasks": [
+        "F01",
+        "F02",
+        "F09",
+        "F13",
+        "F25",
+        "F26",
+        "F28",
+        "F29",
+        "F30"
+      ],
+      "body_file": "kanban/FM-24.md",
+      "body_sha256": "a8c6a98b267cea3df4b6602cab368210c7b4ed5dd00cf7ecdcd86217cb84c793",
+      "depends_on": [
+        "FM-23"
+      ],
+      "initial_status": "blocked",
+      "priority": 76,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-24",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": false
+    },
+    {
+      "key": "FM-25",
+      "title": "Run final lean checks and request owner playback/theme review",
+      "source_tasks": [
+        "F01",
+        "F02",
+        "F07",
+        "F08",
+        "F09",
+        "F10",
+        "F11",
+        "F12",
+        "F13",
+        "F15",
+        "F16",
+        "F17",
+        "F18",
+        "F24",
+        "F25",
+        "F26",
+        "F27",
+        "F28",
+        "F30"
+      ],
+      "body_file": "kanban/FM-25.md",
+      "body_sha256": "309b2b5f8a791af16056d0bb0c04466fff06fa51240c33775ce38b68319a9d94",
+      "depends_on": [
+        "FM-24"
+      ],
+      "initial_status": "blocked",
+      "priority": 75,
+      "idempotency_key": "fluid-music-complete-handoff-v1:FM-25",
+      "goal_mode": false,
+      "completion_contract": "local-only",
+      "max_runtime": "1h",
+      "max_retries": 1,
+      "model_override": "qwen/qwen4-max:free",
+      "provider_override": "verified receiving profile provider",
+      "per_slice_commit_required": true,
+      "push_after_every_commit_required": true,
+      "user_review_gate": true
+    }
+  ],
+  "start_workers": false,
+  "preserve_existing_board": true,
+  "worker_model": "qwen/qwen4-max:free",
+  "delegation_allowed": true,
+  "delegation_model": "qwen/qwen4-max:free",
+  "route_policy": "Exact Qwen worker and child model; provider verified from actual cloud profile, no automatic model/provider fallback.",
+  "testing_policy": {
+    "docker_allowed": false,
+    "heavyweight_test_stacks_allowed": false,
+    "parallel_heavy_checks_allowed": false,
+    "database": "Existing profile-scoped SQLite; temporary isolated SQLite/test doubles for verification"
+  },
+  "git_policy": {
+    "commit_each_slice": true,
+    "push_each_commit": true,
+    "verify_remote_sha": true,
+    "continue_until_done_or_user_review": true,
+    "main_release_push_authorized": false
+  },
+  "callback_policy": [
+    "START",
+    "FINISH",
+    "BLOCKED",
+    "REVIEW"
+  ],
+  "cloud_handoff": true,
+  "private_repository": false
+}

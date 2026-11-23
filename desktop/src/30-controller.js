@@ -1,19 +1,51 @@
 
 /* CONTROLLER_START */
-function createController(ctx) {
+function createController(ctx, hostCapabilities = {}) {
+  // Owned first-party watch capability is negotiated at registration from the
+  // PUBLIC SDK namespace; absent capability is an honest unavailable state,
+  // never a hidden reduced-scope fallback or an external app.
+  const watchCapability = hostCapabilities.watchCapability || { available: false, missing: ['OwnedMediaView', 'host.mediaSession'] }
+  let youtubeEngine = 'embed'
+  let watchAttempts = 0
+  // The active YouTube surface registers its real command channel here; the
+  // shared transport drives it instead of provider-specific copies.
+  let youtubeCommandSink = null
   const rawStoredQueue = ctx.storage.get('queue', [])
   const storedSelection = normalizeQueueSelection(rawStoredQueue, ctx.storage.get('queueIndex', -1))
-  const storedPlaylists = normalizePlaylistState(ctx.storage.get('playlistState', { version: 2, playlists: [] }))
+  const rawStoredPlaylistState = ctx.storage.get('playlistState', { version: 2, playlists: [] })
+  const storedPlaylists = normalizePlaylistState(rawStoredPlaylistState)
+  const rawPlaylistRoot = rawStoredPlaylistState && typeof rawStoredPlaylistState === 'object' ? rawStoredPlaylistState : { version: 2, playlists: [] }
+  const rawPlaylistEntries = Array.isArray(rawPlaylistRoot.playlists) ? rawPlaylistRoot.playlists : []
+  const rawLegacyPlaylists = new Map()
+  storedPlaylists.playlists.forEach((entry, at) => {
+    if (entry.legacy && rawPlaylistEntries[at] && typeof rawPlaylistEntries[at] === 'object') rawLegacyPlaylists.set(entry.id, rawPlaylistEntries[at])
+  })
   const queue = atom(storedSelection.items)
   const index = atom(storedSelection.index)
   const favorites = atom(normalizeQueue(ctx.storage.get('favorites', [])))
   const volume = atom(clampVolume(ctx.storage.get('volume', .5)))
-  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'home')))
+  const workspaceView = atom(isWorkspaceView(ctx.storage.get('workspaceView', 'browse')))
   const selectedPlaylist = atom(safeText(ctx.storage.get('selectedPlaylist', '')))
   const undoState = atom(null)
+  const queueUndo = atom(null)
+  const listeningSessions = atom(normalizeListeningSessions(ctx.storage.get('listeningSessions', [])))
+  const resumeOffer = atom(null)
+  const bookmarks = atom([])
+  const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
+  const historyRetention = atom(0)
+  const historyFilters = atom({ query: '', source: '', since: '', until: '' })
+  const historyOffset = atom(0)
+  const sourceHealth = atom({})
+  const retryState = atom({})
   let unmutedVolume = clampVolume(ctx.storage.get('unmutedVolume', .5)) || .5
   let volumeTimer = null
   let volumeVersion = 0
+  let sleepInterval = null
+  let sleepDeadline = 0
+  let sleepBound = null
+  let sleepEndedFor = null
+  let lastResumeSaveAt = 0
+  const retryBudgets = new Map()
   let spotifyStartedUri = ''
   let localRefreshVersion = 0
   const status = atom('idle')
@@ -22,27 +54,23 @@ function createController(ctx) {
   const spotify = atom({ connected: false, title: '', subtitle: '', playing: false })
   const spotifyAuth = atom({ state: 'loading', authenticated: false, needsClientId: false, detail: '' })
   const spotifyDevices = atom([])
-  const radioMeter = atom('idle')
-  const statusVisualizer = atom(ctx.storage.get('statusVisualizer', true) !== false)
-  const miniVisualizer = atom(ctx.storage.get('miniVisualizer', true) !== false)
-  const visualizerStyle = atom(['bars', 'wave', 'mirror'].includes(ctx.storage.get('visualizerStyle', 'bars')) ? ctx.storage.get('visualizerStyle', 'bars') : 'bars')
-  const visualConsumers = new Set()
-  let visualBuffer = null
-  let visualReads = 0
+  const spotifyFailure = atom(null)
+  const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
+  const titlebarOpen = atom(false)
+  const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
   const sessionTracks = atom([])
   const localRoots = atom([])
+  const history = atom([])
+  const historyTotal = atom(0)
   const shuffle = atom(false)
   const repeat = atom('off')
   const spotifyAutoplay = atom(Boolean(ctx.storage.get('spotifyAutoplay', false)))
   let audio = null
   let audioSource = null
-  let context = null
-  let mediaSource = null
-  let analyser = null
-  let gain = null
+
   let disposed = false
   let radioGeneration = 0
   let radioTimeout = null
@@ -59,8 +87,11 @@ function createController(ctx) {
   let requestSequence = 0
   let spotifyProgressAnchor = null
   let spotifyQueueGuard = null
+  let youtubeQueueGuard = null
+  let youtubeHistoryRecorded = false
   let transition = 0
   let transitionChain = Promise.resolve()
+  let lastHistory = { key: '', at: 0 }
   const localRegistry = new Map()
 
   const addLog = (level, event, detail = {}) => {
@@ -105,9 +136,13 @@ function createController(ctx) {
     ctx.storage.set('volume', volume.get())
     ctx.storage.set('spotifyAutoplay', spotifyAutoplay.get())
   }
-  const persistPlaylists = () => ctx.storage.set('playlistState', { version: 3, playlists: playlists.get() })
+  const playlistStorageState = entries => ({
+    ...rawPlaylistRoot,
+    version: 3,
+    playlists: entries.map(entry => rawLegacyPlaylists.get(entry.id) || entry)
+  })
+  const persistPlaylists = () => ctx.storage.set('playlistState', playlistStorageState(playlists.get()))
   persist()
-  persistPlaylists()
   const revokeLocal = item => {
     if (item?.source !== 'local' || !item.objectUrl) return
     try { URL.revokeObjectURL(item.objectUrl) } catch { /* Session object URL cleanup is best-effort. */ }
@@ -129,15 +164,73 @@ function createController(ctx) {
         throw failure
       }
       if (!quiet) addLog('info', 'api.success', { requestId, method, route, status: Number(response?.status_code || response?.data?.status_code) || 200, durationMs: Date.now() - started, ...diagnosticBody(options?.body) })
+      if (sourceHealth.get().backend?.state === 'unavailable') recordHealth('backend', 'ready', 'Backend reachable again.')
       return response && Object.prototype.hasOwnProperty.call(response, 'data') ? response.data : response
     } catch (error) {
       const failure = new Error(userFacingError(error, 'FluidMusic could not reach its backend. Retry after Hermes finishes reloading.'))
       failure.statusCode = Number(error?.statusCode) || 0
       addLog('error', 'api.failure', { requestId, method, route, status: failure.statusCode, durationMs: Date.now() - started, error: failure.message, ...diagnosticBody(options?.body) })
+      recordHealth('backend', 'unavailable', 'A backend request failed. Hermes may be reloading or offline.', 'retry')
       throw failure
     }
   }
   const spotifyRequest = request
+  const recordHistory = item => {
+    const serialized = serializePlaylistItem(item)
+    if (!serialized) return
+    const key = `${serialized.source}:${serialized.id || serialized.uri || serialized.url || serialized.title}`
+    const now = Date.now()
+    if (lastHistory.key === key && now - lastHistory.at < 5000) return
+    lastHistory = { key, at: now }
+    void request('/history', { method: 'POST', body: { item: serialized } })
+      .then(data => {
+        const entry = data?.entry
+        if (entry?.item) history.set([{ id: entry.id, playedAt: safeText(entry.played_at), item: normalizeQueueItem(entry.item) }, ...history.get()].filter(value => value.item).slice(0, 500))
+      })
+      .catch(() => {})
+  }
+  const refreshHistory = async (filters = null, offset = 0) => {
+    if (filters) historyFilters.set({ query: safeText(filters.query), source: safeText(filters.source), since: safeText(filters.since), until: safeText(filters.until) })
+    const active = historyFilters.get()
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0))
+    historyOffset.set(safeOffset)
+    const params = new URLSearchParams({ limit: '50', offset: String(safeOffset) })
+    if (active.query) params.set('query', active.query)
+    if (active.source) params.set('source', active.source)
+    if (active.since) params.set('since', active.since)
+    if (active.until) params.set('until', active.until)
+    const data = await request(`/history?${params.toString()}`)
+    const entries = (Array.isArray(data?.items) ? data.items : []).map(entry => {
+      const item = normalizeQueueItem(entry?.item)
+      return item ? { id: entry.id, playedAt: safeText(entry.played_at), item } : null
+    }).filter(Boolean)
+    history.set(entries)
+    historyTotal.set(Math.max(0, Number(data?.total) || 0))
+    return entries
+  }
+  const clearHistory = async () => {
+    await request('/history', { method: 'DELETE' })
+    history.set([])
+    historyTotal.set(0)
+    historyOffset.set(0)
+  }
+  const removeHistoryEntry = async id => {
+    await request(`/history/${Number(id)}`, { method: 'DELETE' })
+    history.set(history.get().filter(entry => entry.id !== Number(id)))
+    historyTotal.set(Math.max(0, historyTotal.get() - 1))
+  }
+  const loadHistoryRetention = async () => {
+    const data = await request('/history/retention')
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    return historyRetention.get()
+  }
+  const setHistoryRetention = async days => {
+    const data = await request('/history/retention', { method: 'PUT', body: { days } })
+    historyRetention.set(Math.max(0, Number(data?.days) || 0))
+    message.set(Number(data?.removed) > 0 ? `Retention updated: ${data.removed} older entry(s) removed.` : 'History retention updated.')
+    await refreshHistory(null, 0).catch(() => {})
+    return historyRetention.get()
+  }
   const spotifyCommandBody = (body = {}) => {
     const active = spotifyDevices.get().find(device => device.active && !device.restricted)
     // An explicit user choice is authoritative even while Spotify's device list is stale.
@@ -170,6 +263,21 @@ function createController(ctx) {
     })
   }
 
+  function armYouTubeQueueGuard(item, token = transition) {
+    youtubeQueueGuard = item?.source === 'youtube' ? { token, itemId: item.id, advancing: false } : null
+  }
+
+  function requestYouTubeQueueAdvance() {
+    const guard = youtubeQueueGuard
+    if (!guard || guard.token !== transition || guard.itemId !== current()?.id || guard.advancing) return
+    guard.advancing = true
+    addLog('state', 'youtube.hermes-queue-advance', { item: guard.itemId })
+    void next().catch(error => {
+      guard.advancing = false
+      message.set(error?.message || 'FluidMusic could not advance to the next queue item.')
+    })
+  }
+
   function updateSpotifyProgress() {
     const anchor = spotifyProgressAnchor
     if (!anchor || current()?.source !== 'spotify') return
@@ -178,7 +286,10 @@ function createController(ctx) {
     progress.set({ positionMs, durationMs: anchor.durationMs })
     const guard = spotifyQueueGuard
     if (anchor.playing && anchor.durationMs > 0 && positionMs >= anchor.durationMs && guard?.expectedUri === anchor.uri) {
-      requestHermesQueueAdvance('projected-end', anchor.uri)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(current())) {
+        finishSleepAtEndOfItem(current())
+        void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+      } else requestHermesQueueAdvance('projected-end', anchor.uri)
     }
   }
 
@@ -207,86 +318,86 @@ function createController(ctx) {
       audio = null
       audioSource = null
     }
-    if (gain) gain.disconnect()
-    if (analyser) analyser.disconnect()
-    if (mediaSource) mediaSource.disconnect()
-    gain = null
-    analyser = null
-    visualBuffer = null
-    mediaSource = null
-    if (context?.state === 'running') void context.suspend()
-    radioMeter.set('idle')
+
   }
 
-  async function startRadio(item, analyse, token) {
+  async function startRadio(item, _analyse, token) {
     stopInternalAudio()
     if (!item || item.source !== 'radio' || disposed || token !== transition) return
     const generation = radioGeneration
+    let historyRecorded = false
+    // Radio Browser directory etiquette: register one click per play attempt
+    // for directory stations (canonical UUID ids). Presets and custom streams
+    // are not directory entries. Fire-and-forget and failure-tolerant: this
+    // never gates playback and never proxies the stream itself.
+    const stationId = safeText(item.id)
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stationId)) {
+      void ctx.rest(`/radio/click/${encodeURIComponent(stationId)}`, { method: 'POST' }).catch(() => {})
+    }
     const element = new Audio()
     audio = element
     audioSource = 'radio'
     element.preload = 'none'
-    element.volume = analyse ? 1 : volume.get()
-    if (analyse) element.crossOrigin = 'anonymous'
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
+    element.volume = volume.get()
     progress.set({ positionMs: 0, durationMs: 0 })
     status.set('loading')
     const isCurrent = () => !disposed && generation === radioGeneration && element === audio
-    const finishFailure = () => {
+    const finishFailure = (detail = '') => {
       if (!isCurrent()) return
-      if (analyse) {
-        void startRadio(item, false, token)
-        return
-      }
+
       status.set('error')
-      message.set('This HTTPS radio stream could not connect. Choose another station or retry.')
+      message.set(detail || 'This HTTPS radio stream could not connect. Choose another station or retry.')
+      recordHealth('radio', 'degraded', detail || 'This HTTPS radio stream could not connect.', 'retry')
+    }
+    // Report the REAL failure boundary from the media element instead of one
+    // generic notice: network reachability, decode/codec support, and
+    // unsupported format-or-origin (the honest codec/CORS boundary) differ.
+    const reportMediaError = () => {
+      const code = Number(element.error?.code) || 0
+      const detail = code === 2 ? 'The radio stream could not be reached (network boundary). Check the connection, then retry or choose another station.'
+        : code === 3 ? 'This radio stream could not be decoded here (codec boundary). Try another station or format.'
+        : code === 4 ? 'This stream is not playable here — its format or origin is unsupported (codec/CORS boundary). Try another station.'
+        : ''
+      finishFailure(detail)
     }
     radioTimeout = setTimeout(finishFailure, 15000)
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       clearTimeout(radioTimeout)
+      recordHealth('radio', 'ready', 'Live stream playing.')
       radioTimeout = null
       status.set('playing')
-      message.set(analyse ? '' : 'Audio is playing. Analyser unavailable; this display is static.')
+      message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('pause', () => { if (isCurrent() && !element.ended && status.get() === 'playing') status.set('paused') })
-    element.addEventListener('error', finishFailure)
-    element.addEventListener('ended', finishFailure)
+    element.addEventListener('error', reportMediaError)
+    element.addEventListener('ended', () => finishFailure('The live stream ended unexpectedly. Retry to reconnect.'))
     element.src = item.streamUrl
     try {
-      if (analyse) {
-        context ??= new AudioContext()
-        gain = context.createGain()
-        gain.gain.value = volume.get()
-        mediaSource = context.createMediaElementSource(element)
-        mediaSource.connect(gain)
-        gain.connect(context.destination)
-        syncAnalyser()
-        await context.resume()
-      }
       await element.play()
     } catch {
       finishFailure()
     }
   }
 
-  async function startLocal(item, token, analyse = Boolean(item?.objectUrl)) {
+  async function startLocal(item, token) {
     stopInternalAudio()
     if (!item || item.source !== 'local' || disposed || token !== transition) return
     const sources = [item.objectUrl, ...(Array.isArray(item.playbackUrls) ? item.playbackUrls : localPlaybackUrls(item.filePath))].filter(Boolean)
     if (item.unavailable || !sources.length) {
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder to restore it.')
+      recordHealth('local', 'degraded', 'A local track is missing. Rescan its folder.', 'rescan')
       return
     }
     const generation = radioGeneration
+    let historyRecorded = false
     const element = new Audio()
     audio = element
     audioSource = 'local'
     element.preload = 'metadata'
-    if (analyse) element.crossOrigin = 'anonymous'
     element.volume = volume.get()
-    radioMeter.set(analyse ? 'ready' : 'unavailable')
     progress.set({ positionMs: 0, durationMs: Math.max(0, Number(item.durationMs) || 0) })
     status.set('loading')
     let sourceIndex = 0
@@ -301,8 +412,6 @@ function createController(ctx) {
         if (isCurrent() && sourceIndex + 1 < sources.length) {
           sourceIndex += 1
           await playSource()
-        } else if (isCurrent() && analyse) {
-          await startLocal(item, token, false)
         } else if (isCurrent()) {
           status.set('error')
           message.set('Hermes could not start this local audio file. Rescan it or check Chromium format support.')
@@ -312,30 +421,28 @@ function createController(ctx) {
     element.addEventListener('playing', () => {
       if (!isCurrent()) return
       played = true
-      if (analyse && !mediaSource) {
-        try {
-          context ??= new AudioContext()
-          gain = context.createGain()
-          gain.gain.value = volume.get()
-          mediaSource = context.createMediaElementSource(element)
-          element.volume = 1
-          mediaSource.connect(gain)
-          gain.connect(context.destination)
-          syncAnalyser()
-          void context.resume().catch(() => { if (isCurrent()) void startLocal(item, token, false) })
-        } catch { void startLocal(item, token, false); return }
-      }
+      sleepEndedFor = null
       status.set('playing')
       message.set('')
+      if (!historyRecorded) { historyRecorded = true; recordHistory(item) }
     })
     element.addEventListener('loadedmetadata', () => {
       if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
     })
     element.addEventListener('timeupdate', () => {
-      if (isCurrent()) progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+      if (isCurrent()) {
+        progress.set({ positionMs: Math.max(0, Number(element.currentTime) || 0) * 1000, durationMs: Math.max(0, Number(element.duration) || 0) * 1000 })
+        saveResumePosition(false)
+      }
     })
-    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) status.set('paused') })
-    element.addEventListener('ended', () => { if (isCurrent()) void next() })
+    element.addEventListener('pause', () => { if (isCurrent() && !element.ended) { status.set('paused'); saveResumePosition(false) } })
+    element.addEventListener('ended', () => {
+      if (!isCurrent()) return
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) { finishSleepAtEndOfItem(item); return }
+      if (sleepEndedFor === item.id) return
+      void next()
+    })
     element.addEventListener('error', () => {
       if (!isCurrent()) return
       if (!played && sourceIndex + 1 < sources.length) {
@@ -343,7 +450,7 @@ function createController(ctx) {
         void playSource()
         return
       }
-      if (analyse && !played) { void startLocal(item, token, false); return }
+
       status.set('error')
       message.set('This local track is unavailable. Rescan its music folder and retry.')
     })
@@ -373,6 +480,7 @@ function createController(ctx) {
         repeat: safeText(state.repeat_state, 'off')
       }
       spotify.set(snapshot)
+      spotifyFailure.set(null)
       shuffle.set(snapshot.shuffle)
       repeat.set(['off', 'context', 'track'].includes(snapshot.repeat) ? snapshot.repeat : 'off')
       const fingerprint = `${snapshot.playing}:${snapshot.uri}:${snapshot.device}`
@@ -397,8 +505,12 @@ function createController(ctx) {
         status.set(snapshot.playing ? 'playing' : 'paused')
         if (snapshot.device) message.set('')
       }
+      recordHealth('spotify', snapshot.connected ? 'ready' : 'unknown', snapshot.connected ? 'Spotify Connect responded.' : 'No active Connect session reported.', snapshot.connected ? '' : 'choose-device')
       return snapshot
     } catch (error) {
+      const failure = classifySpotifyFailure(error)
+      spotifyFailure.set(failure)
+      recordHealth('spotify', ['auth-required', 'insufficient-scope'].includes(failure.reason) ? 'unavailable' : 'degraded', failure.message, failure.action)
       if (token === transition && current()?.source === 'spotify') {
         status.set('error')
         message.set(error?.message || 'Spotify Connect state could not be confirmed.')
@@ -411,10 +523,12 @@ function createController(ctx) {
     try {
       const snapshot = normalizeSpotifyAuth(await spotifyRequest('/spotify/auth/status'))
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', snapshot.authenticated ? 'ready' : 'unavailable', snapshot.authenticated ? 'Spotify sign-in confirmed.' : 'Not signed in to Spotify.', snapshot.authenticated ? '' : 'reconnect')
       return snapshot
     } catch (error) {
       const snapshot = { state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication status is unavailable.' }
       spotifyAuth.set(snapshot)
+      recordHealth('spotify', 'unavailable', 'Spotify authentication status is unavailable.', 'reconnect')
       return snapshot
     }
   }
@@ -446,6 +560,7 @@ function createController(ctx) {
       }
       spotifyDevices.set([])
       clearSpotifyDeviceSelection()
+      spotifyFailure.set(classifySpotifyFailure(error))
       if (isSpotifyAuthFailure(error)) {
         spotifyAuth.set({ state: 'failed', authenticated: false, needsClientId: false, detail: error?.message || 'Spotify authentication has expired. Reconnect to continue.' })
       }
@@ -458,6 +573,7 @@ function createController(ctx) {
   function clearAuthPoll() { if (authTimer) clearTimeout(authTimer); authTimer = null }
   async function pollSpotifyAuth() {
     const snapshot = await refreshSpotifyAuth()
+    if (disposed) { clearAuthPoll(); return snapshot }
     if (snapshot.authenticated || snapshot.state === 'failed') { clearAuthPoll(); return snapshot }
     authAttempts += 1
     if (authAttempts >= 80) {
@@ -493,10 +609,17 @@ function createController(ctx) {
 
   async function refreshLocalLibrary() {
     const version = ++localRefreshVersion
-    const [rootsData, tracksData] = await Promise.all([
-      request('/local/roots'),
-      request('/local/tracks?include_missing=true&limit=5000&offset=0')
-    ])
+    let rootsData
+    let tracksData
+    try {
+      [rootsData, tracksData] = await Promise.all([
+        request('/local/roots'),
+        request('/local/tracks?include_missing=true&limit=5000&offset=0')
+      ])
+    } catch (error) {
+      recordHealth('local', 'degraded', 'The local library could not be read. Rescan or retry.', 'rescan')
+      throw error
+    }
     if (disposed || version !== localRefreshVersion) return { roots: localRoots.get(), tracks: localTracks.get() }
     const roots = Array.isArray(rootsData?.roots) ? rootsData.roots : []
     const tracks = (Array.isArray(tracksData?.items) ? tracksData.items : []).map(localTrackItem).filter(Boolean)
@@ -511,6 +634,7 @@ function createController(ctx) {
     })
     queue.set(hydrateLocalReferences(queue.get()))
     persist()
+    recordHealth('local', 'ready', `${tracks.length} indexed track(s) in ${roots.length} approved folder(s).`)
     return { roots, tracks }
   }
 
@@ -523,17 +647,18 @@ function createController(ctx) {
       supported.forEach(file => {
         const objectUrl = URL.createObjectURL(file)
         const item = normalizeQueueItem({ source: 'local', id: `session:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, title: file.name.replace(/\.[^.]+$/, ''), subtitle: 'Opened file · this session only', objectUrl, mimeType: file.type })
-        if (item) opened.push(item)
+        if (item) opened.push({ ...item, origin: 'session' })
         else URL.revokeObjectURL(objectUrl)
       })
     } catch (error) { opened.forEach(revokeLocal); throw new Error(userFacingError(error, 'Those files could not be opened.')) }
+    if (opened.length) rememberQueueEdit('Open files')
     const before = queue.get().length
     opened.forEach(item => localRegistry.set(item.id, item))
     sessionTracks.set([...sessionTracks.get(), ...opened])
     queue.set([...queue.get(), ...opened])
     if (index.get() < 0 && opened.length) { index.set(before); status.set('paused') }
     persist()
-    message.set(opened.length ? `Opened ${opened.length} audio file(s). Select Play to listen with visualization. Session files are not saved to playlists and must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
+    message.set(opened.length ? `Opened ${opened.length} audio file(s). Session files must be reopened after restart.${selected.length > opened.length ? ` Skipped ${selected.length - opened.length} unsupported/empty file(s).` : ''}` : 'Choose non-empty supported audio files.')
     return opened.length
   }
 
@@ -568,6 +693,11 @@ function createController(ctx) {
     if (item?.source === 'spotify') {
       await spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() })
     }
+    if (item?.source === 'youtube') {
+      // The embed surface owns the engine; leaving the item clears its reported
+      // state so a stale iframe snapshot can never describe the next source.
+      youtube.set({ ...youtube.get(), playing: false, ended: false })
+    }
   }
 
   function runTransition(work) {
@@ -582,6 +712,11 @@ function createController(ctx) {
   async function startSelected(nextIndex, token, contextPosition = null) {
     const item = queue.get()[nextIndex]
     if (!item || token !== transition || disposed) return
+    const previousItem = current()
+    if (previousItem && previousItem.id !== item.id) saveResumePosition(true)
+    if (sleepBound && (sleepBound.id !== item.id || sleepBound.source !== item.source)) cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.')
+    sleepEndedFor = null
+    void loadResumeContext(item, token)
     index.set(nextIndex)
     persist()
     message.set('')
@@ -589,6 +724,7 @@ function createController(ctx) {
       spotifyProgressAnchor = null
       spotifyQueueGuard = null
     }
+    if (item.source !== 'youtube') youtubeQueueGuard = null
     if (item.source === 'radio') {
       await startRadio(item, true, token)
       return
@@ -597,12 +733,24 @@ function createController(ctx) {
       await startLocal(item, token)
       return
     }
+    if (item.source === 'youtube') {
+      armYouTubeQueueGuard(item, token)
+      youtubeEngine = 'embed'
+      watchAttempts = 0
+      youtube.set({ status: 'ready', engine: 'embed', watchUnavailable: false, url: item.url, title: item.title, subtitle: item.subtitle, artwork: item.artwork, durationMs: item.durationMs, playing: false, ended: false, error: '', reason: '', reloadToken: Number(youtube.get().reloadToken) || 0, item })
+      progress.set({ positionMs: 0, durationMs: item.durationMs })
+      status.set('paused')
+      message.set('YouTube is loading in the FluidMusic player pane.')
+      youtubeHistoryRecorded = false
+      return
+    }
     if (item.source === 'spotify') {
       armSpotifyQueueGuard(item, token)
       status.set('loading')
       try {
         const payload = Number.isInteger(contextPosition) ? { context_uri: item.uri, offset: contextPosition } : spotifyPlayPayload(item)
         await spotifyRequest('/play', { method: 'POST', body: spotifyCommandBody(payload) })
+        recordHistory(item)
         spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -634,6 +782,7 @@ function createController(ctx) {
     return runTransition(async token => {
       if (token !== transition) return
       const item = current()
+      saveResumePosition(true)
       if (!item) { status.set('idle'); return }
 
       if (item.source === 'radio') {
@@ -656,12 +805,19 @@ function createController(ctx) {
         }
         return
       }
+      if (item.source === 'youtube') {
+        const playing = Boolean(youtube.get().playing)
+        const sent = youtubeCommandSink ? youtubeCommandSink(playing ? 'pauseVideo' : 'playVideo', []) : false
+        if (!sent && token === transition) message.set('The YouTube player is not ready yet. Open the player pane or retry.')
+        return
+      }
       const pause = status.get() === 'playing'
       status.set('loading')
       try {
         if (!pause) armSpotifyQueueGuard(item, token)
         const resume = spotifyStartedUri === item.uri
         await spotifyRequest(pause ? '/pause' : '/play', { method: 'POST', body: spotifyCommandBody(pause || resume ? {} : spotifyPlayPayload(item)) })
+        if (!pause) recordHistory(item)
         if (!pause) spotifyStartedUri = item.uri
         if (token === transition) await refreshSpotify(token)
       } catch (error) {
@@ -712,11 +868,18 @@ function createController(ctx) {
       progress.set({ positionMs: target, durationMs })
       return
     }
+    if (item?.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('seekTo', [Math.round(target / 1000)]) : false
+      if (sent) progress.set({ positionMs: target, durationMs })
+      else message.set('The YouTube player is not ready yet. Open the player pane or retry.')
+      return
+    }
     if (item?.source === 'spotify') {
       await spotifyRequest('/seek', { method: 'PUT', body: spotifyCommandBody({ position_ms: Math.round(target) }) })
       progress.set({ positionMs: target, durationMs })
       await refreshSpotify()
     }
+
   }
 
   async function setShuffle(value) {
@@ -733,8 +896,14 @@ function createController(ctx) {
     repeat.set(state)
   }
 
-  function add(item, play = false) {
-    const normalized = normalizeQueueItem(item)
+  function add(item, play = false, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (normalized?.source === 'local' && normalized.localTrackId && !normalized.objectUrl) {
+      // Durable history/queue references carry only the library ID; replay
+      // revalidates availability against the CURRENT indexed library.
+      const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+      if (linked) normalized = normalizeQueueItem({ ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs, unavailable: linked.unavailable })
+    }
     if (!normalized) {
       message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.')
       return false
@@ -747,6 +916,8 @@ function createController(ctx) {
       localRegistry.set(normalized.id, normalized)
       if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
     }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Add to queue')
     const next = [...queue.get(), normalized]
     queue.set(next)
     if (index.get() === -1) {
@@ -761,6 +932,7 @@ function createController(ctx) {
   function remove(at) {
     const items = queue.get()
     if (!Number.isInteger(at) || at < 0 || at >= items.length) return Promise.resolve(false)
+    rememberQueueEdit('Remove from queue')
     if (at !== index.get()) {
       queue.set(items.filter((_, position) => position !== at))
       if (at < index.get()) index.set(index.get() - 1)
@@ -804,6 +976,7 @@ function createController(ctx) {
     const items = [...queue.get()]
     const target = at + direction
     if (!Number.isInteger(at) || !Number.isInteger(direction) || at < 0 || at >= items.length || target < 0 || target >= items.length) return
+    rememberQueueEdit('Reorder queue')
     ;[items[at], items[target]] = [items[target], items[at]]
     const currentIndex = index.get()
     queue.set(items)
@@ -822,12 +995,7 @@ function createController(ctx) {
     if (next > 0) { unmutedVolume = next; ctx.storage.set('unmutedVolume', next) }
     const version = ++volumeVersion
     if (volumeTimer) clearTimeout(volumeTimer)
-    if (audio && !gain) audio.volume = next
-    if (gain) {
-      const now = context?.currentTime || 0
-      gain.gain.cancelAndHoldAtTime?.(now)
-      gain.gain.setTargetAtTime(next, now, .015)
-    }
+    if (audio) audio.volume = next
     if (current()?.source === 'spotify') {
       const body = spotifyCommandBody({ volume_percent: Math.round(next * 100) })
       volumeTimer = setTimeout(() => {
@@ -835,6 +1003,8 @@ function createController(ctx) {
         void spotifyRequest('/volume', { method: 'PUT', body }).catch(error => { if (version === volumeVersion) message.set(error?.message || 'Spotify volume could not be changed.') })
       }, 180)
     }
+    if (current()?.source === 'youtube' && youtubeCommandSink) youtubeCommandSink('setVolume', [Math.round(next * 100)])
+
     persist()
   }
 
@@ -850,11 +1020,13 @@ function createController(ctx) {
   function clearQueue() {
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Clear queue')
       await stopActive(current())
       if (token !== transition) return false
       queue.set([])
       index.set(-1)
       spotifyQueueGuard = null
+      youtubeQueueGuard = null
       spotifyProgressAnchor = null
       spotifyStartedUri = ''
       progress.set({ positionMs: 0, durationMs: 0 })
@@ -873,13 +1045,18 @@ function createController(ctx) {
   function createPlaylist(name, description = '') {
     undoState.set(null)
     const now = new Date().toISOString()
-    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled playlist'), description: safeText(description), createdAt: now, updatedAt: now, items: [] }
+    const playlist = { id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`, name: safeText(name, 'Untitled collection'), description: safeText(description), createdAt: now, updatedAt: now, items: [], legacy: false }
     playlists.set([...playlists.get(), playlist])
     persistPlaylists()
     return playlist
   }
 
+  function isEditablePlaylist(id) {
+    return playlists.get().some(entry => entry.id === id && !entry.legacy)
+  }
+
   function updatePlaylist(id, changes = {}) {
+    if (!isEditablePlaylist(id)) return null
     undoState.set(null)
     let updated = null
     playlists.set(playlists.get().map(entry => {
@@ -893,7 +1070,7 @@ function createController(ctx) {
 
   function deletePlaylist(id) {
     const before = playlists.get()
-    if (!before.some(entry => entry.id === id)) return false
+    if (!before.some(entry => entry.id === id && !entry.legacy)) return false
     rememberPlaylistEdit('Delete playlist')
     playlists.set(before.filter(entry => entry.id !== id))
     persistPlaylists()
@@ -902,7 +1079,7 @@ function createController(ctx) {
 
   function duplicatePlaylist(id) {
     const original = playlists.get().find(entry => entry.id === id)
-    if (!original) return null
+    if (!original || original.legacy) return null
     const copy = createPlaylist(`${original.name} copy`, original.description)
     const items = original.items.map(item => ({ ...item }))
     playlists.set(playlists.get().map(entry => entry.id === copy.id ? { ...entry, items } : entry))
@@ -911,9 +1088,11 @@ function createController(ctx) {
   }
 
   function addToPlaylist(id, value) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     const normalized = normalizeQueueItem(value)
     if (!normalized) return false
+    if (normalized.source !== 'local') { message.set('New FluidMusic collections are local-only. Use Up Next for cross-source listening.'); return false }
     if (normalized.source === 'local' && !normalized.localTrackId) { message.set('Session files cannot be saved to playlists. Index their folder to create persistent references.'); return false }
     if (normalized.source === 'local' && !normalized.unavailable) {
       localRegistry.set(normalized.id, normalized)
@@ -935,6 +1114,7 @@ function createController(ctx) {
   }
 
   function moveInPlaylist(id, at, direction) {
+    if (!isEditablePlaylist(id)) return false
     undoState.set(null)
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
@@ -967,9 +1147,10 @@ function createController(ctx) {
     const nextIndex = items.slice(0, startAt).filter(item => !item.unavailable).length
     return runTransition(async token => {
       if (token !== transition) return false
+      rememberQueueEdit('Play collection')
       await stopActive(current())
       if (token !== transition) return false
-      queue.set(playable.map(item => ({ ...item })))
+      queue.set(playable.map(item => ({ ...item, origin: 'collection' })))
       index.set(nextIndex)
       persist()
       await startSelected(nextIndex, token)
@@ -982,8 +1163,9 @@ function createController(ctx) {
     const items = playlistItems(id)
     const playable = items.filter(item => !item.unavailable)
     if (!playable.length) { message.set('No playable tracks to add. Your queue has not changed.'); return 0 }
+    rememberQueueEdit('Add collection')
     const before = queue.get().length
-    queue.set([...queue.get(), ...playable.map(item => ({ ...item }))])
+    queue.set([...queue.get(), ...playable.map(item => ({ ...item, origin: 'collection' }))])
     if (index.get() < 0) { index.set(before); status.set('paused') }
     persist()
     message.set(`Added ${playable.length} item(s) to the queue.${items.length > playable.length ? ` Skipped ${items.length - playable.length} missing track(s).` : ''}`)
@@ -991,7 +1173,12 @@ function createController(ctx) {
   }
 
   function saveQueueAsPlaylist(name) {
-    const items = queue.get().filter(item => item.source !== 'local' || item.localTrackId).map(serializePlaylistItem).filter(Boolean)
+    const queued = queue.get()
+    if (queued.some(item => item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Remove cloud, radio, YouTube, and session-only items before saving this queue.')
+      return null
+    }
+    const items = queued.map(serializePlaylistItem).filter(Boolean)
     if (!items.length) { message.set('There are no persistent items to save.'); return null }
     const playlist = createPlaylist(name)
     playlists.set(playlists.get().map(entry => entry.id === playlist.id ? { ...entry, items } : entry))
@@ -1000,16 +1187,22 @@ function createController(ctx) {
   }
 
   function addManyToPlaylist(id, values) {
+    if (!isEditablePlaylist(id)) return 0
+    const raw = Array.isArray(values) ? values : []
+    const items = raw.map(normalizeQueueItem)
+    if (!raw.length || items.some(item => !item || item.source !== 'local' || !item.localTrackId)) {
+      message.set('Collections accept indexed local tracks only. Nothing was saved.')
+      return 0
+    }
     undoState.set(null)
-    const items = (Array.isArray(values) ? values : []).map(normalizeQueueItem).filter(Boolean)
     let count = 0
     // Commit once, preserving duplicate occurrences and their order.
     playlists.set(playlists.get().map(entry => {
       if (entry.id !== id) return entry
-      const stored = items.filter(item => item.source !== 'local' || item.localTrackId).map(item => {
-        if (item.source === 'local' && !item.unavailable) {
+      const stored = items.map(item => {
+        if (!item.unavailable) {
           localRegistry.set(item.id, item)
-          if (item.localTrackId) localRegistry.set(item.localTrackId, item)
+          localRegistry.set(item.localTrackId, item)
         }
         return serializePlaylistItem(item)
       }).filter(Boolean)
@@ -1034,6 +1227,7 @@ function createController(ctx) {
   }
 
   function removePlaylistItems(id, positions) {
+    if (!isEditablePlaylist(id)) return 0
     const selected = new Set(positions.filter(Number.isInteger))
     if (!selected.size) return 0
     rememberPlaylistEdit('Remove tracks')
@@ -1050,7 +1244,7 @@ function createController(ctx) {
 
   function deduplicatePlaylist(id) {
     const playlist = playlists.get().find(entry => entry.id === id)
-    if (!playlist) return 0
+    if (!playlist || playlist.legacy) return 0
     const seen = new Set()
     const duplicates = []
     playlist.items.forEach((item, at) => {
@@ -1062,7 +1256,11 @@ function createController(ctx) {
   }
 
   function exportPlaylists(id = '') {
-    return JSON.stringify({ format: 'fluid-music', ...normalizePlaylistState({ playlists: playlists.get().filter(entry => !id || entry.id === id) }) }, null, 2)
+    const entries = playlists.get().filter(entry => !id || entry.id === id).map(entry => {
+      const raw = rawLegacyPlaylists.get(entry.id)
+      return raw || normalizePlaylistState({ playlists: [entry] }).playlists[0]
+    })
+    return JSON.stringify({ format: 'fluid-music', version: 3, playlists: entries }, null, 2)
   }
 
   function importPlaylists(text) {
@@ -1076,7 +1274,11 @@ function createController(ctx) {
     const accepted = normalized.playlists.reduce((count, entry) => count + entry.items.length, 0)
     if (accepted !== supplied) throw new Error('The file contains unsupported or invalid tracks. Nothing was imported.')
     rememberPlaylistEdit('Import playlists')
-    const imported = normalized.playlists.map(entry => ({ ...entry, id: `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}` }))
+    const imported = normalized.playlists.map((entry, at) => {
+      const id = `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+      if (entry.legacy) rawLegacyPlaylists.set(id, { ...data.playlists[at], id })
+      return { ...entry, id }
+    })
     playlists.set([...playlists.get(), ...imported])
     persistPlaylists()
     return imported
@@ -1094,50 +1296,161 @@ function createController(ctx) {
   }
 
 
-  function syncAnalyser() {
-    if (!mediaSource || !gain || disposed) return
-    if (visualConsumers.size && !analyser) {
-      analyser = context.createAnalyser()
-      analyser.fftSize = 512
-      analyser.smoothingTimeConstant = .72
-      // Analysis is a side tap. Never break or reroute source → gain → speakers.
-      mediaSource.connect(analyser)
-      radioMeter.set('analyser')
-    } else if (!visualConsumers.size && analyser) {
-      mediaSource.disconnect(analyser)
-      analyser.disconnect()
-      analyser = null
-      visualBuffer = null
-      radioMeter.set('ready')
+  function addYouTubeItem(value, select = true) {
+    const item = normalizeQueueItem(value)
+    if (!item || item.source !== 'youtube') throw new Error('Choose a valid YouTube video.')
+    const before = queue.get().length
+    if (!add(item, false)) return false
+    if (select) void playAt(before)
+    message.set(`Added “${item.title}” from YouTube.`)
+    return true
+  }
+
+  async function addYouTubeUrl(url, select = true) {
+    const data = await request('/youtube/resolve', { method: 'POST', body: { url } })
+    return addYouTubeItem(data?.item, select)
+  }
+
+  async function searchYouTube(query) {
+    const data = await request(`/youtube/search?q=${encodeURIComponent(query)}&limit=12`)
+    return (Array.isArray(data?.items) ? data.items : []).map(normalizeQueueItem).filter(item => item?.source === 'youtube')
+  }
+
+  async function resolveYouTubeEmbedUrl(item) {
+    const videoId = item?.source === 'youtube' ? safeText(item.id).replace(/^youtube:/, '') : ''
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error('This YouTube item has an invalid video ID.')
+    const data = await request(`/youtube/embed-host?video_id=${encodeURIComponent(videoId)}`)
+    const url = safeText(data?.url)
+    if (!url.startsWith('http://127.0.0.1:')) throw new Error('FluidMusic returned an invalid YouTube player URL.')
+    return url
+  }
+
+  async function refreshQueuedYouTubeMetadata() {
+    const stale = queue.get().filter(item => item.source === 'youtube' && (item.title === 'YouTube video' || item.subtitle === 'Embedded player'))
+    if (!stale.length) return
+    let changed = false
+    for (const item of stale) {
+      if (disposed) return
+      try {
+        const data = await request('/youtube/resolve', { method: 'POST', body: { url: item.url } })
+        if (disposed) return
+        const resolved = normalizeQueueItem(data?.item)
+        if (!resolved) continue
+        queue.set(queue.get().map(value => value.id === item.id ? resolved : value))
+        if (current()?.id === resolved.id) youtube.set({ ...youtube.get(), title: resolved.title, subtitle: resolved.subtitle, artwork: resolved.artwork, item: resolved })
+        changed = true
+      } catch { /* Old queue labels remain usable when metadata is temporarily unavailable. */ }
     }
+    if (changed && !disposed) persist()
   }
-
-  function acquireVisualizer() {
-    const consumer = Symbol('visualizer')
-    visualConsumers.add(consumer)
-    syncAnalyser()
-    return () => { visualConsumers.delete(consumer); syncAnalyser() }
-  }
-
-  function visualSamples(style = 'wave') {
-    if (!visualConsumers.size || !analyser || status.get() !== 'playing' || disposed) return null
-    const length = style === 'wave' ? analyser.fftSize : analyser.frequencyBinCount
-    if (!visualBuffer || visualBuffer.length !== length) visualBuffer = new Uint8Array(length)
-    if (style === 'wave') analyser.getByteTimeDomainData(visualBuffer)
-    else analyser.getByteFrequencyData(visualBuffer)
-    visualReads++
-    return visualBuffer
-  }
-  function radioSamples() { return visualSamples('wave') }
-  function setStatusVisualizer(value) { statusVisualizer.set(Boolean(value)); ctx.storage.set('statusVisualizer', Boolean(value)) }
-  function setMiniVisualizer(value) { miniVisualizer.set(Boolean(value)); ctx.storage.set('miniVisualizer', Boolean(value)) }
-  function setVisualizerStyle(value) { if (['bars', 'wave', 'mirror'].includes(value)) { visualizerStyle.set(value); ctx.storage.set('visualizerStyle', value) } }
-  const visualDiagnostics = () => ({ consumers: visualConsumers.size, analyser: Boolean(analyser), reads: visualReads })
 
   const spotifyTrack = track => normalizeQueueItem({
     source: 'spotify', id: track?.id, title: track?.name, subtitle: (track?.artists || []).map(artist => artist.name).join(', '), uri: track?.uri,
     contextUri: track?.album?.uri, artwork: track?.album?.images?.[0]?.url, album: track?.album?.name, durationMs: track?.duration_ms, kind: 'track', explicit: track?.explicit
   })
+
+  function setYouTubeCommandSink(sink) {
+    youtubeCommandSink = !disposed && typeof sink === 'function' ? sink : null
+  }
+
+  function reportYouTubeState(state) {
+    // Embed bridge adapter: surface relay reports bind to the exact selected
+    // occurrence and the current transition generation; stale or foreign
+    // reports are ignored, and completion advances the queue exactly once.
+    if (!state || typeof state !== 'object' || disposed) return false
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const expectedVideoId = safeText(item.id).replace(/^youtube:/, '')
+    if (state.videoId && state.videoId !== expectedVideoId) return false
+    if (state.engine && state.engine !== youtubeEngine) return false
+    if (state.kind === 'ready') {
+      youtube.set({ ...youtube.get(), status: 'ready', error: '', reason: '' })
+      return true
+    }
+    const guard = youtubeQueueGuard
+    if (guard && guard.token !== transition) return false
+    if (state.kind === 'error' || state.kind === 'autoplay-blocked') {
+      const failure = classifyYouTubeFailure(state.kind === 'error' ? { kind: 'player-error', errorCode: state.errorCode } : { kind: 'autoplay-blocked' })
+      youtube.set({ ...youtube.get(), status: failure.reason === 'autoplay-blocked' ? 'paused' : 'error', reason: failure.reason, error: failure.message, action: failure.action, retryable: failure.retryable, fallbackEligible: failure.fallbackEligible })
+      recordHealth('youtube', failure.retryable ? 'degraded' : 'unavailable', failure.message, failure.action)
+      if (failure.message) message.set(`${failure.message} ${failure.remedy}`.trim())
+      return true
+    }
+    if (state.kind !== 'state') return false
+    youtube.set({ ...youtube.get(), playing: Boolean(state.playing), ended: Boolean(state.ended) })
+    if (state.playing) recordHealth('youtube', 'ready', 'YouTube player reporting playback.')
+    progress.set({ positionMs: Math.max(0, Number(state.positionMs) || 0), durationMs: Math.max(0, Number(state.durationMs) || 0) })
+    saveResumePosition(false)
+    status.set(state.playing ? 'playing' : 'paused')
+    if (state.playing && !youtubeHistoryRecorded) {
+      youtubeHistoryRecorded = true
+      recordHistory(item)
+    }
+    if (state.ended) {
+      clearResumeOnEnded(item)
+      if (sleepTimer.get().mode === 'end-of-item' && sleepBoundMatches(item)) finishSleepAtEndOfItem(item)
+      else requestYouTubeQueueAdvance()
+    }
+    return true
+  }
+
+  function attemptYouTubeWatchFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube' || youtubeEngine === 'watch') return false
+    if (!youtube.get().fallbackEligible) return false
+    if (!watchCapability.available) {
+      youtube.set({ ...youtube.get(), watchUnavailable: true })
+      message.set('First-party watch fallback needs an owned host view capability this Hermes build does not provide. Skip or choose another video.')
+      recordHealth('youtube', 'degraded', 'Owned first-party watch view is not available on this host.', 'diagnose')
+      return false
+    }
+    if (watchAttempts >= 1) {
+      message.set('The first-party watch fallback was already tried for this video. Skip or choose another video.')
+      return false
+    }
+    watchAttempts += 1
+    youtubeEngine = 'watch'
+    // Position and the once-per-transition history flag survive the switch;
+    // exactly one engine is active because the surface renders either/or.
+    youtube.set({ ...youtube.get(), engine: 'watch', status: 'switching', error: '', reason: '' })
+    status.set('loading')
+    message.set('Switching player…')
+    return true
+  }
+
+  async function assessSpotifyLocalPlayback() {
+    let product = ''
+    try {
+      const data = await request('/spotify/local-capability')
+      product = safeText(data?.account_product)
+    } catch { product = '' }
+    let sdkPresent = false
+    let emeSupported = false
+    let checked = false
+    try {
+      if (typeof window !== 'undefined') {
+        sdkPresent = typeof window.Spotify?.Player === 'function'
+        if (typeof navigator !== 'undefined' && typeof navigator.requestMediaKeySystemAccess === 'function') {
+          try {
+            await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }] }])
+            emeSupported = true
+          } catch { emeSupported = false }
+        }
+        checked = true
+      }
+    } catch { checked = false }
+    const capability = spotifyLocalPlaybackCapability({ product, sdkPresent, emeSupported, checked })
+    spotifyLocalCapability.set(capability)
+    return capability
+  }
+
+  function retryYouTube() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return Promise.resolve(false)
+    if (!tryRetry('youtube')) return Promise.resolve(false)
+    youtube.set({ ...youtube.get(), status: 'loading', error: '', reason: '', reloadToken: (Number(youtube.get().reloadToken) || 0) + 1 })
+    return playAt(index.get()).then(() => true)
+  }
 
   async function searchSpotify(query) {
     const data = await spotifyRequest(`/search?q=${encodeURIComponent(query)}&type=track&limit=10&offset=0`)
@@ -1151,7 +1464,8 @@ function createController(ctx) {
     const albums = (data?.albums?.items || []).map(album => normalizeQueueItem({ source: 'spotify', id: album.id, title: album.name, subtitle: (album.artists || []).map(artist => artist.name).join(', '), uri: album.uri, artwork: album.images?.[0]?.url, kind: 'album' })).filter(Boolean)
     const spotifyPlaylists = (data?.playlists?.items || []).filter(Boolean).map(playlist => normalizeQueueItem({ source: 'spotify', id: playlist.id, title: playlist.name, subtitle: playlist.owner?.display_name || 'Spotify playlist', uri: playlist.uri, artwork: playlist.images?.[0]?.url, kind: 'playlist' })).filter(Boolean)
     const artists = (data?.artists?.items || []).map(artist => ({ id: safeText(artist.id), source: 'spotify', kind: 'artist', title: safeText(artist.name, 'Artist'), subtitle: `${Number(artist.followers?.total || 0).toLocaleString()} followers`, artwork: safeText(artist.images?.[0]?.url), uri: safeText(artist.uri), genres: Array.isArray(artist.genres) ? artist.genres.slice(0, 3) : [] }))
-    return { tracks, albums, playlists: spotifyPlaylists, artists }
+    const cursors = { tracks: Boolean(data?.tracks?.next), albums: Boolean(data?.albums?.next), playlists: Boolean(data?.playlists?.next), artists: Boolean(data?.artists?.next) }
+    return { tracks, albums, playlists: spotifyPlaylists, artists, cursors, offset: Math.max(0, Number(offset) || 0) }
   }
 
   async function loadSpotifyPlaylists(offset = 0) {
@@ -1166,17 +1480,33 @@ function createController(ctx) {
     const start = Math.max(0, Math.floor(Number(offset) || 0))
     const data = await spotifyRequest(`/playlists/${encodeURIComponent(id)}/tracks?limit=50&offset=${start}`)
     if (!Array.isArray(data?.items)) throw new Error('Spotify did not return playlist tracks. Retry or reconnect Spotify.')
-    const tracks = data.items.map((entry, at) => {
-      const track = spotifyTrack(entry?.track || entry?.item || entry)
-      if (!track) return null
-      return { ...track, contextUri: `spotify:playlist:${id}`, contextPosition: start + at }
-    }).filter(Boolean)
+    const tracks = [], unavailable = []
+    data.items.forEach((entry, at) => {
+      // An explicit null track/item means removed/unavailable — never fall
+      // back to the wrapper object itself.
+      const raw = entry && typeof entry === 'object' && ('track' in entry || 'item' in entry) ? (entry.track ?? entry.item) : entry
+      const position = start + at
+      const contextUri = `spotify:playlist:${id}`
+      const track = spotifyTrack(raw)
+      if (!track || raw?.is_playable === false || raw?.is_local) {
+        // Unknown/unavailable/restricted entries stay visible at their exact
+        // occurrence position — never silently dropped, never playable.
+        unavailable.push({ ...(track || {}), source: 'spotify', kind: 'unavailable', unavailable: true, playable: false, id: track?.id || `unavailable:${id}:${position}`, title: track?.title || 'Unavailable track', unavailableReason: spotifyEntryUnavailableReason(raw), contextUri, contextPosition: position })
+        return
+      }
+      tracks.push({ ...track, relinked: Boolean(raw?.linked_from), subtitle: raw?.linked_from ? `${track.subtitle} · relinked by Spotify` : track.subtitle, contextUri, contextPosition: position })
+    })
+    const rows = [...tracks, ...unavailable].sort((a, b) => a.contextPosition - b.contextPosition)
     const total = Number.isFinite(data.total) ? Math.max(0, data.total) : start + data.items.length
     const nextOffset = start + data.items.length
-    return { playlist, tracks, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: data.items.length - tracks.length }
+    return { playlist, tracks, unavailable, rows, total, next: Boolean(data.next) || nextOffset < total, nextOffset, skipped: unavailable.length }
   }
 
   function playSpotifyPlaylistTrack(queueItem, track) {
+    if (track?.unavailable || track?.playable === false) {
+      message.set(track?.unavailableReason || 'That entry is unavailable on Spotify.')
+      return Promise.resolve(false)
+    }
     if (!/^spotify:playlist:[A-Za-z0-9]+$/.test(queueItem?.uri || '') || track?.contextUri !== queueItem.uri || !Number.isInteger(track.contextPosition) || track.contextPosition < 0 || track.contextPosition > 10000) {
       message.set('Refresh this Spotify playlist before choosing the track.')
       return Promise.resolve(false)
@@ -1198,41 +1528,26 @@ function createController(ctx) {
   async function resolvePlaylistSave(item, mode, options = {}) {
     const normalized = normalizeQueueItem(item)
     if (!normalized) throw new Error('Choose a supported track or playlist.')
-    if (normalized.source === 'local' && !normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
+    if (normalized.source !== 'local') throw new Error('New FluidMusic collections accept indexed local tracks only.')
+    if (!normalized.localTrackId) throw new Error('Index this file’s folder before saving it to a playlist.')
     const checkCancelled = () => { if (disposed || options.signal?.aborted) throw new Error('Save cancelled. Nothing was changed.') }
     checkCancelled()
-    if (mode !== 'tracks' || !/^spotify:playlist:/.test(normalized.uri || '')) return { items: [serializePlaylistItem(normalized)], skipped: 0 }
-    const items = []
-    let offset = 0, skipped = 0, expectedTotal = null
-    do {
-      checkCancelled()
-      const page = await loadSpotifyPlaylist(normalized, offset)
-      checkCancelled()
-      if (page.total > 10000 || (expectedTotal !== null && expectedTotal !== page.total)) throw new Error('This playlist is too large or changed while loading. Nothing was saved; retry with a stable playlist of up to 10,000 items.')
-      expectedTotal = page.total
-      skipped += page.skipped
-      items.push(...page.tracks.map(track => serializePlaylistItem({ ...track, contextUri: '' })))
-      options.onProgress?.({ loaded: page.nextOffset, total: page.total })
-      if (!page.next) break
-      if (page.nextOffset <= offset || page.nextOffset >= 10000) throw new Error('Spotify pagination could not complete. Nothing was saved; retry.')
-      offset = page.nextOffset
-    } while (true)
-    if (!items.length) throw new Error('This Spotify playlist has no supported tracks to save.')
-    return { items, skipped }
+    return { items: [serializePlaylistItem(normalized)], skipped: 0 }
   }
 
   async function saveToPlaylist({ id = '', name = '', item, mode = 'tracks', signal, onProgress } = {}) {
     // Resolve all pages first. No empty destination or partial copy is published on failure/cancel.
     if (!id && !safeText(name)) throw new Error('Enter a playlist name.')
-    if (id && !playlists.get().some(entry => entry.id === id)) throw new Error('Choose an existing destination playlist.')
+    if (id && playlists.get().some(entry => entry.id === id && entry.legacy)) throw new Error('Legacy mixes are read-only and cannot be save destinations.')
+    if (id && !playlists.get().some(entry => entry.id === id && !entry.legacy)) throw new Error('Choose an existing writable local collection.')
     const resolved = await resolvePlaylistSave(item, mode, { signal, onProgress })
     if (disposed || signal?.aborted) throw new Error('Save cancelled. Nothing was changed.')
     const existing = playlists.get()
     if (id && !existing.some(entry => entry.id === id)) throw new Error('The destination was deleted. Nothing was saved.')
     const now = new Date().toISOString()
     const destinationId = id || `playlist:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
-    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items }]
-    const state = { version: 3, playlists: next }
+    const next = id ? existing.map(entry => entry.id === id ? { ...entry, items: [...entry.items, ...resolved.items], updatedAt: now } : entry) : [...existing, { id: destinationId, name: safeText(name), description: '', createdAt: now, updatedAt: now, items: resolved.items, legacy: false }]
+    const state = playlistStorageState(next)
     ctx.storage.set('playlistState', state)
     if (JSON.stringify(ctx.storage.get('playlistState', null)) !== JSON.stringify(state)) throw new Error('Playlist storage could not confirm the save. Check available storage and retry.')
     undoState.set(null)
@@ -1242,6 +1557,10 @@ function createController(ctx) {
 
   function restartSpotifyPolling() {
     if (spotifyTimer) clearInterval(spotifyTimer)
+    spotifyTimer = null
+    // A disposed controller must never resurrect polling (late surface
+    // unmount/remount after plugin disposal is not playback intent).
+    if (disposed) return
     spotifyTimer = setInterval(() => {
       void refreshSpotify()
       void refreshSpotifyDevices()
@@ -1271,29 +1590,475 @@ function createController(ctx) {
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
   void refreshLocalLibrary().catch(() => {})
+  void refreshHistory().catch(() => {})
+  void loadHistoryRetention().catch(() => {})
+  void refreshQueuedYouTubeMetadata()
   ctx.onDispose(() => {
     disposed = true
     transition += 1
     clearInterval(spotifyTimer)
     clearInterval(spotifyProgressTimer)
+    clearInterval(sleepInterval)
+    sleepInterval = null
     clearAuthPoll()
     clearTimeout(volumeTimer)
     stopInternalAudio()
+    youtubeCommandSink = null
     new Set([...queue.get(), ...localRegistry.values()]).forEach(revokeLocal)
-    if (context) void context.close()
+
   })
+
+  // ---- Queue editing, one-step undo and provenance (FM-20) ----
+  function rememberQueueEdit(label) {
+    queueUndo.set({ label, queue: queue.get().map(item => ({ ...item })), index: index.get() })
+  }
+
+  function addNext(item, origin = '') {
+    let normalized = normalizeQueueItem(item)
+    if (!normalized) { message.set('That item is not a supported public Spotify, HTTPS radio, or indexed local audio entry.'); return false }
+    if (normalized.source === 'local' && normalized.unavailable) { message.set('That local track is unavailable. Rescan its music folder first.'); return false }
+    if (normalized.source === 'local') {
+      localRegistry.set(normalized.id, normalized)
+      if (normalized.localTrackId) localRegistry.set(normalized.localTrackId, normalized)
+    }
+    if (origin && QUEUE_ORIGINS[origin]) normalized = { ...normalized, origin }
+    rememberQueueEdit('Play next')
+    const items = queue.get()
+    const at = index.get()
+    const insertAt = at >= 0 && at < items.length ? at + 1 : items.length
+    queue.set([...items.slice(0, insertAt), normalized, ...items.slice(insertAt)])
+    if (index.get() < 0) { index.set(insertAt); status.set('paused') }
+    persist()
+    message.set(`Added “${normalized.title}” to play next.`)
+    return true
+  }
+
+  function removeQueueItems(positions) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size) return false
+    rememberQueueEdit('Remove selected')
+    const at = index.get()
+    const previous = current()
+    const removingCurrent = set.has(at)
+    const nextItems = items.filter((_, p) => !set.has(p))
+    let nextIndex = -1
+    if (nextItems.length) {
+      if (!removingCurrent) {
+        nextIndex = at - [...set].filter(p => p < at).length
+      } else {
+        const after = items.findIndex((_, p) => p > at && !set.has(p))
+        const before = items.map((_, p) => p).filter(p => p < at && !set.has(p)).pop()
+        nextIndex = nextItems.indexOf(items[after >= 0 ? after : before])
+      }
+    }
+    const wasPlaying = ['playing', 'loading'].includes(status.get())
+    return runTransition(async token => {
+      if (token !== transition) return false
+      if (removingCurrent) await stopActive(previous)
+      if (token !== transition) return false
+      queue.set(nextItems)
+      index.set(nextIndex)
+      persist()
+      if (!nextItems.length) { status.set('idle'); message.set(''); return true }
+      if (removingCurrent) {
+        progress.set({ positionMs: 0, durationMs: 0 })
+        spotifyQueueGuard = null
+        spotifyProgressAnchor = null
+        if (wasPlaying) await startSelected(nextIndex, token)
+        else { status.set('paused'); message.set(`Removed ${set.size} item(s). Press play to resume.`) }
+      } else message.set(`Removed ${set.size} item(s) from the queue.`)
+      return true
+    })
+  }
+
+  function moveQueueItems(positions, direction) {
+    const items = queue.get()
+    const set = new Set((Array.isArray(positions) ? positions : []).filter(p => Number.isInteger(p) && p >= 0 && p < items.length))
+    if (!set.size || (direction !== -1 && direction !== 1)) return false
+    if ((direction === -1 && Math.min(...set) === 0) || (direction === 1 && Math.max(...set) === items.length - 1)) return false
+    rememberQueueEdit('Move selected')
+    const next = [...items]
+    const order = [...set].sort((a, b) => direction === -1 ? a - b : b - a)
+    for (const p of order) { const t = p + direction; [next[p], next[t]] = [next[t], next[p]] }
+    const currentItem = items[index.get()]
+    const nextIndex = currentItem ? next.indexOf(currentItem) : index.get()
+    queue.set(next)
+    if (nextIndex >= 0) index.set(nextIndex)
+    persist()
+    return true
+  }
+
+  function clearUpcoming() {
+    const items = queue.get()
+    const at = index.get()
+    if (at < 0 || at >= items.length - 1) return false
+    rememberQueueEdit('Clear upcoming')
+    queue.set(items.slice(0, at + 1))
+    persist()
+    message.set('Cleared everything after the current item. The current item keeps playing.')
+    return true
+  }
+
+  function undoQueueEdit() {
+    const saved = queueUndo.get()
+    if (!saved) return false
+    queueUndo.set(null)
+    const previous = current()
+    const restored = saved.queue[saved.index] || null
+    queue.set(saved.queue)
+    index.set(saved.index)
+    persist()
+    const sameOccurrence = previous && restored && previous.id === restored.id && previous.source === restored.source
+    if (sameOccurrence) { message.set(`Undone: ${saved.label}.`); return true }
+    if (!previous) {
+      status.set(saved.queue.length ? 'paused' : 'idle')
+      message.set(`Undone: ${saved.label}.`)
+      return true
+    }
+    // The edit changed which occurrence is current: stop the engine the edit
+    // started and pause honestly. Undo never auto-resumes playback.
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(previous)
+      if (token === transition) { status.set(saved.queue.length ? 'paused' : 'idle'); message.set(`Undone: ${saved.label}. Press play to resume.`) }
+      return true
+    })
+  }
+
+  // ---- Resumable listening sessions (FM-20): safe-reference snapshots ----
+  const persistSessions = () => ctx.storage.set('listeningSessions', listeningSessions.get())
+
+  function saveListeningSession(name) {
+    const queued = queue.get()
+    // Session-only opened files have no durable reference: skip them honestly
+    // instead of persisting dead unavailable entries.
+    const durable = queued.filter(item => item && !(item.source === 'local' && !item.localTrackId))
+    const items = durable.map(serializePlaylistItem).filter(Boolean)
+    const skipped = queued.length - items.length
+    if (!items.length) { message.set('There are no durable items to save. Index session-only files first.'); return null }
+    const session = { id: makeId('session', Date.now().toString(36)), name: safeText(name, 'Listening session').slice(0, 120), createdAt: new Date().toISOString(), items }
+    listeningSessions.set([session, ...listeningSessions.get()].slice(0, 50))
+    persistSessions()
+    message.set(`Saved “${session.name}” (${items.length} item(s)${skipped ? `, ${skipped} session-only skipped` : ''}).`)
+    return session
+  }
+
+  function listeningSessionPreview(id) {
+    const session = listeningSessions.get().find(entry => entry.id === id)
+    if (!session) return null
+    const rows = session.items.map(reference => {
+      const normalized = normalizeQueueItem(reference)
+      if (!normalized) return { item: reference, available: false, reason: 'Unsupported reference' }
+      if (normalized.source === 'local') {
+        const linked = localRegistry.get(normalized.localTrackId) || localRegistry.get(normalized.id)
+        if (!linked || linked.unavailable) return { item: normalized, available: false, reason: 'Missing local file · rescan its folder' }
+        return { item: { ...normalized, filePath: linked.filePath, objectUrl: linked.objectUrl, mimeType: linked.mimeType || normalized.mimeType, durationMs: linked.durationMs || normalized.durationMs }, available: true }
+      }
+      return { item: normalized, available: true }
+    })
+    return { session, rows, unavailable: rows.filter(row => !row.available) }
+  }
+
+  function restoreListeningSession(id, mode) {
+    const preview = listeningSessionPreview(id)
+    if (!preview) return false
+    const playable = preview.rows.filter(row => row.available).map(row => row.item)
+    if (!playable.length) { message.set('Nothing in this session is currently available. Rescan local folders or reconnect providers, then try again.'); return false }
+    const skipped = preview.rows.length - playable.length
+    if (mode === 'append') {
+      rememberQueueEdit('Append session')
+      const before = queue.get().length
+      queue.set([...queue.get(), ...playable])
+      if (index.get() < 0) { index.set(before); status.set('paused') }
+      persist()
+      message.set(`Appended ${playable.length} item(s)${skipped ? `; ${skipped} unavailable skipped` : ''}. Press play to listen.`)
+      return true
+    }
+    rememberQueueEdit('Restore session')
+    return runTransition(async token => {
+      if (token !== transition) return false
+      await stopActive(current())
+      if (token !== transition) return false
+      queue.set(playable)
+      index.set(0)
+      status.set('paused')
+      persist()
+      message.set(`Restored “${preview.session.name}” (${playable.length} item(s)${skipped ? `, ${skipped} unavailable skipped` : ''}). Press play to listen.`)
+      return true
+    })
+  }
+
+  function deleteListeningSession(id) {
+    const before = listeningSessions.get()
+    const next = before.filter(entry => entry.id !== id)
+    if (next.length === before.length) return false
+    listeningSessions.set(next)
+    persistSessions()
+    return true
+  }
+
+  // ---- Long-form resume, bookmarks and source-aware sleep timer (FM-21) ----
+  const monotonicNow = () => (typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now())
+
+  function sleepBoundMatches(item) {
+    return Boolean(sleepBound && item && sleepBound.id === item.id && sleepBound.source === item.source)
+  }
+
+  function loadResumeContext(item, token) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) {
+      if (token === transition && current()?.id === item.id) { resumeOffer.set(null); bookmarks.set([]) }
+      return Promise.resolve()
+    }
+    return Promise.all([
+      request(`/resume?media_key=${encodeURIComponent(key)}`).catch(() => null),
+      request(`/bookmarks?media_key=${encodeURIComponent(key)}`).catch(() => null),
+    ]).then(([resumeData, bookmarkData]) => {
+      if (token !== transition || current()?.id !== item.id) return
+      const saved = normalizeResumePosition(resumeData?.resume)
+      const position = saved && saved.mediaKey === key ? saved.positionMs : 0
+      const duration = saved && saved.mediaKey === key && saved.durationMs > 0 ? saved.durationMs : Number(item.durationMs) || 0
+      // Explicit Resume/Start over only — never an automatic seek on selection.
+      const offerable = position >= 15000 && (duration <= 0 || position < duration - 15000)
+      resumeOffer.set(offerable ? { mediaKey: key, positionMs: position, durationMs: duration, title: item.title } : null)
+      bookmarks.set((Array.isArray(bookmarkData?.items) ? bookmarkData.items : []).map(normalizeBookmark).filter(Boolean))
+    })
+  }
+
+  function saveResumePosition(force = false) {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (!force && monotonicNow() - lastResumeSaveAt < 15000) return
+    const { positionMs, durationMs } = progress.get()
+    if (positionMs < 15000) return
+    if (durationMs > 0 && positionMs >= durationMs - 15000) return
+    lastResumeSaveAt = monotonicNow()
+    void request('/resume', { method: 'PUT', body: { media_key: key, position_ms: Math.round(positionMs), duration_ms: Math.round(durationMs) } }).catch(() => {})
+  }
+
+  function clearResumeOnEnded(item) {
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) return
+    if (current()?.id === item.id) resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+  }
+
+  function resumeHere() {
+    const offer = resumeOffer.get()
+    if (!offer || mediaKeyFor(current()) !== offer.mediaKey) return false
+    resumeOffer.set(null)
+    void seekTo(offer.positionMs)
+    message.set(`Resumed at ${formatPositionMs(offer.positionMs)}.`)
+    return true
+  }
+
+  function startOver() {
+    const offer = resumeOffer.get()
+    const key = offer && mediaKeyFor(current()) === offer.mediaKey ? offer.mediaKey : mediaKeyFor(current())
+    if (!key) return false
+    resumeOffer.set(null)
+    void request(`/resume?media_key=${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {})
+    void seekTo(0)
+    message.set('Starting over from the beginning.')
+    return true
+  }
+
+  const sortBookmarks = entries => [...entries].sort((a, b) => a.positionMs - b.positionMs || a.id - b.id)
+
+  function refreshBookmarks() {
+    const key = mediaKeyFor(current())
+    if (!key) { bookmarks.set([]); return Promise.resolve([]) }
+    return request(`/bookmarks?media_key=${encodeURIComponent(key)}`)
+      .then(data => {
+        const items = (Array.isArray(data?.items) ? data.items : []).map(normalizeBookmark).filter(Boolean)
+        if (mediaKeyFor(current()) === key) bookmarks.set(items)
+        return items
+      })
+      .catch(() => [])
+  }
+
+  async function addBookmark(label = '') {
+    const item = current()
+    const key = mediaKeyFor(item)
+    if (!isLongFormEligible(item) || !key) { message.set('Bookmarks are available for long-form YouTube and local items (10 minutes or longer).'); return null }
+    const positionMs = Math.round(progress.get().positionMs)
+    try {
+      const data = await request('/bookmarks', { method: 'POST', body: { media_key: key, position_ms: positionMs, label } })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark && mediaKeyFor(current()) === key) bookmarks.set(sortBookmarks([...bookmarks.get(), bookmark]))
+      message.set(`Bookmark saved at ${formatPositionMs(positionMs)}.`)
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be saved.')); return null }
+  }
+
+  async function editBookmark(id, changes = {}) {
+    const body = {}
+    if (changes.positionMs !== undefined) body.position_ms = Math.round(Number(changes.positionMs) || 0)
+    if (changes.label !== undefined) body.label = changes.label
+    try {
+      const data = await request(`/bookmarks/${Number(id)}`, { method: 'PUT', body })
+      const bookmark = normalizeBookmark(data?.bookmark)
+      if (bookmark) bookmarks.set(sortBookmarks(bookmarks.get().map(entry => entry.id === bookmark.id ? bookmark : entry)))
+      return bookmark
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be updated.')); return null }
+  }
+
+  async function deleteBookmark(id) {
+    try {
+      await request(`/bookmarks/${Number(id)}`, { method: 'DELETE' })
+      bookmarks.set(bookmarks.get().filter(entry => entry.id !== Number(id)))
+      return true
+    } catch (error) { message.set(userFacingError(error, 'That bookmark could not be deleted.')); return false }
+  }
+
+  function jumpToBookmark(id) {
+    const bookmark = bookmarks.get().find(entry => entry.id === Number(id))
+    if (!bookmark) return false
+    void seekTo(bookmark.positionMs)
+    message.set(`Jumped to ${formatPositionMs(bookmark.positionMs)}${bookmark.label ? ` · ${bookmark.label}` : ''}.`)
+    return true
+  }
+
+  function disarmSleepTimer() {
+    if (sleepInterval) { clearInterval(sleepInterval); sleepInterval = null }
+    sleepDeadline = 0
+    sleepBound = null
+    sleepTimer.set({ mode: 'off', remainingMs: 0, label: '' })
+  }
+
+  function cancelSleepTimer(reason = 'Sleep timer cancelled.') {
+    if (sleepTimer.get().mode === 'off') return false
+    disarmSleepTimer()
+    message.set(reason)
+    return true
+  }
+
+  function pauseForSleep() {
+    const item = current()
+    if (!item) return
+    if (item.source === 'radio') { stopInternalAudio(); status.set('paused'); return }
+    if (item.source === 'local') { if (audio) audio.pause(); status.set('paused'); return }
+    if (item.source === 'youtube') {
+      const sent = youtubeCommandSink ? youtubeCommandSink('pauseVideo', []) : false
+      if (!sent) message.set('The YouTube player is not ready, so the sleep timer could not pause it.')
+      return
+    }
+    if (item.source === 'spotify') void spotifyRequest('/pause', { method: 'POST', body: spotifyCommandBody() }).catch(() => {})
+  }
+
+  function finishSleepAtEndOfItem(item) {
+    // Consume the advance guards so repeated ended reports can never push the
+    // queue forward after the sleep timer chose to stop at this item.
+    sleepEndedFor = item?.id || null
+    if (youtubeQueueGuard) youtubeQueueGuard.advancing = true
+    spotifyProgressAnchor = null
+    spotifyQueueGuard = null
+    disarmSleepTimer()
+    status.set('paused')
+    message.set('Sleep timer finished at the end of the item. Playback paused.')
+  }
+
+  function sleepTick() {
+    if (disposed) { disarmSleepTimer(); return }
+    const state = sleepTimer.get()
+    if (state.mode !== 'duration') return
+    if (!sleepBoundMatches(current())) { cancelSleepTimer('The source changed, so the sleep timer was cancelled. It never controls another device.'); return }
+    const remainingMs = Math.max(0, sleepDeadline - monotonicNow())
+    if (remainingMs <= 0) {
+      disarmSleepTimer()
+      pauseForSleep()
+      message.set('Sleep timer finished. Playback paused.')
+      return
+    }
+    sleepTimer.set({ ...state, remainingMs })
+  }
+
+  function armSleepTimer(mode, minutes = 0) {
+    const item = current()
+    if (!item) { message.set('Choose something to play before starting a sleep timer.'); return false }
+    if (mode === 'end-of-item') {
+      if (item.source === 'radio') { message.set('Live radio has no end-of-item. Choose a duration instead.'); return false }
+      disarmSleepTimer()
+      sleepBound = { id: item.id, source: item.source }
+      sleepTimer.set({ mode: 'end-of-item', remainingMs: 0, label: 'End of item' })
+      message.set(`Sleep timer armed: pause at the end of “${item.title}”.`)
+      return true
+    }
+    const bounded = boundedSleepMinutes(minutes)
+    if (!bounded) { message.set(`Choose 1–${SLEEP_MAX_CUSTOM_MIN} minutes for the sleep timer.`); return false }
+    disarmSleepTimer()
+    sleepBound = { id: item.id, source: item.source }
+    sleepDeadline = monotonicNow() + bounded * 60000
+    sleepTimer.set({ mode: 'duration', remainingMs: bounded * 60000, label: `${bounded} min` })
+    sleepInterval = setInterval(sleepTick, 1000)
+    message.set(`Sleep timer armed: pause in ${bounded} minute(s).`)
+    return true
+  }
+
+  // ---- Recovery center: evidence-based health and bounded retries (FM-22) ----
+  function recordHealth(source, state, detail, action = '') {
+    const row = normalizeHealthRow({ source, state, detail, action, lastEvidenceAt: new Date().toISOString() })
+    if (row) sourceHealth.set({ ...sourceHealth.get(), [source]: row })
+  }
+
+  function tryRetry(key) {
+    const now = monotonicNow()
+    const gate = retryGate(retryBudgets.get(key), now)
+    if (!gate.allowed) {
+      message.set(`Retry is cooling down for ${Math.ceil(gate.remainingMs / 1000)}s. Wait, then try again.`)
+      return false
+    }
+    const consumed = retryConsumed(retryBudgets.get(key), now)
+    retryBudgets.set(key, consumed)
+    retryState.set({ ...retryState.get(), [key]: { ...consumed, cooldownUntilWall: consumed.cooldownUntil > 0 ? Date.now() + (consumed.cooldownUntil - now) : 0 } })
+    addLog('state', 'recovery.retry', { key, attempt: gate.attempts + 1, cooldownMs: consumed.cooldownUntil > 0 ? RETRY_COOLDOWN_MS : 0 })
+    return true
+  }
+
+  function retryRadio() {
+    const item = current()
+    if (!item || item.source !== 'radio') return Promise.resolve(false)
+    if (!tryRetry('radio')) return Promise.resolve(false)
+    return playAt(index.get()).then(() => true)
+  }
+
+  function retrySpotify() {
+    if (!tryRetry('spotify')) return Promise.resolve(false)
+    return refreshSpotify().then(() => true).catch(() => false)
+  }
+
+  function copyDiagnostics() {
+    const rows = Object.values(sourceHealth.get()).map(row => `  ${row.source}: ${row.state} — ${row.detail}${row.lastEvidenceAt ? ` (evidence ${row.lastEvidenceAt})` : ''}`)
+    const events = logs.get().slice(0, 40).map(entry => `  ${entry.at} ${entry.level} ${entry.event} ${JSON.stringify(entry.detail)}`)
+    return [
+      'FluidMusic diagnostics (sanitized — no tokens, credentials or raw history)',
+      `Generated: ${new Date().toISOString()}`,
+      `Status: ${status.get()} · Current source: ${current()?.source || 'none'}`,
+      'Source health:',
+      ...(rows.length ? rows : ['  no evidence recorded yet']),
+      'Recent events:',
+      ...(events.length ? events : ['  none']),
+    ].join('\n')
+  }
+
   return {
-    visualSampleRate: () => context?.sampleRate || 0,
-    statusVisualizer, miniVisualizer, visualizerStyle, setStatusVisualizer, setMiniVisualizer, setVisualizerStyle, acquireVisualizer, visualSamples, visualDiagnostics,
-    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute,
+    workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, radioMeter, progress, playlists, localTracks, localRoots, shuffle, repeat, spotifyAutoplay,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
-    toggleFavorite, radioSamples, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice,
+    queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
+    listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
-    capabilities: () => mediaCapabilities(current()), clearLogs, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
+    capabilities: () => mediaCapabilities(current()), clearLogs, refreshHistory, clearHistory, setPollingOpen, rest: api, polling: () => ({ open: pollIntervalOpen, closed: pollIntervalClosed })
   }
 }
 /* CONTROLLER_END */

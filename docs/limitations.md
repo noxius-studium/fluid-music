@@ -1,6 +1,6 @@
 # FluidMusic limitations and provider boundaries
 
-FluidMusic unifies discovery, playlists, and queue order. It does not unify provider rights, subscriptions, media pipelines, or transport semantics.
+FluidMusic unifies discovery and temporary queue order. It does not unify provider rights, subscriptions, media pipelines, persistent collection ownership, or transport semantics.
 
 ## Spotify Connect boundary
 
@@ -13,7 +13,7 @@ Consequences:
 - transfer, track availability, seek, volume, shuffle, repeat, and queue commands can be rejected by Spotify or the target device;
 - account plan and regional availability remain Spotify decisions.
 
-Spotify credentials remain under Hermes' PKCE/token management and never enter the renderer or local-library database.
+Spotify credentials live in the FluidMusic-owned protected profile-local token store (official OAuth/PKCE with single-flight refresh) and never enter the renderer, logs, exports, or the public local-library database.
 
 FluidMusic follows its own queue after an individual Spotify track by default. This handoff is not gapless because the remote Spotify device must stop before the next engine starts. When **Let Spotify continue after a track** is enabled, Spotify owns continuation and may choose a context track or recommendation; FluidMusic cannot predict that selection in advance.
 
@@ -23,7 +23,7 @@ Elapsed time between Spotify snapshots is a local projection. It is corrected on
 
 Radio Browser is a directory, not an uptime or playback guarantee. A station can disappear, redirect, change codecs, require unsupported headers, reject a browser client, or block analysis through CORS.
 
-A station may play while its audio analyser is unavailable. FluidMusic keeps playback controls and shows a static visual state rather than fabricating waveform samples. Previous/Next traverse the FluidMusic queue, not the contents of a live station. Radio has no seek, shuffle, or repeat controls.
+Radio renders only play/pause and volume. It does not expose previous, next, seek, shuffle, repeat, or provider-device controls.
 
 ## Persistent local-library boundary
 
@@ -41,13 +41,13 @@ Current constraints:
 
 Removing a scan root removes that root's catalog rows. Existing playlist references remain but become unavailable until a matching stable track is cataloged again.
 
-### Visualization without host changes
+### Session files
 
-Indexed files retain ordinary persistent playback, but are not connected to Web Audio. Open a file using **Local music → Open audio files** for visualization; these browser-granted files are session-only and cannot become persistent playlist references. Reopen them after restarting, or index their folder for durable playback without visualization.
+Browser-granted files are session-only and cannot become persistent collection references. Reopen them after restarting, or index their folder for durable playback. FluidMusic has no visualizer or analyser settings.
 
-## Mixed playlists and queue
+## Collections and queue
 
-A FluidMusic playlist can persist local and Spotify tracks together, plus radio references. That does not make controls uniform:
+New FluidMusic collections are local-only. Existing v3 mixed playlists are preserved as read-only Legacy mixes and are not silently deleted, rewritten, or migrated. Spotify playlists remain provider-owned and radio persistence is pinned stations. The cross-provider Up Next queue is temporary/restart-restorable.
 
 - Spotify commands act on a remote device;
 - radio and local audio play in Hermes;
@@ -55,7 +55,19 @@ A FluidMusic playlist can persist local and Spotify tracks together, plus radio 
 - gapless playback is not promised;
 - a missing local file or unavailable provider item remains represented rather than silently substituted.
 
-Queued Spotify playlists can be expanded to select an individual song at its original position. Spotify still owns continuation inside that context. Available playlist content depends on Spotify API permissions and account restrictions; a rejected request produces a retryable error, not extracted or invented tracks. Copying a Spotify playlist into FluidMusic is a snapshot of its supported songs, not a live sync. Copies are bounded to 10,000 entries and preserve duplicates. A same-size edit made remotely during pagination cannot always be detected.
+Queued Spotify playlists can be expanded to select an individual song at its original position. Spotify still owns continuation inside that context. Available playlist content depends on Spotify API permissions and account restrictions; a rejected request produces a retryable error, not extracted or invented tracks.
+
+## YouTube playback boundaries
+
+YouTube plays through the backend's 127.0.0.1-only, capability-token embed host with strict Host/origin checks and the official iframe command/state relay. Embedding availability remains the provider's decision: embed-denied, private, deleted, geo/age/rights-restricted videos are not promised playable, and FluidMusic does not bypass DRM, ads, or entitlements. When a video refuses embedding but works on the authorized normal watch page, the first-party watch fallback is offered only if the host exposes the verified owned-view capability (`OwnedMediaView` + `host.mediaSession`); otherwise the exact missing contract is reported with Retry/Skip. The embed viewport respects the provider's documented minimum — the mini-player never squeezes the video below it. Exactly one engine is active; stale/foreign player reports are ignored and completions advance Up Next exactly once. If the backend runs on a remote cloud host, its loopback URL is not directly reachable from the owner's Desktop; cross-host browser/media acceptance is explicitly gated. Headless fixtures verify routing, validation and error handling, not live embedding or host rendering.
+
+## Listening sessions, resume and recovery boundaries (0.5.0)
+
+- Listening sessions store safe source references only; restore skips unavailable items and never autoplays. Sessions are not a writable mixed-provider playlist hierarchy.
+- Resume/bookmarks apply only to eligible long-form YouTube/local items (10 minutes or longer). LIVE radio is never seekable; Spotify position remains provider-owned. Saved positions are profile-local and bounded.
+- The sleep timer is session-only: it is not restored after reload, cancels when the source changes, and pauses only the bound current engine. Spotify end-of-item uses the local projected-end anchor, not a provider ended event.
+- Recovery health reflects the last real evidence, not a live guarantee; retries are bounded (three attempts, then a cooldown). History retention removes only this profile's played-history rows — never media, queues, collections or provider history.
+- Host compatibility is declared for the current/next SDK shape (see COMPATIBILITY.md); arbitrary future breaking Hermes releases are not guaranteed.
 
 ## Non-goals
 

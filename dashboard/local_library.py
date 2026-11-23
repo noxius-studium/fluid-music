@@ -8,14 +8,19 @@ host's responsibility through its seekable media protocol.
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
+import re
+import shutil
 import sqlite3
 import threading
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 
@@ -33,12 +38,122 @@ SUPPORTED_AUDIO_EXTENSIONS = {
 }
 _MAX_TRACKS_PER_SCAN = 50_000
 _FINGERPRINT_CHUNK_BYTES = 64 * 1024
+_RESUME_SOURCES = {"youtube", "local"}
+_HISTORY_SOURCES = {"spotify", "radio", "local", "youtube"}
+_MAX_POSITION_MS = 86_400_000
+_MAX_RESUME_ROWS = 500
+_MAX_BOOKMARKS_PER_ITEM = 50
+_MAX_BOOKMARKS_TOTAL = 2000
+_RETENTION_CHOICES = (0, 30, 90, 365)
+_TARGET_USER_VERSION = 2
+_MAX_BACKUPS = 3
+_BUSY_RETRIES = 2
+_BUSY_DELAY_S = 0.25
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DATABASES: set[str] = set()
 
 
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS scan_roots (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    canonical_key TEXT NOT NULL UNIQUE,
+    added_at TEXT NOT NULL,
+    last_scanned_at TEXT,
+    last_scan_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS local_tracks (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES scan_roots(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    canonical_key TEXT NOT NULL UNIQUE,
+    relative_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL,
+    available INTEGER NOT NULL DEFAULT 1,
+    discovered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_tracks_root_available
+    ON local_tracks(root_id, available, relative_path);
+CREATE INDEX IF NOT EXISTS local_tracks_fingerprint
+    ON local_tracks(root_id, fingerprint);
+CREATE TABLE IF NOT EXISTS playback_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subtitle TEXT NOT NULL DEFAULT '',
+    artwork TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    played_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS playback_history_played_at
+    ON playback_history(played_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS resume_positions (
+    media_key TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    position_ms INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    position_ms INTEGER NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bookmarks_media_key
+    ON bookmarks(media_key, position_ms, id);
+CREATE TABLE IF NOT EXISTS plugin_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _safe_media_key(value: Any) -> str:
+    """Resume/bookmarks store safe source:identity references only — never paths or URLs."""
+    key = value if isinstance(value, str) else ""
+    source, _, remainder = key.partition(":")
+    if source not in _RESUME_SOURCES or not remainder or len(key) > 220 or not re.fullmatch(r"[A-Za-z0-9_-]+", remainder):
+        raise ValueError("Resume and bookmarks accept only safe YouTube or indexed-local references")
+    return key
+
+
+def _safe_position(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Position must be a whole number of milliseconds") from None
+    if number < 0 or number > _MAX_POSITION_MS:
+        raise ValueError("Position is outside the supported day-long bound")
+    return number
+
+
+def _safe_label(value: Any) -> str:
+    text = value if isinstance(value, str) else ""
+    return "".join(ch for ch in text if ord(ch) >= 32).strip()[:120]
+
+
+def _safe_date(value: Any, field: str) -> str:
+    text = value if isinstance(value, str) else ""
+    if not text.strip():
+        return ""
+    try:
+        return datetime.strptime(text.strip(), "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise ValueError(f"{field} must be a YYYY-MM-DD date") from None
 
 
 def default_database_path() -> Path:
@@ -92,40 +207,328 @@ class LocalLibrary:
         with _SCHEMA_LOCK:
             if key in _INITIALIZED_DATABASES:
                 return
-            connection.executescript(
-                """
-                PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS scan_roots (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    canonical_key TEXT NOT NULL UNIQUE,
-                    added_at TEXT NOT NULL,
-                    last_scanned_at TEXT,
-                    last_scan_count INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS local_tracks (
-                    id TEXT PRIMARY KEY,
-                    root_id TEXT NOT NULL REFERENCES scan_roots(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    canonical_key TEXT NOT NULL UNIQUE,
-                    relative_path TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    available INTEGER NOT NULL DEFAULT 1,
-                    discovered_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS local_tracks_root_available
-                    ON local_tracks(root_id, available, relative_path);
-                CREATE INDEX IF NOT EXISTS local_tracks_fingerprint
-                    ON local_tracks(root_id, fingerprint);
-                """
-            )
-            connection.commit()
+            connection.execute("PRAGMA journal_mode = WAL")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version < _TARGET_USER_VERSION:
+                has_data = bool(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall())
+                backup = self._backup_database(connection, version) if has_data else None
+                try:
+                    connection.executescript(_SCHEMA_SQL)
+                    connection.execute(f"PRAGMA user_version = {_TARGET_USER_VERSION}")
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    if backup is not None:
+                        self._restore_backup(connection, backup)
+                    raise
+            else:
+                connection.executescript(_SCHEMA_SQL)
+                connection.commit()
             _INITIALIZED_DATABASES.add(key)
+
+    def _backup_database(self, connection: sqlite3.Connection, from_version: int) -> Path:
+        """Bounded pre-migration file backup; WAL is checkpointed so the copy is complete."""
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        backup_path = self.database_path.with_name(f"{self.database_path.name}.backup-v{from_version}-{stamp}")
+        shutil.copy2(self.database_path, backup_path)
+        backups = sorted(self.database_path.parent.glob(f"{self.database_path.name}.backup-*"))
+        for old in backups[:-_MAX_BACKUPS]:
+            old.unlink(missing_ok=True)
+        return backup_path
+
+    def _restore_backup(self, connection: sqlite3.Connection, backup_path: Path) -> None:
+        """Rollback via the SQLite online backup API into the live connection."""
+        source = sqlite3.connect(backup_path)
+        try:
+            source.backup(connection)
+        finally:
+            source.close()
+        connection.commit()
+
+    def _run_busy(self, operation):
+        """Bounded retry for transient SQLite busy/locked errors; never loops forever."""
+        attempts = 0
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if ("locked" in text or "busy" in text) and attempts < _BUSY_RETRIES:
+                    attempts += 1
+                    time.sleep(_BUSY_DELAY_S)
+                    continue
+                raise
+
+    @staticmethod
+    def _history_payload(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("history item must be an object")
+        source = str(value.get("source") or "").strip()
+        if source not in {"spotify", "radio", "local", "youtube"}:
+            raise ValueError("history item has an unsupported source")
+        media_key = str(value.get("id") or value.get("uri") or value.get("url") or "").strip()
+        title = str(value.get("title") or "").strip()
+        if not media_key or len(media_key) > 500 or not title or len(title) > 300:
+            raise ValueError("history item is missing a valid identity or title")
+        subtitle = str(value.get("subtitle") or "").strip()[:300]
+        artwork = str(value.get("artwork") or "").strip()[:2_048]
+        if not artwork.startswith("https://"):
+            artwork = ""
+        payload = dict(value)
+        # History is durable profile-local metadata: never persist private
+        # filesystem references, session handles, credentials or capability URLs.
+        for field in ("objectUrl", "filePath", "playbackUrls", "path", "localPath"):
+            payload.pop(field, None)
+        for key in list(payload):
+            if any(marker in key.lower() for marker in ("token", "secret", "credential", "capability", "password")):
+                payload.pop(key)
+        if source == "youtube":
+            parsed = urlparse(str(payload.get("url") or ""))
+            if parsed.scheme != "https" or parsed.username or parsed.password or parsed.hostname not in {"www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"}:
+                raise ValueError("history item has an unsafe YouTube reference")
+        if source == "radio":
+            parsed = urlparse(str(payload.get("streamUrl") or ""))
+            if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
+                raise ValueError("history item has an unsafe radio reference")
+        payload["id"] = media_key
+        payload["source"] = source
+        payload["title"] = title
+        payload["subtitle"] = subtitle
+        payload["artwork"] = artwork
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise ValueError("history item is too large")
+        return {
+            "media_key": media_key,
+            "source": source,
+            "title": title,
+            "subtitle": subtitle,
+            "artwork": artwork,
+            "payload_json": encoded,
+        }
+
+    def record_history(self, value: Any) -> dict[str, Any]:
+        item = self._history_payload(value)
+        played_at = _now()
+
+        def operation() -> dict[str, Any]:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO playback_history(media_key, source, title, subtitle, artwork, payload_json, played_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item["media_key"], item["source"], item["title"], item["subtitle"],
+                        item["artwork"], item["payload_json"], played_at,
+                    ),
+                )
+                connection.execute(
+                    "DELETE FROM playback_history WHERE id NOT IN (SELECT id FROM playback_history ORDER BY id DESC LIMIT 5000)"
+                )
+                self._prune_history(connection)
+                history_id = int(cursor.lastrowid)
+            return {"id": history_id, "played_at": played_at, "item": json.loads(item["payload_json"])}
+
+        return self._run_busy(operation)
+
+    def list_history(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        query: str = "",
+        source: str = "",
+        since: str = "",
+        until: str = "",
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        clauses: list[str] = []
+        params: list[Any] = []
+        text = (query if isinstance(query, str) else "").strip()[:200]
+        if text:
+            escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("title COLLATE NOCASE LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+        if source:
+            if source not in _HISTORY_SOURCES:
+                raise ValueError("Unknown history source filter")
+            clauses.append("source = ?")
+            params.append(source)
+        since_date = _safe_date(since, "since")
+        until_date = _safe_date(until, "until")
+        if since_date:
+            clauses.append("played_at >= ?")
+            params.append(f"{since_date}T00:00:00+00:00")
+        if until_date:
+            next_day = (date.fromisoformat(until_date) + timedelta(days=1)).isoformat()
+            clauses.append("played_at < ?")
+            params.append(f"{next_day}T00:00:00+00:00")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            total = int(connection.execute(f"SELECT COUNT(*) FROM playback_history{where}", params).fetchone()[0])
+            rows = connection.execute(
+                f"""
+                SELECT id, payload_json, played_at
+                FROM playback_history{where}
+                ORDER BY played_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, safe_limit, safe_offset],
+            ).fetchall()
+        return {
+            "items": [
+                {"id": int(row["id"]), "played_at": row["played_at"], "item": json.loads(row["payload_json"])}
+                for row in rows
+            ],
+            "total": total,
+        }
+
+    def delete_history_entry(self, entry_id: int) -> bool:
+        with self._connect() as connection:
+            return int(connection.execute("DELETE FROM playback_history WHERE id = ?", (int(entry_id),)).rowcount) > 0
+
+    def clear_history(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("DELETE FROM playback_history").rowcount)
+
+    def _retention_value(self, connection: sqlite3.Connection) -> int:
+        row = connection.execute("SELECT value_json FROM plugin_settings WHERE key = 'history_retention_days'").fetchone()
+        if row is None:
+            return 0
+        try:
+            value = int(json.loads(row["value_json"]))
+        except (TypeError, ValueError):
+            return 0
+        return value if value in _RETENTION_CHOICES else 0
+
+    def _prune_history(self, connection: sqlite3.Connection) -> int:
+        days = self._retention_value(connection)
+        if days <= 0:
+            return 0
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        return int(connection.execute("DELETE FROM playback_history WHERE played_at < ?", (cutoff,)).rowcount)
+
+    def get_history_retention(self) -> int:
+        with self._connect() as connection:
+            return self._retention_value(connection)
+
+    def set_history_retention(self, days: Any) -> dict[str, Any]:
+        try:
+            value = int(days)
+        except (TypeError, ValueError):
+            raise ValueError("Retention must be one of 0 (forever), 30, 90 or 365 days") from None
+        if value not in _RETENTION_CHOICES:
+            raise ValueError("Retention must be one of 0 (forever), 30, 90 or 365 days")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO plugin_settings(key, value_json, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+                """,
+                ("history_retention_days", json.dumps(value), _now()),
+            )
+            removed = self._prune_history(connection)
+        return {"days": value, "removed": removed}
+
+    def get_resume(self, media_key: str) -> dict[str, Any] | None:
+        key = _safe_media_key(media_key)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT media_key, source, position_ms, duration_ms, updated_at FROM resume_positions WHERE media_key = ?",
+                (key,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_resume(self, media_key: str, position_ms: Any, duration_ms: Any) -> dict[str, Any]:
+        key = _safe_media_key(media_key)
+        position = _safe_position(position_ms)
+        duration = _safe_position(duration_ms)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO resume_positions(media_key, source, position_ms, duration_ms, updated_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(media_key) DO UPDATE SET
+                    position_ms = excluded.position_ms, duration_ms = excluded.duration_ms, updated_at = excluded.updated_at
+                """,
+                (key, key.split(":", 1)[0], position, duration, _now()),
+            )
+            connection.execute(
+                "DELETE FROM resume_positions WHERE media_key NOT IN "
+                f"(SELECT media_key FROM resume_positions ORDER BY updated_at DESC LIMIT {_MAX_RESUME_ROWS})"
+            )
+            row = connection.execute(
+                "SELECT media_key, source, position_ms, duration_ms, updated_at FROM resume_positions WHERE media_key = ?",
+                (key,),
+            ).fetchone()
+        return dict(row)
+
+    def delete_resume(self, media_key: str) -> bool:
+        key = _safe_media_key(media_key)
+        with self._connect() as connection:
+            return int(connection.execute("DELETE FROM resume_positions WHERE media_key = ?", (key,)).rowcount) > 0
+
+    def list_bookmarks(self, media_key: str) -> list[dict[str, Any]]:
+        key = _safe_media_key(media_key)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, media_key, source, position_ms, label, created_at FROM bookmarks WHERE media_key = ? ORDER BY position_ms, id",
+                (key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_bookmark(self, media_key: str, position_ms: Any, label: Any = "") -> dict[str, Any]:
+        key = _safe_media_key(media_key)
+        position = _safe_position(position_ms)
+        text = _safe_label(label)
+        with self._connect() as connection:
+            count = int(connection.execute("SELECT COUNT(*) FROM bookmarks WHERE media_key = ?", (key,)).fetchone()[0])
+            if count >= _MAX_BOOKMARKS_PER_ITEM:
+                raise ValueError(f"This item already has {_MAX_BOOKMARKS_PER_ITEM} bookmarks. Delete one before adding another.")
+            cursor = connection.execute(
+                "INSERT INTO bookmarks(media_key, source, position_ms, label, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, key.split(":", 1)[0], position, text, _now()),
+            )
+            connection.execute(
+                "DELETE FROM bookmarks WHERE id NOT IN "
+                f"(SELECT id FROM bookmarks ORDER BY id DESC LIMIT {_MAX_BOOKMARKS_TOTAL})"
+            )
+            bookmark_id = cursor.lastrowid
+            if bookmark_id is None:
+                raise RuntimeError("Bookmark insert did not return an identity")
+            row = connection.execute(
+                "SELECT id, media_key, source, position_ms, label, created_at FROM bookmarks WHERE id = ?",
+                (int(bookmark_id),),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bookmark insert could not be read back")
+        return dict(row)
+
+    def update_bookmark(self, bookmark_id: int, position_ms: Any = None, label: Any = None) -> dict[str, Any] | None:
+        if position_ms is None and label is None:
+            raise ValueError("Provide a new position or label to edit")
+        sets: list[str] = []
+        params: list[Any] = []
+        if position_ms is not None:
+            sets.append("position_ms = ?")
+            params.append(_safe_position(position_ms))
+        if label is not None:
+            sets.append("label = ?")
+            params.append(_safe_label(label))
+        with self._connect() as connection:
+            connection.execute(f"UPDATE bookmarks SET {', '.join(sets)} WHERE id = ?", [*params, int(bookmark_id)])
+            row = connection.execute(
+                "SELECT id, media_key, source, position_ms, label, created_at FROM bookmarks WHERE id = ?",
+                (int(bookmark_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_bookmark(self, bookmark_id: int) -> bool:
+        with self._connect() as connection:
+            return int(connection.execute("DELETE FROM bookmarks WHERE id = ?", (int(bookmark_id),)).rowcount) > 0
 
     @staticmethod
     def _root_path(value: Any) -> Path:

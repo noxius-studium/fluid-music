@@ -2,13 +2,15 @@
 
 ## Design goal
 
-FluidMusic presents one music workflow while keeping three playback engines honest:
+FluidMusic presents one music workflow while keeping four playback engines honest:
 
 ```text
 FluidMusic coordinator
 ├── Spotify adapter ──> Spotify Web/Connect APIs ──> selected Spotify device
 ├── radio adapter ──> Radio Browser metadata ──> internal HTMLAudioElement
-└── local adapter ──> SQLite catalog ──> Hermes seekable media protocol
+├── local adapter ──> SQLite catalog ──> Hermes seekable media protocol
+└── YouTube adapter ──> capability-protected loopback embed host ──> official iframe relay
+                      (optional first-party watch fallback only with a verified host owned-view capability)
 ```
 
 The coordinator owns queue order and source handoff. Each adapter owns its actual playback state, capabilities, and error meanings.
@@ -37,11 +39,11 @@ The backend mounts under `/api/plugins/fluid-music/`. The desktop contribution r
 - source handoff sequencing and stale-transition invalidation;
 - internal radio/local audio elements;
 - Spotify polling and provider state;
-- FluidMusic playlists;
+- local-only collections and preserved read-only legacy mixes;
 - hydrated local roots/tracks;
 - disposal of timers, media elements, object URLs, and audio nodes.
 
-Route navigation can unmount workspace components without stopping playback.
+Route navigation and chat focus changes can unmount workspace components without stopping playback or changing queue selection. No playback state subscribes to `focusedSessionId` or `activeSessionId`.
 
 ## Normalized queue
 
@@ -50,6 +52,7 @@ Every queue item has a `source` discriminator. Provider-specific stable referenc
 - `spotify`: Spotify URI and catalog metadata;
 - `radio`: validated public HTTPS stream URL;
 - `local`: stable SQLite `localTrackId`, resolved runtime path, and availability.
+- `youtube`: exact validated HTTPS watch URL and 11-character video ID.
 
 The coordinator stops the previous engine before starting the next. A command being issued is not treated as provider-confirmed playback.
 
@@ -88,22 +91,18 @@ The renderer never gets Node integration or arbitrary filesystem APIs. The backe
 
 FluidMusic playlist state stores only `localTrackId` and display metadata for local items. Raw filesystem paths and runtime playback URLs are stripped before persistence. At startup, `refreshLocalLibrary()` hydrates those references from SQLite. Missing tracks remain visible as unavailable and can recover after rescan.
 
-This is what allows a playlist to persist this sequence safely:
-
-```text
-local-track-id → spotify:track:… → radio-station → local-track-id
-```
+New collections accept only local catalog references. Existing v3 mixed collections are tagged as legacy and preserved byte-for-byte at the item level; their UI is read-only with play, enqueue, and export. Spotify playlists remain live provider contexts, radio uses pinned stations, and Up Next is the only new cross-provider collection FluidMusic owns.
 
 ## Spotify
 
-Hermes' bundled `SpotifyClient` remains the credential and refresh authority. FluidMusic never exposes OAuth tokens to the renderer. The backend provides:
+FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. No Hermes-core or sibling-plugin Spotify implementation is imported, and OAuth tokens never reach the renderer, logs, or exports. Older credential stores are left untouched until a separately approved migration/login. The backend provides:
 
 - PKCE status/start routes;
 - `/me/player/devices` discovery and active-device fallback;
 - playback, seek, volume, transfer, queue, shuffle, and repeat routes;
 - paginated search;
-- current-user playlists;
-- playlist items through `/playlists/{id}/items`.
+- current-user playlists via `/playlists`;
+- playlist items via `/playlists/{id}/tracks` with occurrence identity.
 
 Spotify audio always remains on a Spotify Connect device.
 
@@ -115,17 +114,23 @@ The **Let Spotify continue after a track** setting disables that guard. Spotify 
 
 Authoritative Spotify snapshots are bounded to no more often than every 8 seconds while the workspace is open and 20 seconds while closed. Between snapshots, a 500 ms local clock projects elapsed position from the last position, duration, playback state, and receipt time. The local clock makes no network calls; later snapshots correct any drift.
 
-### Expandable Spotify playlists and copies
+### Expandable Spotify playlists
 
 Queued Spotify playlists remain provider contexts. Their expanded track rows carry the original page position before unsupported entries are filtered; selecting a duplicate song sends a numeric context offset, not the first matching URI. The controller resolves the original queue object again after asynchronous work, so removing or moving a duplicate context does not select another occurrence.
 
-The save dialog explicitly distinguishes copying individual songs from retaining one Spotify playlist reference. Collection copies resolve every page (up to 10,000 entries) before committing a destination. Cancellation, provider failure, stalled pagination, or a deleted destination cannot publish a partial copy or an empty new playlist. Copies preserve duplicates/order and strip the source playlist context so they remain independently editable. The controller checks stored state before acknowledging success.
+FluidMusic does not copy Spotify playlists into new local collections.
 
-## Audio analysis and continuity
+## Titlebar and YouTube player
 
-Indexed playback uses the existing host transport without attempting Web Audio access. Browser-opened File/blob audio and compatible CORS radio can use real analysis. No custom-scheme permissions or Hermes host code are modified.
+The controller is created at plugin registration and is shared by the Media route, titlebar contribution (when the host exposes `TITLEBAR_AREAS.right`), and optional mini-player pane. The titlebar contribution replaces the old statusbar and workspace footer player.
 
-For analysis-capable audio, `source → gain → destination` stays connected for the lifetime of the engine. An analyser is a separate source tap with no speaker output. Visibility leases connect/disconnect only that tap; they never reroute the audible path. Volume changes use a short AudioParam ramp. Hidden/reduced-motion visuals do no sample work. This does not promise gapless provider handoff or eliminate network/device buffering.
+YouTube search (`/youtube/search`) and watch-URL resolution (`/youtube/resolve`) return real titles and safe metadata. Playback runs inside the FluidMusic player through the backend's 127.0.0.1-only capability-token embed host (`/youtube/embed-host`) with Host/path checks, exact video-ID validation, origin/Referer preservation, and an official postMessage command/state relay. Stale or foreign player messages are ignored; commands and completions are generation-bound so a late report from a previous item can never settle or advance the current one.
+
+For content that refuses embedding but works on the authorized normal watch page, a first-party watch fallback is offered only when `youTubeWatchCapability` verifies the public SDK's owned-view door (`OwnedMediaView` + `host.mediaSession`); otherwise the exact missing contract is reported with Retry/Skip. The fallback keeps exactly one active engine and one queue/current-item/history event, retaining position/volume where supported. There is no second YouTube pane, no focused-chat Browser borrowing, and no private host patch. Ended state advances FluidMusic Up Next through a transition-bound exactly-once guard; Previous/Next traverse the FluidMusic queue, never provider navigation.
+
+## Listening sessions, resume, recovery and data safety (0.5.0)
+
+Queue editing (Play next, multi-select remove/move, confirmed clears, one-step undo) carries display-only provenance; listening sessions persist safe source references under a separate storage key with Replace/Append restore review. Eligible long-form YouTube/local items store resume positions and timestamp bookmarks in profile-local SQLite (`resume_positions`, `bookmarks`); history supports title/source/date filters, pagination, per-entry removal and an explicit retention preference. A single monotonic sleep-timer owner pauses only the bound current engine and cancels on source change. The Recovery center projects evidence-based source health with bounded retries/cooldowns. SQLite schema changes are versioned (`PRAGMA user_version`) with bounded pre-migration backups and rollback; raw legacy collections are preserved byte-for-byte. Host doors and fallbacks are declared in `docs/handoffs/agent-plan/COMPATIBILITY.md`.
 
 ## Search
 
@@ -133,22 +138,21 @@ Spotify API results are normalized into track rows and album/artist/playlist car
 
 ## Capability matrix
 
-| Capability | Spotify | Radio | Local |
-| --- | --- | --- | --- |
-| Play/pause | Connect command | Internal audio | Internal audio |
-| Previous/next | Connect contexts + app queue tracks | App queue, not station skipping | App queue |
-| Seek | Connect | No | Yes |
-| Volume | Connect | Internal | Internal |
-| Shuffle/repeat | Connect | No | No |
-| Audio analyser | No decoded audio | When CORS permits | Browser-opened session files only; not indexed transport |
+| Capability | Spotify | Radio | Local | YouTube |
+| --- | --- | --- | --- | --- |
+| Play/pause | Connect command | Internal audio | Internal audio | Embed relay / capability-gated watch |
+| Previous/next | Connect contexts + app queue tracks | App queue, not station skipping | App queue | App queue |
+| Seek | Connect | No | Yes | Selected item via relay |
+| Volume | Connect | Internal | Internal | Selected item via relay |
+
 
 ## Theme and accessibility
 
-FluidMusic chrome derives from Hermes `--ui-*` variables and `color-mix(...)`. App icons use SVG paths, never emoji. Essential actions are visible and keyboard reachable, focus rings use the active accent, container queries respond to the actual pane width, and reduced-motion preference disables visualizer processing as well as transitions. Dialogs trap focus through native `dialog`, focus their form field on open, and restore focus on close.
+FluidMusic chrome derives exclusively from Hermes `--ui-*` semantic variables and `color-mix(...)` — there is no private palette (the historical private-palette description is superseded). Surfaces, text roles, hairlines, hover/selected, focus and live state all follow the active host theme, including tinted themes; state is never conveyed by color alone. App icons use one semantic SVG stroke vocabulary, essential actions are keyboard reachable, icon-only controls are named, focus rings use the active accent, reduced motion is honored, and container queries cover desktop through 320–390 px.
 
 ## Security boundaries
 
-- OAuth and provider tokens remain in Hermes credential stores.
-- SQLite contains no credentials, cookies, object URLs, or audio bytes.
+- Spotify OAuth tokens remain in the FluidMusic-owned protected profile-local token store, never in the renderer, public SQLite, logs or exports.
+- SQLite contains no credentials, cookies, object URLs, or audio bytes; resume/bookmark rows store safe source references only.
 - Radio inputs accept only public credential-free HTTPS streams and are not backend-proxied.
 - Local scanning is rooted in explicit user approvals and renderer Node integration remains disabled.

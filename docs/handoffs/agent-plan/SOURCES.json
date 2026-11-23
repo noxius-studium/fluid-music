@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": 1,
+      "url": "https://developers.google.com/youtube/iframe_api_reference",
+      "title": "",
+      "accessed": "2026-11-19"
+    },
+    {
+      "id": 2,
+      "url": "https://developers.google.com/youtube/player_parameters",
+      "title": "",
+      "accessed": "2026-11-19"
+    },
+    {
+      "id": 3,
+      "url": "https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow",
+      "title": "",
+      "accessed": "2026-11-19"
+    },
+    {
+      "id": 4,
+      "url": "https://developer.spotify.com/documentation/web-playback-sdk",
+      "title": "",
+      "accessed": "2026-11-19"
+    }
+  ]
+}

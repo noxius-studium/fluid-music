@@ -44,11 +44,34 @@ function localTrackItem(value) {
   })
 }
 
+function safeYouTubeWatchUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    if (url.protocol !== 'https:' || url.username || url.password) return null
+    let videoId = ''
+    if (url.hostname === 'www.youtube.com' && url.pathname === '/watch') videoId = safeText(url.searchParams.get('v'))
+    else if (url.hostname === 'youtu.be' && /^\/[A-Za-z0-9_-]{11}$/.test(url.pathname)) videoId = url.pathname.slice(1)
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null
+    return { url: url.href, videoId }
+  } catch {
+    return null
+  }
+}
+
+function safeHttpsMetadataUrl(value) {
+  try {
+    const url = new URL(safeText(value))
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
 function normalizeQueueItem(value) {
   if (!value || typeof value !== 'object') return null
   const source = value.source
-  if (!['spotify', 'radio', 'local'].includes(source)) return null
-  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : 'Untitled track')
+  if (!['spotify', 'radio', 'local', 'youtube'].includes(source)) return null
+  const title = safeText(value.title, source === 'radio' ? 'Untitled station' : source === 'local' ? 'Untitled local track' : source === 'youtube' ? 'YouTube video' : 'Untitled track').slice(0, 300)
   if (source === 'spotify') {
     const uri = safeText(value.uri)
     if (!/^spotify:(track|album|playlist):[A-Za-z0-9]+$/.test(uri)) return null
@@ -59,6 +82,11 @@ function normalizeQueueItem(value) {
     const streamUrl = safeRadioStreamUrl(value.streamUrl)
     if (!streamUrl) return null
     return { id: safeText(value.id, makeId('radio', streamUrl)), source, title, subtitle: safeText(value.subtitle, safeText(value.provider)), streamUrl, homepage: safeText(value.homepage), favicon: safeText(value.favicon), artwork: safeText(value.artwork, safeText(value.favicon)), country: safeText(value.country), language: safeText(value.language), tags: safeText(value.tags), codec: safeText(value.codec), bitrate: safeText(value.bitrate) }
+  }
+  if (source === 'youtube') {
+    const watch = safeYouTubeWatchUrl(value.url)
+    if (!watch) return null
+    return { id: `youtube:${watch.videoId}`, source, url: watch.url, title, subtitle: safeText(value.subtitle, 'YouTube').slice(0, 300), durationMs: Math.max(0, Math.min(86_400_000, Number(value.durationMs) || 0)), artwork: safeHttpsMetadataUrl(value.artwork) }
   }
   if (source === 'local') {
     const objectUrl = safeText(value.objectUrl)
@@ -121,11 +149,11 @@ function shouldShowNext(item) {
 function mediaCapabilities(item) {
   const source = item?.source
   return {
-    play: source === 'spotify' || source === 'radio' || source === 'local',
-    previous: source === 'spotify' || source === 'local',
-    next: source === 'spotify' || source === 'local',
-    seek: source === 'spotify' || source === 'local',
-    volume: source === 'spotify' || source === 'radio' || source === 'local',
+    play: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
+    previous: source === 'spotify' || source === 'local' || source === 'youtube',
+    next: source === 'spotify' || source === 'local' || source === 'youtube',
+    seek: source === 'spotify' || source === 'local' || source === 'youtube',
+    volume: source === 'spotify' || source === 'radio' || source === 'local' || source === 'youtube',
     shuffle: source === 'spotify',
     repeat: source === 'spotify',
     device: source === 'spotify'
@@ -178,7 +206,9 @@ function spotifyPlayPayload(value) {
 }
 
 function isWorkspaceView(value) {
-  return ['home', 'search', 'library', 'radio', 'local', 'playlists', 'queue', 'settings', 'logs'].includes(value) ? value : 'home'
+  const aliases = { home: 'browse', search: 'browse', radio: 'browse', playlists: 'library', local: 'library', logs: 'settings' }
+  const next = aliases[value] || value
+  return ['browse', 'library', 'queue', 'settings'].includes(next) ? next : 'browse'
 }
 
 function serializePlaylistItem(value) {
@@ -203,9 +233,114 @@ function normalizePlaylistState(value) {
   return {
     version: 3,
     playlists: playlists.map((entry, at) => {
-      const items = Array.isArray(entry?.items) ? entry.items.map(item => serializePlaylistItem(item)).filter(Boolean) : []
-      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled playlist'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items }
+      const rawItems = Array.isArray(entry?.items) ? entry.items : []
+      const items = rawItems.map(item => serializePlaylistItem(item)).filter(Boolean)
+      const legacy = entry?.legacy === true || rawItems.some(value => {
+        const item = normalizeQueueItem(value)
+        return !item || item.source !== 'local' || !item.localTrackId
+      })
+      return { id: safeText(entry?.id, makeId('playlist', `${at}`)), name: safeText(entry?.name, 'Untitled collection'), description: safeText(entry?.description), createdAt: safeText(entry?.createdAt), updatedAt: safeText(entry?.updatedAt), items, legacy }
     })
+  }
+}
+
+const QUEUE_ORIGINS = { search: 'From search', history: 'From history', collection: 'From collection', provider: 'From provider', library: 'From local library', session: 'Opened this session' }
+function queueOriginLabel(origin) {
+  return QUEUE_ORIGINS[origin] || ''
+}
+function normalizeListeningSessions(value) {
+  // Listening sessions are durable snapshots of SAFE references only. Stored
+  // data is re-serialized on load so blob handles, raw paths or capability
+  // URLs can never survive into a restored session, and bounds are enforced.
+  const list = Array.isArray(value) ? value : []
+  return list.slice(0, 50).map(entry => {
+    if (!entry || typeof entry !== 'object') return null
+    const items = (Array.isArray(entry.items) ? entry.items : []).map(serializePlaylistItem).filter(item => item && !(item.source === 'local' && !item.localTrackId)).slice(0, 500)
+    if (!items.length) return null
+    return { id: safeText(entry.id, makeId('session', 'restored')), name: safeText(entry.name, 'Listening session').slice(0, 120), createdAt: safeText(entry.createdAt), items }
+  }).filter(Boolean)
+}
+
+const LONG_FORM_MIN_MS = 600000
+const SLEEP_PRESETS_MIN = [15, 30, 60]
+const SLEEP_MAX_CUSTOM_MIN = 720
+function isLongFormEligible(item) {
+  // Resume/bookmarks apply to eligible long-form YouTube/local items only.
+  // LIVE radio is never seekable; Spotify Connect position is provider-owned.
+  return Boolean(item && (item.source === 'youtube' || item.source === 'local') && !item.unavailable && Number(item.durationMs) >= LONG_FORM_MIN_MS)
+}
+function mediaKeyFor(item) {
+  if (!item) return ''
+  if (item.source === 'youtube') {
+    const id = safeText(item.id).replace(/^youtube:/, '')
+    return id ? `youtube:${id}` : ''
+  }
+  if (item.source === 'local' && item.localTrackId) return `local:${item.localTrackId}`
+  return ''
+}
+function normalizeResumePosition(value) {
+  if (!value || typeof value !== 'object') return null
+  const mediaKey = safeText(value.media_key ?? value.mediaKey)
+  if (!mediaKey) return null
+  return {
+    mediaKey,
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    durationMs: Math.max(0, Math.min(86400000, Number(value.duration_ms ?? value.durationMs) || 0)),
+  }
+}
+function normalizeBookmark(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = Number(value.id)
+  if (!Number.isInteger(id) || id <= 0) return null
+  return {
+    id,
+    mediaKey: safeText(value.media_key ?? value.mediaKey),
+    positionMs: Math.max(0, Math.min(86400000, Number(value.position_ms ?? value.positionMs) || 0)),
+    label: safeText(value.label).slice(0, 120),
+    createdAt: safeText(value.created_at ?? value.createdAt),
+  }
+}
+function formatPositionMs(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = Math.floor(total % 60)
+  const pad = value => String(value).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+function boundedSleepMinutes(value) {
+  const minutes = Math.round(Number(value))
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > SLEEP_MAX_CUSTOM_MIN) return 0
+  return minutes
+}
+
+const RETRY_MAX_ATTEMPTS = 3
+const RETRY_COOLDOWN_MS = 30000
+const HEALTH_SOURCES = ['spotify', 'youtube', 'local', 'radio', 'backend']
+const HEALTH_STATES = ['ready', 'degraded', 'unavailable', 'unknown']
+function retryGate(budget, nowMs) {
+  const state = budget && typeof budget === 'object' ? budget : { attempts: 0, cooldownUntil: 0 }
+  const cooldownUntil = Math.max(0, Number(state.cooldownUntil) || 0)
+  if (cooldownUntil > nowMs) return { allowed: false, remainingMs: cooldownUntil - nowMs, attempts: Math.max(0, Number(state.attempts) || 0), cooldownUntil }
+  const attempts = cooldownUntil > 0 ? 0 : Math.max(0, Number(state.attempts) || 0)
+  return { allowed: true, remainingMs: 0, attempts, cooldownUntil: 0 }
+}
+function retryConsumed(budget, nowMs) {
+  const gate = retryGate(budget, nowMs)
+  const attempts = gate.attempts + 1
+  if (attempts >= RETRY_MAX_ATTEMPTS) return { attempts: 0, cooldownUntil: nowMs + RETRY_COOLDOWN_MS }
+  return { attempts, cooldownUntil: 0 }
+}
+function normalizeHealthRow(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = safeText(value.source)
+  if (!HEALTH_SOURCES.includes(source)) return null
+  return {
+    source,
+    state: HEALTH_STATES.includes(value.state) ? value.state : 'unknown',
+    detail: safeText(value.detail).slice(0, 200),
+    action: safeText(value.action),
+    lastEvidenceAt: safeText(value.lastEvidenceAt),
   }
 }
 
@@ -226,18 +361,175 @@ function normalizeSpotifyDevices(value) {
   return Array.isArray(devices) ? devices.filter(device => device && safeText(device.id)).map(device => ({ id: safeText(device.id), name: safeText(device.name, 'Unnamed device'), type: safeText(device.type, 'Spotify Connect'), active: Boolean(device.is_active || device.active), restricted: Boolean(device.is_restricted) })) : []
 }
 
-// Log-frequency bands over the useful audible range, excluding DC and unused ultrasonic bins.
-function spectrumBands(binCount, sampleRate, count) {
-  if (!Number.isInteger(binCount) || binCount < 1 || !Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(count) || count < 1) return []
-  const binHz = sampleRate / (2 * binCount)
-  const maximumHz = Math.min(16000, sampleRate / 2)
-  const minimumHz = Math.min(maximumHz, Math.max(40, binHz))
-  const ratio = maximumHz / minimumHz
-  return Array.from({ length: count }, (_, at) => {
-    const low = Math.min(binCount - 1, Math.floor(minimumHz * Math.pow(ratio, at / count) / binHz))
-    const high = Math.min(binCount, Math.max(low + 1, Math.ceil(minimumHz * Math.pow(ratio, (at + 1) / count) / binHz)))
-    return { low, high }
-  })
+
+const YOUTUBE_COMMAND_FUNCS = ['playVideo', 'pauseVideo', 'seekTo', 'setVolume', 'mute', 'unMute', 'stopVideo']
+function youTubeCommandMessage(func, args = []) {
+  if (!YOUTUBE_COMMAND_FUNCS.includes(func)) return null
+  return JSON.stringify({ event: 'command', func, args: Array.isArray(args) ? args : [], id: 'fluid-music', channel: 'fluid-music' })
+}
+function youTubeListeningMessage() {
+  return JSON.stringify({ event: 'listening', id: 'fluid-music', channel: 'fluid-music' })
+}
+function embedFrameOrigin(src) {
+  try {
+    const url = new URL(safeText(src))
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : ''
+  } catch {
+    return ''
+  }
+}
+function parseYouTubePlayerMessage(value, expectedVideoId = '') {
+  let data = value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { return null }
+  }
+  if (!data || typeof data !== 'object') return null
+  const info = data.info && typeof data.info === 'object' ? data.info : null
+  if (data.event === 'onReady') return { kind: 'ready', videoId: safeText(info?.videoData?.video_id) }
+  if (data.event === 'onError') {
+    const errorCode = Number(data.info)
+    return Number.isInteger(errorCode) && errorCode >= 0 ? { kind: 'error', errorCode } : null
+  }
+  if (data.event === 'onAutoplayBlocked') return { kind: 'autoplay-blocked' }
+  if (data.event !== 'infoDelivery' || !info) return null
+  const videoId = safeText(info.videoData?.video_id)
+  if (expectedVideoId && videoId && videoId !== expectedVideoId) return null
+  const playerState = Number(info.playerState)
+  if (!Number.isInteger(playerState) || playerState < -1 || playerState > 5) return null
+  return {
+    kind: 'state',
+    videoId,
+    playerState,
+    playing: playerState === 1,
+    ended: playerState === 0,
+    positionMs: Math.max(0, Number(info.currentTime) || 0) * 1000,
+    durationMs: Math.max(0, Number(info.duration) || 0) * 1000
+  }
+}
+
+const YOUTUBE_FAILURES = {
+  'invalid-video-id': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'That YouTube link or video ID is invalid.', remedy: 'Check the URL or choose another video.' },
+  'html5-player-failure': { action: 'retry', retryable: true, fallbackEligible: true, contentAvailable: null, message: 'The YouTube player failed to start this video.', remedy: 'Retry once; if it keeps failing, use Skip or another video.' },
+  'video-not-found': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video was removed or is not found.', remedy: 'Skip it or choose another video.' },
+  'embed-denied-by-owner': { action: 'fallback', retryable: false, fallbackEligible: true, contentAvailable: null, message: "This video's owner disabled embedding.", remedy: 'Use Skip, or try the first-party watch fallback when available.' },
+  'missing-referer-identification': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube rejected the player identification (Referer/origin).', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'autoplay-blocked': { action: 'interact', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The browser blocked autoplay.', remedy: 'Press play in the FluidMusic player to start.' },
+  'wrong-video-state': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player is showing a different video than selected.', remedy: 'Retry to reload the selected video.' },
+  'origin-mismatch': { action: 'fix-configuration', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'The player origin does not match the embedded frame.', remedy: 'Reload the player; if it persists, report diagnostics.' },
+  'player-not-ready': { action: 'wait', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'The YouTube player is not ready yet.', remedy: 'Wait for the player to finish loading.' },
+  'stale-generation': { action: 'ignore', retryable: false, fallbackEligible: false, contentAvailable: null, message: '', remedy: '' },
+  'content-unavailable': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is unavailable.', remedy: 'Skip it or choose another video.' },
+  'private-video': { action: 'skip', retryable: false, fallbackEligible: false, contentAvailable: false, message: 'This video is private.', remedy: 'Skip it; private videos cannot be played.' },
+  'consent-required': { action: 'sign-in', retryable: false, fallbackEligible: true, contentAvailable: null, message: 'This video requires YouTube sign-in or age confirmation.', remedy: 'Sign in on the first-party watch surface when available, or skip.' },
+  'rate-limited': { action: 'wait', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+  'network-error': { action: 'retry', retryable: true, fallbackEligible: false, contentAvailable: null, message: 'YouTube could not be reached.', remedy: 'Check the connection and retry.' },
+  'undetermined': { action: 'diagnose', retryable: false, fallbackEligible: false, contentAvailable: null, message: 'YouTube playback failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+}
+function classifyYouTubeFailure(signal) {
+  // Documented IFrame API semantics (PROVIDER_RESEARCH): 2 invalid ID,
+  // 5 HTML5 failure, 100 removed/not found, 101/150 owner embed denial,
+  // 153 missing Referer/API-client identification. Unknown stays unknown —
+  // an iframe that did not start is NOT evidence of removed/private content.
+  let reason = 'undetermined'
+  if (signal && typeof signal === 'object') {
+    if (signal.kind === 'player-error') {
+      const code = Number(signal.errorCode)
+      reason = code === 2 ? 'invalid-video-id'
+        : code === 5 ? 'html5-player-failure'
+        : code === 100 ? 'video-not-found'
+        : code === 101 || code === 150 ? 'embed-denied-by-owner'
+        : code === 153 ? 'missing-referer-identification'
+        : 'undetermined'
+    } else if (signal.kind === 'autoplay-blocked') {
+      reason = 'autoplay-blocked'
+    } else if (signal.kind === 'bridge') {
+      reason = signal.reason === 'wrong-video' ? 'wrong-video-state'
+        : signal.reason === 'wrong-origin' ? 'origin-mismatch'
+        : signal.reason === 'not-ready' ? 'player-not-ready'
+        : signal.reason === 'stale-generation' ? 'stale-generation'
+        : 'undetermined'
+    } else if (signal.kind === 'provider' && YOUTUBE_FAILURES[signal.code]) {
+      reason = signal.code
+    }
+  }
+  return { reason, ...YOUTUBE_FAILURES[reason] }
+}
+
+// REQUIRED public host contract for an owned first-party watch surface.
+// NONE of these exports exist in the current public Hermes Desktop SDK
+// (verified against apps/desktop/src/sdk/index.ts: the only sanctioned embed
+// primitive is SandboxedFrame — an opaque-origin iframe that forbids
+// allow-same-origin, so it can never hold a genuine provider login; raw
+// <webview> is explicitly rejected because it shares the app preview
+// partition). Full-scope FM-08 acceptance is gated on the host shipping this
+// contract; until then the adapter reports an honest unavailable state and
+// never opens an external app, focused-chat tab, or duplicate pane.
+function youTubeWatchCapability(namespace) {
+  const sdk = namespace && typeof namespace === 'object' ? namespace : {}
+  const hostApi = sdk.host && typeof sdk.host === 'object' ? sdk.host : {}
+  const missing = []
+  if (typeof sdk.OwnedMediaView !== 'function') missing.push('OwnedMediaView')
+  const session = hostApi.mediaSession
+  if (!session || typeof session.ensurePartition !== 'function' || typeof session.openLogin !== 'function' || typeof session.dispose !== 'function') missing.push('host.mediaSession')
+  return { available: missing.length === 0, missing, OwnedMediaView: sdk.OwnedMediaView, mediaSession: session }
+}
+
+function classifySpotifyFailure(value) {
+  // Distinct remediation per official Web API status semantics; unknown stays
+  // unknown. Connect control errors are never evidence about local audio.
+  const status = Number(value?.statusCode ?? value?.status_code)
+  const text = safeText(value?.message).toLowerCase()
+  let reason = 'undetermined'
+  if (status === 401 || /(?:authentication|auth).*(?:expired|required)|reconnect/.test(text)) reason = 'auth-required'
+  else if (status === 429) reason = 'rate-limited'
+  else if (status === 403 && /scope/.test(text)) reason = 'insufficient-scope'
+  else if (status === 403) reason = 'forbidden'
+  else if (status === 410 || (status === 404 && /device|player/.test(text)) || text.includes('no active device') || text.includes('no device')) reason = 'no-device'
+  else if (status === 404) reason = 'not-found'
+  else if (status >= 500 && status <= 599) reason = 'transient'
+  const matrix = {
+    'auth-required': { action: 'reconnect', retryable: false, message: 'Spotify sign-in expired or is required.', remedy: 'Reconnect Spotify in Settings.' },
+    'rate-limited': { action: 'wait', retryable: true, message: 'Spotify is rate-limiting requests.', remedy: 'Wait a moment, then retry.' },
+    'insufficient-scope': { action: 'reconnect', retryable: false, message: 'Spotify sign-in is missing a permission this action needs.', remedy: 'Reconnect Spotify to grant the required scopes.' },
+    'forbidden': { action: 'check-account', retryable: false, message: 'Spotify refused this action for the account or device.', remedy: 'Check Premium eligibility and device restrictions; choose another device.' },
+    'no-device': { action: 'choose-device', retryable: true, message: 'No active Spotify Connect device is available.', remedy: 'Open Spotify on a device, then retry or transfer playback.' },
+    'not-found': { action: 'skip', retryable: false, message: 'That Spotify item was not found.', remedy: 'Skip it or choose another item.' },
+    'transient': { action: 'retry', retryable: true, message: 'Spotify had a temporary problem.', remedy: 'Retry in a moment.' },
+    'undetermined': { action: 'diagnose', retryable: false, message: 'Spotify request failed for an undetermined reason.', remedy: 'Retry once or copy diagnostics; the cause is not yet known.' }
+  }
+  return { reason, ...matrix[reason] }
+}
+function spotifyEntryUnavailableReason(track) {
+  if (!track || typeof track !== 'object') return 'Removed or unavailable on Spotify.'
+  if (track.is_local) return 'Local file — not synced to Spotify streaming.'
+  const restriction = safeText(track?.restrictions?.reason)
+  if (restriction === 'market') return 'Not available in your market.'
+  if (restriction === 'product') return 'Requires a different Spotify subscription.'
+  if (restriction === 'explicit') return 'Blocked by explicit-content settings.'
+  if (track.is_playable === false) return 'Not playable on your account right now.'
+  return 'Unavailable on Spotify.'
+}
+
+function spotifyLocalPlaybackCapability(signals) {
+  // Official Web Playback SDK requirements: Premium account, encrypted-media
+  // (Widevine) in the ACTUAL packaged runtime, SDK presence, and Spotify's
+  // prior written approval for commercial use. Connect remote control is NOT
+  // decoded in-plugin audio. Without owner-side audio proof the best honest
+  // state is 'eligible-unproven' — never a silent full-audio certification.
+  const product = safeText(signals?.product).toLowerCase()
+  if (product && product !== 'premium') {
+    return { state: 'ineligible-account', reasons: ['Spotify Web Playback SDK requires a Premium account.'], localAudio: false }
+  }
+  if (signals?.checked && (!signals.sdkPresent || !signals.emeSupported)) {
+    const reasons = []
+    if (!signals.sdkPresent) reasons.push('The Spotify Web Playback SDK is not available in this runtime.')
+    if (!signals.emeSupported) reasons.push('Encrypted-media (Widevine) support was not detected in this runtime.')
+    return { state: 'unsupported-runtime', reasons, localAudio: false }
+  }
+  if (signals?.checked && signals.sdkPresent && signals.emeSupported && product === 'premium') {
+    return { state: 'eligible-unproven', reasons: ['Account and runtime checks pass; actual in-plugin audio still needs owner Desktop proof and provider approval.'], localAudio: null }
+  }
+  return { state: 'unverified', reasons: ['Local playback capability has not been checked on this runtime.'], localAudio: null }
 }
 
 const RADIO_PRESETS = [
