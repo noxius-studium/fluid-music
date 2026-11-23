@@ -146,6 +146,17 @@ Spotify API results are normalized into track rows and album/artist/playlist car
 | Volume | Connect | Internal | Internal | Selected item via relay |
 
 
+## Desktop-only operation and playback continuity (FM-29 assessment)
+
+Owner question: "can everything run inside the DESKTOP plugin?" Honest answer: NOT entirely, and it should not. The desktop renderer already owns every part of playback continuity — one controller, one queue/index, one active engine, the audio element and the integrated YouTube frame, generation-bound commands, and storage-backed state. Those survive provider/auth latency because they never await a network round-trip mid-transition.
+
+What genuinely needs the backend (the Hermes plugin API served through the gateway): the OAuth PKCE callback listener on `127.0.0.1:43827` (it cannot live in a renderer that has no inbound socket), protected token storage, yt-dlp search/resolve/audio download, profile-local SQLite history/library, and Radio Browser lookup. Moving those into the renderer would mean exposing a listener from untrusted UI code and duplicating persistence — worse security and design, not better. So full desktop-only operation is declined on those grounds; the owner's actual pain (music cutting out during auth/URL fetches) is addressed directly instead:
+
+- Auth/URL/settings fetches (`/spotify/auth/*`, `/youtube/search`, `/youtube/resolve`, `/youtube/embed-host`, `/settings`) are side-requests: they issue no play/pause/stop/transfer command, do not change status/queue/index/engine, and never remount the current frame. Fixtures assert this while state is `playing`.
+- A background audio fallback reports progress through `message` only — it is never a transport transition and never rewrites the shared status.
+- Provider polls are generation-bound and only reflect state for the current source; a late OAuth/URL response cannot retarget the engine.
+- Residual boundary: the host browser/Desktop may itself duck or defocus audio when an OAuth window opens, and a gateway/plugin reload can unmount the surface. Those are host behaviors, not FluidMusic command paths; cloud fixtures cannot prove them and they remain owner review.
+
 ## Theme and accessibility
 
 FluidMusic chrome derives exclusively from Hermes `--ui-*` semantic variables and `color-mix(...)` — there is no private palette (the historical private-palette description is superseded). Surfaces, text roles, hairlines, hover/selected, focus and live state all follow the active host theme, including tinted themes; state is never conveyed by color alone. App icons use one semantic SVG stroke vocabulary, essential actions are keyboard reachable, icon-only controls are named, focus rings use the active accent, reduced motion is honored, and container queries cover desktop through 320–390 px.

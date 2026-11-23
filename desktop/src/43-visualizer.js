@@ -140,6 +140,7 @@ function MiniPlayer({ controller }) {
   const status = useValue(controller.status)
   const progress = useValue(controller.progress)
   const youtubeState = useValue(controller.youtube)
+  const videoHidden = useValue(controller.youtubeVideoHidden)
   const item = queue[at]
   const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title
@@ -152,11 +153,23 @@ function MiniPlayer({ controller }) {
     const watching = youtubeState.engine === 'watch'
     return h(
       'section',
-      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
-      h('div', { className: 'fluid-youtube-frame-wrap' },
-        watching
-          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
-          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      { className: `fluid-mini-player fluid-youtube-player${videoHidden ? ' fluid-video-hidden' : ''}`, 'aria-label': 'FluidMusic YouTube player' },
+      // The frame stays mounted; CSS only hides it, so the single engine keeps
+      // decoding audio and the shared command sink stays bound. The toggle
+      // lives OUTSIDE the hidden frame so it remains keyboard-reachable.
+      h('div', { className: 'fluid-youtube-stage' },
+        h('div', { className: 'fluid-youtube-frame-wrap' },
+          watching
+            ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+            : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        ),
+        h('button', {
+          type: 'button',
+          className: 'fluid-video-toggle',
+          'aria-pressed': videoHidden,
+          'aria-label': videoHidden ? 'Show video' : 'Hide video',
+          onClick: () => controller.toggleYouTubeVideo(),
+        }, videoHidden ? 'Show video' : 'Hide video'),
       ),
       // Honest physical minimum: the video never shrinks below 200x200. When
       // the docked pane is too short, say so and keep controls reachable
@@ -169,6 +182,7 @@ function MiniPlayer({ controller }) {
         : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
         youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
         h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )

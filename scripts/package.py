@@ -50,6 +50,7 @@ REQUIRED_PATHS = (
 DOCS_ALLOWLIST = (
     "docs/architecture.md",
     "docs/limitations.md",
+    "docs/spotify-setup.md",
     "docs/handoffs/agent-plan/COMPATIBILITY.md",
 )
 FORBIDDEN_PARTS = (".env", ".sqlite", ".db", ".pem", ".key", ".p12", ".pfx", "__pycache__", "node_modules", ".git", "plugin-data")

@@ -321,12 +321,36 @@ function RecoveryPage({ controller, onOpenDiagnostics }) {
   )
 }
 
+function MusicFolderSetting({ controller }) {
+  const saved = useValue(controller.musicDir)
+  const [draft, setDraft] = useState(saved)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setDraft(saved) }, [saved])
+  const browse = async () => {
+    setBusy(true)
+    try { const folder = await controller.chooseMusicDir(); if (folder) setDraft(folder) } finally { setBusy(false) }
+  }
+  const save = async () => {
+    setBusy(true)
+    try { await controller.setMusicDir(draft) } finally { setBusy(false) }
+  }
+  return h('div', { className: 'fluid-setting-block' },
+    h('h3', { className: 'fluid-section-title' }, 'Audio fallback folder'),
+    h('p', { className: 'fluid-section-copy' }, 'When a YouTube video cannot play here, FluidMusic can save its audio as m4a in this folder and add it to your local library. Personal use; respect the provider terms.'),
+    h('div', { className: 'fluid-inline-field' },
+      h('input', { type: 'text', value: draft, placeholder: 'Choose a music folder', 'aria-label': 'Audio fallback music folder', onChange: event => setDraft(event.target.value) }),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void browse() }, 'Browse'),
+      h(WorkspaceButton, { primary: true, disabled: busy || !draft.trim(), onClick: () => void save() }, 'Save'),
+    ),
+  )
+}
+
 function SettingsPage({ controller }) {
   const [tab, setTab] = useState('providers')
   const autoplay = useValue(controller.spotifyAutoplay)
   return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['recovery', 'Recovery'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) :
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(MusicFolderSetting, { controller }), h(HistoryRetention, { controller })) :
     tab === 'recovery' ? h(RecoveryPage, { controller, onOpenDiagnostics: () => setTab('diagnostics') }) : h(LogsPage, { controller }))
 }
 

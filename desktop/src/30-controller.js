@@ -33,6 +33,9 @@ function createController(ctx, hostCapabilities = {}) {
   const bookmarks = atom([])
   const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
   const historyRetention = atom(0)
+  // Owner-approved audio fallback folder (non-secret, profile-local).
+  const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
   const sourceHealth = atom({})
@@ -58,6 +61,9 @@ function createController(ctx, hostCapabilities = {}) {
   const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
+  // Owner-approved hide-video toggle: the frame stays MOUNTED so the single
+  // active engine keeps decoding audio; only its visibility is toggled.
+  const youtubeVideoHidden = atom(Boolean(ctx.storage.get('youtubeVideoHidden', false)))
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
@@ -1418,6 +1424,84 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // Hide ONLY the video surface: the iframe/host view stays mounted and the
+  // command sink stays attached, so the one active engine keeps playing audio.
+  function toggleYouTubeVideo(value) {
+    const next = typeof value === 'boolean' ? value : !youtubeVideoHidden.get()
+    youtubeVideoHidden.set(next)
+    ctx.storage.set('youtubeVideoHidden', next)
+    return next
+  }
+
+  async function loadSettings() {
+    try {
+      const data = await request('/settings')
+      const folder = safeText(data?.music_dir)
+      musicDir.set(folder)
+      ctx.storage.set('musicDir', folder)
+      const clientId = safeText(data?.spotify_client_id)
+      spotifyClientId.set(clientId)
+      ctx.storage.set('spotifyClientId', clientId)
+    } catch { /* Cached folder stays usable when settings cannot be read. */ }
+  }
+
+  async function setMusicDir(value) {
+    const folder = safeText(value)
+    if (!folder) throw new Error('Choose a music folder first.')
+    const data = await request('/settings', { method: 'PUT', body: { music_dir: folder } })
+    const saved = safeText(data?.music_dir, folder)
+    musicDir.set(saved)
+    ctx.storage.set('musicDir', saved)
+    message.set(`Audio fallback folder saved: ${saved}`)
+    return saved
+  }
+
+  async function setSpotifyClientId(value) {
+    const clientId = safeText(value)
+    if (!clientId) throw new Error('Enter your Spotify Client ID first.')
+    const data = await request('/settings', { method: 'PUT', body: { spotify_client_id: clientId } })
+    const saved = safeText(data?.spotify_client_id, clientId)
+    spotifyClientId.set(saved)
+    ctx.storage.set('spotifyClientId', saved)
+    message.set('Spotify Client ID saved. You can now connect.')
+    return saved
+  }
+
+  async function chooseMusicDir() {
+    const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose the audio fallback folder' })
+    return path ? setMusicDir(path) : null
+  }
+
+  // Real fallback: download audio-only m4a to the configured folder, register
+  // it in the local library, and place it Up Next — never silently start a new
+  // engine or fake provider playback.
+  async function downloadYouTubeAudioFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const url = safeText(item.url)
+    if (!url) { message.set('This item has no source URL to download from.'); return false }
+    if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    // A background download is NOT a transport transition: never rewrite the
+    // shared status. Message-only progress keeps whatever is playing intact.
+    message.set('Downloading audio to your music folder…')
+    try {
+      const result = await request('/youtube/fallback/audio', { method: 'POST', body: { url }, timeoutMs: 120000 })
+      const title = safeText(result?.title, item.title || 'YouTube audio')
+      if (!result?.registered || !result?.track_id) {
+        message.set(`Saved “${title}” to your music folder. Rescan it to add the track to your library.`)
+        return true
+      }
+      await refreshLocalLibrary()
+      const local = localTracks.get().find(track => String(track.localTrackId) === String(result.track_id))
+      if (local) addNext(local)
+      message.set(`“${title}” saved to your music folder and added to your local library${local ? ' and Up Next' : ''}.`)
+      return true
+    } catch (error) {
+      message.set(error?.message || 'The audio fallback could not complete.')
+      return false
+    }
+  }
+
   async function assessSpotifyLocalPlayback() {
     let product = ''
     try {
@@ -1586,6 +1670,7 @@ function createController(ctx, hostCapabilities = {}) {
   restartSpotifyPolling()
   spotifyProgressTimer = setInterval(updateSpotifyProgress, 500)
   void loadConfig()
+  void loadSettings()
   void refreshSpotify()
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
@@ -2046,15 +2131,15 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, youtubeVideoHidden, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,

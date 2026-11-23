@@ -516,6 +516,55 @@ async def get_config() -> dict[str, Any]:
     return {"ok": True, "data": data}
 
 
+@router.get("/settings")
+async def get_settings() -> dict[str, Any]:
+    """Non-secret, profile-local preferences. Never returns credentials/tokens."""
+    from dashboard.providers import local_settings
+
+    return {"ok": True, "data": {"music_dir": local_settings.music_dir(), "spotify_client_id": local_settings.spotify_client_id()}}
+
+
+@router.put("/settings")
+async def put_settings(request: Request) -> dict[str, Any]:
+    from dashboard.providers import local_settings
+
+    try:
+        payload = await _payload(request)
+        data: dict[str, Any] = {}
+        if "music_dir" in payload:
+            data["music_dir"] = local_settings.set_music_dir(payload.get("music_dir"))
+        if "spotify_client_id" in payload:
+            data["spotify_client_id"] = local_settings.set_spotify_client_id(payload.get("spotify_client_id"))
+        return {"ok": True, "data": data}
+    except (TypeError, ValueError) as exc:
+        return _error(str(exc))
+    except OSError:
+        return _error("Settings could not be saved for this profile.")
+
+
+@router.post("/youtube/fallback/audio")
+async def youtube_audio_fallback(request: Request) -> dict[str, Any]:
+    """Real fallback: audio-only yt-dlp download into the configured folder."""
+    from dashboard.providers import local_settings
+    from dashboard.youtube_audio_fallback import download_audio
+
+    try:
+        payload = await _payload(request)
+        target = _youtube_watch_url(payload.get("url"))
+        folder = local_settings.music_dir()
+        if not folder:
+            return _error("Set a music folder in Settings before using the audio fallback.")
+        result = await anyio.to_thread.run_sync(
+            lambda: download_audio(target, folder, library=_local_library())
+        )
+        return {"ok": True, "data": result}
+    except ValueError as exc:
+        return _error(str(exc))
+    except Exception as exc:  # noqa: BLE001 - yt-dlp/provider failures are redacted.
+        logger.warning("YouTube audio fallback failed", exc_info=True)
+        return _error("The audio fallback could not complete. Check the music folder and try again.")
+
+
 @router.get("/spotify/auth/status")
 async def spotify_auth_status() -> dict[str, Any]:
     """Expose safe Hermes Spotify metadata plus the local PKCE-flow state."""
@@ -534,7 +583,11 @@ async def spotify_auth_status() -> dict[str, Any]:
 async def spotify_auth_start(request: Request) -> dict[str, Any]:
     """Start one Hermes-managed browser PKCE flow without exposing its credentials."""
     try:
-        client_id = _spotify_client_id((await _payload(request)).get("client_id"))
+        from dashboard.providers import local_settings
+
+        payload = await _payload(request)
+        supplied = payload["client_id"] if "client_id" in payload else (local_settings.spotify_client_id() or None)
+        client_id = _spotify_client_id(supplied)
     except (TypeError, ValueError) as exc:
         return _error(str(exc))
 

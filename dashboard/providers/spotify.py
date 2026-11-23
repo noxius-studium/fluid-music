@@ -61,7 +61,13 @@ def redirect_uri() -> str:
 def configured_client_id() -> str | None:
     data = token_store.load()
     client_id = str(data.get("client_id") or "").strip()
-    return client_id or None
+    if client_id:
+        return client_id
+    # Public PKCE app id saved in the owned settings UI (FM-28). It is a
+    # non-secret identifier; token-store credentials still own the tokens.
+    from . import local_settings
+
+    return local_settings.spotify_client_id() or None
 
 
 def auth_status() -> dict[str, Any]:

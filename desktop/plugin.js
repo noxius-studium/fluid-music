@@ -643,6 +643,8 @@ const CSS = `
 .fluid-youtube-frame-wrap{min-height:200px}
 .fluid-youtube-frame{min-width:200px;min-height:200px}
 .fluid-mini-expand-note{display:none;margin:0;padding:6px 8px;border-left:2px solid var(--ui-accent);background:var(--fm-soft);color:var(--ui-text-secondary);font-size:10px;line-height:1.5}
+.fluid-youtube-stage{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:4px;min-height:0;min-width:0}.fluid-video-hidden .fluid-youtube-frame-wrap{display:none}.fluid-video-hidden .fluid-mini-expand-note{display:none}.fluid-video-toggle{justify-self:end;border:1px solid var(--fm-line);background:var(--fm-panel);color:var(--ui-text-primary);border-radius:5px;padding:3px 9px;font-size:10px;cursor:pointer}.fluid-video-toggle[aria-pressed="true"]{background:var(--fm-soft)}
+.fluid-setting-block{margin-top:16px;padding-top:14px;border-top:1px solid var(--fm-line)}.fluid-setting-block .fluid-section-title{margin:0 0 6px}.fluid-setting-block .fluid-section-copy{margin:0 0 10px;color:var(--ui-text-secondary);font-size:11px;line-height:1.5}.fluid-inline-field{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.fluid-inline-field input[type="text"]{flex:1 1 220px;min-width:0;padding:7px 9px;border:1px solid var(--fm-line);border-radius:5px;background:var(--ui-bg-secondary);color:var(--ui-text-primary)}
 @container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
 @container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
 @container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
@@ -731,6 +733,9 @@ function createController(ctx, hostCapabilities = {}) {
   const bookmarks = atom([])
   const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
   const historyRetention = atom(0)
+  // Owner-approved audio fallback folder (non-secret, profile-local).
+  const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
   const sourceHealth = atom({})
@@ -756,6 +761,9 @@ function createController(ctx, hostCapabilities = {}) {
   const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
+  // Owner-approved hide-video toggle: the frame stays MOUNTED so the single
+  // active engine keeps decoding audio; only its visibility is toggled.
+  const youtubeVideoHidden = atom(Boolean(ctx.storage.get('youtubeVideoHidden', false)))
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
@@ -2116,6 +2124,84 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // Hide ONLY the video surface: the iframe/host view stays mounted and the
+  // command sink stays attached, so the one active engine keeps playing audio.
+  function toggleYouTubeVideo(value) {
+    const next = typeof value === 'boolean' ? value : !youtubeVideoHidden.get()
+    youtubeVideoHidden.set(next)
+    ctx.storage.set('youtubeVideoHidden', next)
+    return next
+  }
+
+  async function loadSettings() {
+    try {
+      const data = await request('/settings')
+      const folder = safeText(data?.music_dir)
+      musicDir.set(folder)
+      ctx.storage.set('musicDir', folder)
+      const clientId = safeText(data?.spotify_client_id)
+      spotifyClientId.set(clientId)
+      ctx.storage.set('spotifyClientId', clientId)
+    } catch { /* Cached folder stays usable when settings cannot be read. */ }
+  }
+
+  async function setMusicDir(value) {
+    const folder = safeText(value)
+    if (!folder) throw new Error('Choose a music folder first.')
+    const data = await request('/settings', { method: 'PUT', body: { music_dir: folder } })
+    const saved = safeText(data?.music_dir, folder)
+    musicDir.set(saved)
+    ctx.storage.set('musicDir', saved)
+    message.set(`Audio fallback folder saved: ${saved}`)
+    return saved
+  }
+
+  async function setSpotifyClientId(value) {
+    const clientId = safeText(value)
+    if (!clientId) throw new Error('Enter your Spotify Client ID first.')
+    const data = await request('/settings', { method: 'PUT', body: { spotify_client_id: clientId } })
+    const saved = safeText(data?.spotify_client_id, clientId)
+    spotifyClientId.set(saved)
+    ctx.storage.set('spotifyClientId', saved)
+    message.set('Spotify Client ID saved. You can now connect.')
+    return saved
+  }
+
+  async function chooseMusicDir() {
+    const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose the audio fallback folder' })
+    return path ? setMusicDir(path) : null
+  }
+
+  // Real fallback: download audio-only m4a to the configured folder, register
+  // it in the local library, and place it Up Next — never silently start a new
+  // engine or fake provider playback.
+  async function downloadYouTubeAudioFallback() {
+    const item = current()
+    if (!item || item.source !== 'youtube') return false
+    const url = safeText(item.url)
+    if (!url) { message.set('This item has no source URL to download from.'); return false }
+    if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    // A background download is NOT a transport transition: never rewrite the
+    // shared status. Message-only progress keeps whatever is playing intact.
+    message.set('Downloading audio to your music folder…')
+    try {
+      const result = await request('/youtube/fallback/audio', { method: 'POST', body: { url }, timeoutMs: 120000 })
+      const title = safeText(result?.title, item.title || 'YouTube audio')
+      if (!result?.registered || !result?.track_id) {
+        message.set(`Saved “${title}” to your music folder. Rescan it to add the track to your library.`)
+        return true
+      }
+      await refreshLocalLibrary()
+      const local = localTracks.get().find(track => String(track.localTrackId) === String(result.track_id))
+      if (local) addNext(local)
+      message.set(`“${title}” saved to your music folder and added to your local library${local ? ' and Up Next' : ''}.`)
+      return true
+    } catch (error) {
+      message.set(error?.message || 'The audio fallback could not complete.')
+      return false
+    }
+  }
+
   async function assessSpotifyLocalPlayback() {
     let product = ''
     try {
@@ -2284,6 +2370,7 @@ function createController(ctx, hostCapabilities = {}) {
   restartSpotifyPolling()
   spotifyProgressTimer = setInterval(updateSpotifyProgress, 500)
   void loadConfig()
+  void loadSettings()
   void refreshSpotify()
   void refreshSpotifyAuth()
   void refreshSpotifyDevices()
@@ -2744,15 +2831,15 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, youtubeVideoHidden, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
@@ -3483,10 +3570,12 @@ function QueueList({ controller, selected, onSelect }) {
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
     devices = useValue(controller.spotifyDevices),
-    localCap = useValue(controller.spotifyLocalCapability)
-  const [clientId, setClientId] = useState(''),
+    localCap = useValue(controller.spotifyLocalCapability),
+    savedClientId = useValue(controller.spotifyClientId)
+  const [clientId, setClientId] = useState(savedClientId),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
+  useEffect(() => { setClientId(savedClientId) }, [savedClientId])
   const run = async (work) => {
     setBusy(true)
     setError('')
@@ -3523,24 +3612,32 @@ function SpotifyConnection({ controller }) {
       h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
       h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
-    auth.needsClientId &&
+    h(
+      'label',
+      { className: 'fluid-field' },
+      'Spotify Client ID',
+      h('input', {
+        className: 'fluid-input',
+        value: clientId,
+        autoComplete: 'off',
+        'aria-label': 'Spotify Client ID',
+        onChange: (event) => setClientId(event.target.value),
+        placeholder: 'Public app client ID',
+      }),
       h(
-        'label',
-        { className: 'fluid-field' },
-        'Spotify Client ID',
-        h('input', {
-          className: 'fluid-input',
-          value: clientId,
-          autoComplete: 'off',
-          onChange: (event) => setClientId(event.target.value),
-          placeholder: 'Public app client ID',
-        }),
-        h(
-          'small',
-          {},
-          'Use http://127.0.0.1:43827/spotify/callback in the Spotify dashboard. No client secret.',
-        ),
+        'small',
+        {},
+        'Redirect URI http://127.0.0.1:43827/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
       ),
+    ),
+    h(
+      WorkspaceButton,
+      {
+        disabled: busy || !clientId.trim() || clientId.trim() === savedClientId,
+        onClick: () => void run(async () => { await controller.setSpotifyClientId(clientId) }),
+      },
+      'Save Client ID',
+    ),
     !auth.authenticated
       ? h(
           WorkspaceButton,
@@ -3550,7 +3647,6 @@ function SpotifyConnection({ controller }) {
             onClick: () =>
               void run(async () => {
                 await controller.startSpotifyAuth(clientId)
-                setClientId('')
               }),
           },
           auth.state === 'connecting' ? 'Waiting for browser approval…' : 'Connect Spotify',
@@ -5147,6 +5243,7 @@ function MiniPlayer({ controller }) {
   const status = useValue(controller.status)
   const progress = useValue(controller.progress)
   const youtubeState = useValue(controller.youtube)
+  const videoHidden = useValue(controller.youtubeVideoHidden)
   const item = queue[at]
   const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title
@@ -5159,11 +5256,23 @@ function MiniPlayer({ controller }) {
     const watching = youtubeState.engine === 'watch'
     return h(
       'section',
-      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
-      h('div', { className: 'fluid-youtube-frame-wrap' },
-        watching
-          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
-          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      { className: `fluid-mini-player fluid-youtube-player${videoHidden ? ' fluid-video-hidden' : ''}`, 'aria-label': 'FluidMusic YouTube player' },
+      // The frame stays mounted; CSS only hides it, so the single engine keeps
+      // decoding audio and the shared command sink stays bound. The toggle
+      // lives OUTSIDE the hidden frame so it remains keyboard-reachable.
+      h('div', { className: 'fluid-youtube-stage' },
+        h('div', { className: 'fluid-youtube-frame-wrap' },
+          watching
+            ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+            : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        ),
+        h('button', {
+          type: 'button',
+          className: 'fluid-video-toggle',
+          'aria-pressed': videoHidden,
+          'aria-label': videoHidden ? 'Show video' : 'Hide video',
+          onClick: () => controller.toggleYouTubeVideo(),
+        }, videoHidden ? 'Show video' : 'Hide video'),
       ),
       // Honest physical minimum: the video never shrinks below 200x200. When
       // the docked pane is too short, say so and keep controls reachable
@@ -5176,6 +5285,7 @@ function MiniPlayer({ controller }) {
         : h(YouTubeTransport, { controller, frameRef: youtubeFrameRef, item }),
       youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
         youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
+        youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
         youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
         h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
     )
@@ -5522,12 +5632,36 @@ function RecoveryPage({ controller, onOpenDiagnostics }) {
   )
 }
 
+function MusicFolderSetting({ controller }) {
+  const saved = useValue(controller.musicDir)
+  const [draft, setDraft] = useState(saved)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setDraft(saved) }, [saved])
+  const browse = async () => {
+    setBusy(true)
+    try { const folder = await controller.chooseMusicDir(); if (folder) setDraft(folder) } finally { setBusy(false) }
+  }
+  const save = async () => {
+    setBusy(true)
+    try { await controller.setMusicDir(draft) } finally { setBusy(false) }
+  }
+  return h('div', { className: 'fluid-setting-block' },
+    h('h3', { className: 'fluid-section-title' }, 'Audio fallback folder'),
+    h('p', { className: 'fluid-section-copy' }, 'When a YouTube video cannot play here, FluidMusic can save its audio as m4a in this folder and add it to your local library. Personal use; respect the provider terms.'),
+    h('div', { className: 'fluid-inline-field' },
+      h('input', { type: 'text', value: draft, placeholder: 'Choose a music folder', 'aria-label': 'Audio fallback music folder', onChange: event => setDraft(event.target.value) }),
+      h(WorkspaceButton, { disabled: busy, onClick: () => void browse() }, 'Browse'),
+      h(WorkspaceButton, { primary: true, disabled: busy || !draft.trim(), onClick: () => void save() }, 'Save'),
+    ),
+  )
+}
+
 function SettingsPage({ controller }) {
   const [tab, setTab] = useState('providers')
   const autoplay = useValue(controller.spotifyAutoplay)
   return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['recovery', 'Recovery'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) :
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(MusicFolderSetting, { controller }), h(HistoryRetention, { controller })) :
     tab === 'recovery' ? h(RecoveryPage, { controller, onOpenDiagnostics: () => setTab('diagnostics') }) : h(LogsPage, { controller }))
 }
 
