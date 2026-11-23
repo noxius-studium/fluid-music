@@ -643,6 +643,7 @@ const CSS = `
 .fluid-youtube-frame-wrap{min-height:200px}
 .fluid-youtube-frame{min-width:200px;min-height:200px}
 .fluid-mini-expand-note{display:none;margin:0;padding:6px 8px;border-left:2px solid var(--ui-accent);background:var(--fm-soft);color:var(--ui-text-secondary);font-size:10px;line-height:1.5}
+.fluid-youtube-stage{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:4px;min-height:0;min-width:0}.fluid-video-hidden .fluid-youtube-frame-wrap{display:none}.fluid-video-hidden .fluid-mini-expand-note{display:none}.fluid-video-toggle{justify-self:end;border:1px solid var(--fm-line);background:var(--fm-panel);color:var(--ui-text-primary);border-radius:5px;padding:3px 9px;font-size:10px;cursor:pointer}.fluid-video-toggle[aria-pressed="true"]{background:var(--fm-soft)}
 @container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
 @container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
 @container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
@@ -756,6 +757,9 @@ function createController(ctx, hostCapabilities = {}) {
   const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
+  // Owner-approved hide-video toggle: the frame stays MOUNTED so the single
+  // active engine keeps decoding audio; only its visibility is toggled.
+  const youtubeVideoHidden = atom(Boolean(ctx.storage.get('youtubeVideoHidden', false)))
   const progress = atom({ positionMs: 0, durationMs: 0 })
   const playlists = atom(storedPlaylists.playlists)
   const localTracks = atom([])
@@ -2116,6 +2120,15 @@ function createController(ctx, hostCapabilities = {}) {
     return true
   }
 
+  // Hide ONLY the video surface: the iframe/host view stays mounted and the
+  // command sink stays attached, so the one active engine keeps playing audio.
+  function toggleYouTubeVideo(value) {
+    const next = typeof value === 'boolean' ? value : !youtubeVideoHidden.get()
+    youtubeVideoHidden.set(next)
+    ctx.storage.set('youtubeVideoHidden', next)
+    return next
+  }
+
   async function assessSpotifyLocalPlayback() {
     let product = ''
     try {
@@ -2744,7 +2757,7 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, youtubeVideoHidden, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
@@ -2752,7 +2765,7 @@ function createController(ctx, hostCapabilities = {}) {
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
     armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,
@@ -5147,6 +5160,7 @@ function MiniPlayer({ controller }) {
   const status = useValue(controller.status)
   const progress = useValue(controller.progress)
   const youtubeState = useValue(controller.youtube)
+  const videoHidden = useValue(controller.youtubeVideoHidden)
   const item = queue[at]
   const capabilities = mediaCapabilities(item)
   const display = item?.source === 'spotify' && spotify.title
@@ -5159,11 +5173,23 @@ function MiniPlayer({ controller }) {
     const watching = youtubeState.engine === 'watch'
     return h(
       'section',
-      { className: 'fluid-mini-player fluid-youtube-player', 'aria-label': 'FluidMusic YouTube player' },
-      h('div', { className: 'fluid-youtube-frame-wrap' },
-        watching
-          ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
-          : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+      { className: `fluid-mini-player fluid-youtube-player${videoHidden ? ' fluid-video-hidden' : ''}`, 'aria-label': 'FluidMusic YouTube player' },
+      // The frame stays mounted; CSS only hides it, so the single engine keeps
+      // decoding audio and the shared command sink stays bound. The toggle
+      // lives OUTSIDE the hidden frame so it remains keyboard-reachable.
+      h('div', { className: 'fluid-youtube-stage' },
+        h('div', { className: 'fluid-youtube-frame-wrap' },
+          watching
+            ? h(OwnedWatchSurface, { controller, item, capability: controller.youtubeWatchCapability(), controlRef: watchControlRef })
+            : h(EmbeddedYouTubeFrame, { key: `${item.id}-${youtubeState.reloadToken || 0}`, controller, item, title: display?.title || 'YouTube video', frameRef: youtubeFrameRef }),
+        ),
+        h('button', {
+          type: 'button',
+          className: 'fluid-video-toggle',
+          'aria-pressed': videoHidden,
+          'aria-label': videoHidden ? 'Show video' : 'Hide video',
+          onClick: () => controller.toggleYouTubeVideo(),
+        }, videoHidden ? 'Show video' : 'Hide video'),
       ),
       // Honest physical minimum: the video never shrinks below 200x200. When
       // the docked pane is too short, say so and keep controls reachable

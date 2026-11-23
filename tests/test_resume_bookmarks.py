@@ -116,11 +116,17 @@ def test_bookmarks_crud_caps_and_sanitization(library: Any):
         library.add_bookmark(key, 999_000, "One too many")
 
 
-def test_history_filters_pagination_and_entry_removal(library: Any):
-    library.record_history(youtube_item("abcdefgh001", "Deep Mix"))
-    library.record_history(youtube_item("abcdefgh002", "Mix 100%_pure"))
-    library.record_history(radio_item("jazz", "Jazz Live"))
-    library.record_history(radio_item("rock", "Rock Live"))
+def test_history_filters_pagination_and_entry_removal(library: Any, tmp_path: Path):
+    entries = [
+        library.record_history(youtube_item("abcdefgh001", "Deep Mix")),
+        library.record_history(youtube_item("abcdefgh002", "Mix 100%_pure")),
+        library.record_history(radio_item("jazz", "Jazz Live")),
+        library.record_history(radio_item("rock", "Rock Live")),
+    ]
+    # Fixed, labelled timestamps: the date filters below must not drift with
+    # the real clock (this fixture was written on 2026-11-19).
+    for entry in entries:
+        backdate(tmp_path / "fm21.sqlite3", entry["id"], "2026-11-19T12:00:00+00:00")
     assert library.list_history(query="mix")["total"] == 2, "title search is case-insensitive"
     assert library.list_history(query="MIX")["total"] == 2
     literal = library.list_history(query="100%_pure")

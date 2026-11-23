@@ -154,7 +154,7 @@ function makeHarness() {
   const flush = () => new Promise(resolve => process.nextTick(resolve))
   const mediaCalls = () => restCalls.filter(call => call.method !== 'GET' && MEDIA_COMMAND_ROUTES.has(call.path.split('?')[0]))
   return {
-    controller, restCalls, previewCalls, timers, flush, mediaCalls,
+    controller, restCalls, previewCalls, timers, flush, mediaCalls, storage,
     dispose: () => disposers.forEach(fn => fn()),
     restore() { globalThis.Audio = original.Audio; globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval; globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout; Date.now = original.dateNow },
   }
@@ -193,5 +193,22 @@ test('hidden popover and unmounted Media never stop active-source observation or
     controller.setPollingOpen(true)
     await harness.flush()
     assert.ok(harness.timers.every(timer => timer.cleared), 'after disposal nothing resurrects, popover included')
+  } finally { harness.restore() }
+})
+
+
+test('FM-26 hide-video state toggles, persists and never issues a transport command', async () => {
+  const harness = makeHarness()
+  try {
+    const { controller } = harness
+    assert.equal(controller.youtubeVideoHidden.get(), false)
+    assert.equal(controller.toggleYouTubeVideo(), true)
+    assert.equal(controller.youtubeVideoHidden.get(), true)
+    assert.equal(harness.storage.get('youtubeVideoHidden'), true)
+    assert.equal(harness.mediaCalls().length, 0, 'hiding the video must not stop the one active engine')
+    assert.equal(controller.toggleYouTubeVideo(false), false)
+    assert.equal(controller.youtubeVideoHidden.get(), false)
+    harness.dispose()
+    await harness.flush()
   } finally { harness.restore() }
 })

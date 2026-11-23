@@ -53,6 +53,7 @@ const CSS = `
 .fluid-youtube-frame-wrap{min-height:200px}
 .fluid-youtube-frame{min-width:200px;min-height:200px}
 .fluid-mini-expand-note{display:none;margin:0;padding:6px 8px;border-left:2px solid var(--ui-accent);background:var(--fm-soft);color:var(--ui-text-secondary);font-size:10px;line-height:1.5}
+.fluid-youtube-stage{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:4px;min-height:0;min-width:0}.fluid-video-hidden .fluid-youtube-frame-wrap{display:none}.fluid-video-hidden .fluid-mini-expand-note{display:none}.fluid-video-toggle{justify-self:end;border:1px solid var(--fm-line);background:var(--fm-panel);color:var(--ui-text-primary);border-radius:5px;padding:3px 9px;font-size:10px;cursor:pointer}.fluid-video-toggle[aria-pressed="true"]{background:var(--fm-soft)}
 @container mini (max-height:359px){.fluid-mini-expand-note{display:block}}
 @container mini (max-height:240px){.fluid-mini-summary{gap:8px;margin-bottom:8px}.fluid-mini-summary .fluid-mini-art{width:40px;height:40px}.fluid-mini-summary .fluid-mini-art>svg{width:20px;height:20px}.fluid-mini-summary .fluid-mini-title{font-size:13px;-webkit-line-clamp:1}.fluid-mini-summary .fluid-mini-subtitle{display:none}.fluid-mini-body>.fluid-player-progress{margin:4px 0 0}.fluid-mini-body>.fluid-player-hint{margin:3px 0 0}.fluid-mini-body>.fluid-notice{margin:4px 0 0;padding:5px 6px}}
 @container mini (max-height:170px){.fluid-mini-summary{margin-bottom:4px}.fluid-mini-summary .fluid-mini-art{display:none}}
