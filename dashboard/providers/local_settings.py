@@ -11,12 +11,15 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 SETTINGS_FILENAME = "fluid-music-settings.json"
 MAX_MUSIC_DIR_LENGTH = 4096
+MAX_SPOTIFY_CLIENT_ID_LENGTH = 128
+SPOTIFY_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def settings_path() -> Path:
@@ -76,3 +79,31 @@ def set_music_dir(value: Any) -> str:
     data["music_dir"] = folder
     save(data)
     return folder
+
+
+def spotify_client_id() -> str:
+    """Public PKCE app id (never a secret). Returned to the UI for editing."""
+    try:
+        value = load().get("spotify_client_id", "")
+        if isinstance(value, str) and SPOTIFY_CLIENT_ID_RE.fullmatch(value.strip() or "x"):
+            return value.strip()
+        return ""
+    except Exception:  # noqa: BLE001 - corrupt settings are an unset state.
+        return ""
+
+
+def set_spotify_client_id(value: Any) -> str:
+    """Validate and persist the public OAuth Authorization Code + PKCE app id."""
+    if not isinstance(value, str):
+        raise TypeError("spotify_client_id must be a string")
+    client_id = value.strip()
+    if not client_id:
+        raise ValueError("spotify_client_id must not be empty")
+    if len(client_id) > MAX_SPOTIFY_CLIENT_ID_LENGTH:
+        raise ValueError("spotify_client_id is too long")
+    if not SPOTIFY_CLIENT_ID_RE.fullmatch(client_id):
+        raise ValueError("spotify_client_id contains unsupported characters")
+    data = load()
+    data["spotify_client_id"] = client_id
+    save(data)
+    return client_id

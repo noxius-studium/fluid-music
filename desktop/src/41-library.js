@@ -1,10 +1,12 @@
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
     devices = useValue(controller.spotifyDevices),
-    localCap = useValue(controller.spotifyLocalCapability)
-  const [clientId, setClientId] = useState(''),
+    localCap = useValue(controller.spotifyLocalCapability),
+    savedClientId = useValue(controller.spotifyClientId)
+  const [clientId, setClientId] = useState(savedClientId),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
+  useEffect(() => { setClientId(savedClientId) }, [savedClientId])
   const run = async (work) => {
     setBusy(true)
     setError('')
@@ -41,24 +43,32 @@ function SpotifyConnection({ controller }) {
       h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
       h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
-    auth.needsClientId &&
+    h(
+      'label',
+      { className: 'fluid-field' },
+      'Spotify Client ID',
+      h('input', {
+        className: 'fluid-input',
+        value: clientId,
+        autoComplete: 'off',
+        'aria-label': 'Spotify Client ID',
+        onChange: (event) => setClientId(event.target.value),
+        placeholder: 'Public app client ID',
+      }),
       h(
-        'label',
-        { className: 'fluid-field' },
-        'Spotify Client ID',
-        h('input', {
-          className: 'fluid-input',
-          value: clientId,
-          autoComplete: 'off',
-          onChange: (event) => setClientId(event.target.value),
-          placeholder: 'Public app client ID',
-        }),
-        h(
-          'small',
-          {},
-          'Use http://127.0.0.1:43827/spotify/callback in the Spotify dashboard. No client secret.',
-        ),
+        'small',
+        {},
+        'Redirect URI http://127.0.0.1:43827/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
       ),
+    ),
+    h(
+      WorkspaceButton,
+      {
+        disabled: busy || !clientId.trim() || clientId.trim() === savedClientId,
+        onClick: () => void run(async () => { await controller.setSpotifyClientId(clientId) }),
+      },
+      'Save Client ID',
+    ),
     !auth.authenticated
       ? h(
           WorkspaceButton,
@@ -68,7 +78,6 @@ function SpotifyConnection({ controller }) {
             onClick: () =>
               void run(async () => {
                 await controller.startSpotifyAuth(clientId)
-                setClientId('')
               }),
           },
           auth.state === 'connecting' ? 'Waiting for browser approval…' : 'Connect Spotify',

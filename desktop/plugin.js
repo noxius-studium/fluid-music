@@ -735,6 +735,7 @@ function createController(ctx, hostCapabilities = {}) {
   const historyRetention = atom(0)
   // Owner-approved audio fallback folder (non-secret, profile-local).
   const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
   const sourceHealth = atom({})
@@ -2138,6 +2139,9 @@ function createController(ctx, hostCapabilities = {}) {
       const folder = safeText(data?.music_dir)
       musicDir.set(folder)
       ctx.storage.set('musicDir', folder)
+      const clientId = safeText(data?.spotify_client_id)
+      spotifyClientId.set(clientId)
+      ctx.storage.set('spotifyClientId', clientId)
     } catch { /* Cached folder stays usable when settings cannot be read. */ }
   }
 
@@ -2149,6 +2153,17 @@ function createController(ctx, hostCapabilities = {}) {
     musicDir.set(saved)
     ctx.storage.set('musicDir', saved)
     message.set(`Audio fallback folder saved: ${saved}`)
+    return saved
+  }
+
+  async function setSpotifyClientId(value) {
+    const clientId = safeText(value)
+    if (!clientId) throw new Error('Enter your Spotify Client ID first.')
+    const data = await request('/settings', { method: 'PUT', body: { spotify_client_id: clientId } })
+    const saved = safeText(data?.spotify_client_id, clientId)
+    spotifyClientId.set(saved)
+    ctx.storage.set('spotifyClientId', saved)
+    message.set('Spotify Client ID saved. You can now connect.')
     return saved
   }
 
@@ -2822,9 +2837,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, downloadYouTubeAudioFallback,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
@@ -3557,10 +3572,12 @@ function QueueList({ controller, selected, onSelect }) {
 function SpotifyConnection({ controller }) {
   const auth = useValue(controller.spotifyAuth),
     devices = useValue(controller.spotifyDevices),
-    localCap = useValue(controller.spotifyLocalCapability)
-  const [clientId, setClientId] = useState(''),
+    localCap = useValue(controller.spotifyLocalCapability),
+    savedClientId = useValue(controller.spotifyClientId)
+  const [clientId, setClientId] = useState(savedClientId),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
+  useEffect(() => { setClientId(savedClientId) }, [savedClientId])
   const run = async (work) => {
     setBusy(true)
     setError('')
@@ -3597,24 +3614,32 @@ function SpotifyConnection({ controller }) {
       h('p', { className: 'fluid-muted' }, `In-plugin audio: ${localCap.state}${localCap.reasons && localCap.reasons[0] ? ` — ${localCap.reasons[0]}` : ''}`),
       h(WorkspaceButton, { disabled: busy, onClick: () => void run(() => controller.assessSpotifyLocalPlayback()) }, 'Check local playback'),
     ),
-    auth.needsClientId &&
+    h(
+      'label',
+      { className: 'fluid-field' },
+      'Spotify Client ID',
+      h('input', {
+        className: 'fluid-input',
+        value: clientId,
+        autoComplete: 'off',
+        'aria-label': 'Spotify Client ID',
+        onChange: (event) => setClientId(event.target.value),
+        placeholder: 'Public app client ID',
+      }),
       h(
-        'label',
-        { className: 'fluid-field' },
-        'Spotify Client ID',
-        h('input', {
-          className: 'fluid-input',
-          value: clientId,
-          autoComplete: 'off',
-          onChange: (event) => setClientId(event.target.value),
-          placeholder: 'Public app client ID',
-        }),
-        h(
-          'small',
-          {},
-          'Use http://127.0.0.1:43827/spotify/callback in the Spotify dashboard. No client secret.',
-        ),
+        'small',
+        {},
+        'Redirect URI http://127.0.0.1:43827/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
       ),
+    ),
+    h(
+      WorkspaceButton,
+      {
+        disabled: busy || !clientId.trim() || clientId.trim() === savedClientId,
+        onClick: () => void run(async () => { await controller.setSpotifyClientId(clientId) }),
+      },
+      'Save Client ID',
+    ),
     !auth.authenticated
       ? h(
           WorkspaceButton,
@@ -3624,7 +3649,6 @@ function SpotifyConnection({ controller }) {
             onClick: () =>
               void run(async () => {
                 await controller.startSpotifyAuth(clientId)
-                setClientId('')
               }),
           },
           auth.state === 'connecting' ? 'Waiting for browser approval…' : 'Connect Spotify',

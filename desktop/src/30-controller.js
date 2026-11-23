@@ -35,6 +35,7 @@ function createController(ctx, hostCapabilities = {}) {
   const historyRetention = atom(0)
   // Owner-approved audio fallback folder (non-secret, profile-local).
   const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
   const sourceHealth = atom({})
@@ -1438,6 +1439,9 @@ function createController(ctx, hostCapabilities = {}) {
       const folder = safeText(data?.music_dir)
       musicDir.set(folder)
       ctx.storage.set('musicDir', folder)
+      const clientId = safeText(data?.spotify_client_id)
+      spotifyClientId.set(clientId)
+      ctx.storage.set('spotifyClientId', clientId)
     } catch { /* Cached folder stays usable when settings cannot be read. */ }
   }
 
@@ -1449,6 +1453,17 @@ function createController(ctx, hostCapabilities = {}) {
     musicDir.set(saved)
     ctx.storage.set('musicDir', saved)
     message.set(`Audio fallback folder saved: ${saved}`)
+    return saved
+  }
+
+  async function setSpotifyClientId(value) {
+    const clientId = safeText(value)
+    if (!clientId) throw new Error('Enter your Spotify Client ID first.')
+    const data = await request('/settings', { method: 'PUT', body: { spotify_client_id: clientId } })
+    const saved = safeText(data?.spotify_client_id, clientId)
+    spotifyClientId.set(saved)
+    ctx.storage.set('spotifyClientId', saved)
+    message.set('Spotify Client ID saved. You can now connect.')
     return saved
   }
 
@@ -2122,9 +2137,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, downloadYouTubeAudioFallback,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,

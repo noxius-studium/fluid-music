@@ -102,7 +102,7 @@ def test_settings_and_fallback_routes(api: Any, tmp_path: Path) -> None:
     def get_json(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         return run(request(app, method, path, **kwargs)).json()
 
-    assert get_json("GET", "/settings") == {"ok": True, "data": {"music_dir": ""}}
+    assert get_json("GET", "/settings") == {"ok": True, "data": {"music_dir": "", "spotify_client_id": ""}}
     assert get_json("PUT", "/settings", json={"music_dir": "x" * 5000})["ok"] is False
     assert get_json("PUT", "/settings", json={"music_dir": "/tmp/FM Music"})["data"]["music_dir"] == "/tmp/FM Music"
     assert get_json("GET", "/settings")["data"]["music_dir"] == "/tmp/FM Music"

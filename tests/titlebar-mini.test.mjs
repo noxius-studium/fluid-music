@@ -109,7 +109,7 @@ function atom(initial) {
 
 const MEDIA_COMMAND_ROUTES = new Set(['/play', '/pause', '/next', '/previous', '/transfer', '/queue', '/seek', '/volume', '/shuffle', '/repeat'])
 
-function makeHarness({ musicDir = '', fallback = null, localTracks = [] } = {}) {
+function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotifyClientId = '' } = {}) {
   const restCalls = []
   const previewCalls = []
   const timers = []
@@ -139,7 +139,7 @@ function makeHarness({ musicDir = '', fallback = null, localTracks = [] } = {}) 
     if (route === '/history') return { ok: true, data: { items: [], total: 0 } }
     if (route === '/spotify/auth/status') return { ok: true, data: { auth: { logged_in: false }, setup: {}, flow: { state: 'idle', error: null } } }
     if (route === '/devices') return { ok: true, data: { devices: [] } }
-    if (route === '/settings') return { ok: true, data: { music_dir: String(options?.body?.music_dir ?? musicDir) } }
+    if (route === '/settings') return { ok: true, data: { music_dir: String(options?.body?.music_dir ?? musicDir), spotify_client_id: String(options?.body?.spotify_client_id ?? spotifyClientId) } }
     if (route === '/youtube/fallback/audio') return { ok: true, data: fallback || { registered: false } }
     return { ok: true, data: {} }
   }
@@ -260,6 +260,22 @@ test('FM-27 registered fallback goes Up Next without autoplay or a new engine', 
     assert.match(controller.message.get(), /local library and Up Next/)
     assert.notEqual(controller.status.get(), 'playing', 'no surprise autoplay')
     assert.equal(harness.mediaCalls().length, 0, 'one engine: no transport command from the fallback')
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+
+test('FM-28 Spotify Client ID setting persists and is sent to the backend', async () => {
+  const harness = makeHarness({ spotifyClientId: '' })
+  try {
+    const { controller } = harness
+    await harness.flush()
+    assert.equal(controller.spotifyClientId.get(), '')
+    assert.equal(await controller.setSpotifyClientId('SavedClient123'), 'SavedClient123')
+    assert.equal(controller.spotifyClientId.get(), 'SavedClient123')
+    assert.equal(harness.storage.get('spotifyClientId'), 'SavedClient123')
+    assert.ok(harness.restCalls.some(call => call.path === '/settings' && call.method === 'PUT' && call.options.body.spotify_client_id === 'SavedClient123'))
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }

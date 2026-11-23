@@ -521,7 +521,7 @@ async def get_settings() -> dict[str, Any]:
     """Non-secret, profile-local preferences. Never returns credentials/tokens."""
     from dashboard.providers import local_settings
 
-    return {"ok": True, "data": {"music_dir": local_settings.music_dir()}}
+    return {"ok": True, "data": {"music_dir": local_settings.music_dir(), "spotify_client_id": local_settings.spotify_client_id()}}
 
 
 @router.put("/settings")
@@ -530,8 +530,12 @@ async def put_settings(request: Request) -> dict[str, Any]:
 
     try:
         payload = await _payload(request)
-        folder = local_settings.set_music_dir(payload.get("music_dir"))
-        return {"ok": True, "data": {"music_dir": folder}}
+        data: dict[str, Any] = {}
+        if "music_dir" in payload:
+            data["music_dir"] = local_settings.set_music_dir(payload.get("music_dir"))
+        if "spotify_client_id" in payload:
+            data["spotify_client_id"] = local_settings.set_spotify_client_id(payload.get("spotify_client_id"))
+        return {"ok": True, "data": data}
     except (TypeError, ValueError) as exc:
         return _error(str(exc))
     except OSError:
@@ -579,7 +583,11 @@ async def spotify_auth_status() -> dict[str, Any]:
 async def spotify_auth_start(request: Request) -> dict[str, Any]:
     """Start one Hermes-managed browser PKCE flow without exposing its credentials."""
     try:
-        client_id = _spotify_client_id((await _payload(request)).get("client_id"))
+        from dashboard.providers import local_settings
+
+        payload = await _payload(request)
+        supplied = payload["client_id"] if "client_id" in payload else (local_settings.spotify_client_id() or None)
+        client_id = _spotify_client_id(supplied)
     except (TypeError, ValueError) as exc:
         return _error(str(exc))
 
