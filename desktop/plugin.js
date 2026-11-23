@@ -5740,7 +5740,10 @@ function TitlebarPlayer({ controller }) {
     return () => {
       document.removeEventListener('keydown', onKeyDown)
       document.removeEventListener('pointerdown', onPointerDown)
-      if (trigger instanceof HTMLElement && trigger.isConnected) setTimeout(() => trigger.isConnected && trigger.focus(), 0)
+      if (trigger instanceof HTMLElement && trigger.isConnected) {
+        trigger.focus()
+        setTimeout(() => trigger.isConnected && trigger.focus(), 0)
+      }
     }
   }, [open, controller])
   return h('div', { ref: rootRef, className: 'fluid-titlebar' },
