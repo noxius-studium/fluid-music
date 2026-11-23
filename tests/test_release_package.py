@@ -52,6 +52,8 @@ def test_release_content_contract(packaging, tmp_path: Path):
     for name in names:
         assert not packaging.is_forbidden_release_path(Path(name)), f"forbidden content {name}"
     assert "dashboard/providers/token_store.py" in names, "the token-store CODE module ships; secret data never does"
+    backend_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "dashboard").rglob("*.py")}
+    assert backend_sources <= names, f"every backend module ships: {sorted(backend_sources - names)}"
 
 
 def test_forbidden_path_guard(packaging):
@@ -90,7 +92,7 @@ def test_version_metadata_is_consistent(packaging):
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert manifest["version"] == yaml_version
     assert f'version = "{yaml_version}"' in pyproject
-    assert yaml_version == "0.5.0", "the FM-20..FM-23 feature chain ships as 0.5.0"
+    assert yaml_version.startswith("0.5."), "the 0.5.x release line owns this contract"
 
 
 def test_stale_instructions_are_reconciled():

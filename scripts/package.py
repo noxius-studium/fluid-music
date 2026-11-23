@@ -88,6 +88,10 @@ def release_files(root: Path) -> list[Path]:
         names = ", ".join(path.as_posix() for path in missing)
         raise FileNotFoundError(f"Required release file(s) missing: {names}")
     files = list(REQUIRED_PATHS)
+    # Every backend source module must ship. New provider/adapter modules are
+    # added to the source tree, not to a hand-maintained list — omitting one
+    # makes its REST route fail at runtime in the installed artifact.
+    files.extend(path.relative_to(root) for path in sorted((root / "dashboard").rglob("*.py")) if path.is_file())
     docs = root / "docs"
     if not docs.is_dir():
         raise FileNotFoundError("Required release directory missing: docs")

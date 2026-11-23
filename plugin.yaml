@@ -1,5 +1,5 @@
 name: fluid-music
-version: 0.5.0
+version: 0.5.1
 description: "Unified Spotify Connect, YouTube, internet radio, and persistent local music player."
 author: "FluidMusic contributors"
 kind: backend
