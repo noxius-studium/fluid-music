@@ -5734,7 +5734,14 @@ function TitlebarPlayer({ controller }) {
     popover?.querySelector('button:not([disabled]), input:not([disabled]), [tabindex="0"]')?.focus()
     const dismiss = () => controller.titlebarOpen.set(false)
     const onKeyDown = event => { if (event.key === 'Escape') { event.preventDefault(); dismiss() } }
-    const onPointerDown = event => { if (!rootRef.current?.contains(event.target)) dismiss() }
+    const onPointerDown = event => {
+      if (!rootRef.current?.contains(event.target)) {
+        // Keep focus on the trigger across an outside dismissal: the browser's
+        // default pointerdown handling would otherwise blur it to the surface.
+        event.preventDefault()
+        dismiss()
+      }
+    }
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('pointerdown', onPointerDown)
     return () => {
