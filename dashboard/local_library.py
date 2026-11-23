@@ -265,7 +265,7 @@ class LocalLibrary:
     @staticmethod
     def _history_payload(value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
-            raise ValueError("history item must be an object")
+            raise TypeError("history item must be an object")
         source = str(value.get("source") or "").strip()
         if source not in {"spotify", "radio", "local", "youtube"}:
             raise ValueError("history item has an unsupported source")

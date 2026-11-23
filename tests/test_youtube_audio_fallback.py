@@ -8,15 +8,12 @@ provider behavior or real audio (explicit owner review).
 
 from __future__ import annotations
 
-import importlib
 import sys
-import types
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Self
 
 import pytest
-
-from test_plugin_api import api, app_for, request, run  # noqa: F401
+from test_plugin_api import app_for, request, run
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -27,15 +24,15 @@ WATCH_URL = "https://www.youtube.com/watch?v=abcdefgh001"
 class FakeYoutubeDL:
     """Labelled yt-dlp double: writes a tiny .m4a and reports its real path."""
 
-    options: dict[str, Any] = {}
+    options: ClassVar[dict[str, Any]] = {}
 
     def __init__(self, options: dict[str, Any]) -> None:
         type(self).options = dict(options)
 
-    def __enter__(self) -> "FakeYoutubeDL":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_: Any) -> None:
+    def __exit__(self, *_: object) -> None:
         return None
 
     def extract_info(self, target: str, download: bool = False) -> dict[str, Any]:

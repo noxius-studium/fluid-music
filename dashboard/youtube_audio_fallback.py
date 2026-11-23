@@ -15,8 +15,9 @@ feedback. FluidMusic supplies the software path only; no DRM/paid-access bypass.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ def _downloaded_file(client: Any, info: dict[str, Any], music_dir: str, video_id
         prepared = client.prepare_filename(info)
         if prepared and Path(prepared).is_file():
             return Path(prepared)
-    except Exception:  # noqa: BLE001 - a missing helper must not hide the real file.
-        pass
+    except Exception:
+        logger.debug("prepare_filename failed; falling back to directory scan", exc_info=True)
     try:
         matches = sorted(
             (path for path in Path(music_dir).glob(f"*{video_id}*.m4a") if path.is_file()),

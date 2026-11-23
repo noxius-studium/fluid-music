@@ -21,8 +21,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
-from test_plugin_api import api, app_for, run  # noqa: E402
-from test_plugin_api import request as _raw_request  # noqa: E402
+from test_plugin_api import app_for, run
+from test_plugin_api import request as _raw_request
 
 
 async def request(app: Any, method: str, path: str, **kwargs: Any) -> Any:
