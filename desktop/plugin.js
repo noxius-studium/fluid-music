@@ -2181,24 +2181,22 @@ function createController(ctx, hostCapabilities = {}) {
     const url = safeText(item.url)
     if (!url) { message.set('This item has no source URL to download from.'); return false }
     if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    // A background download is NOT a transport transition: never rewrite the
+    // shared status. Message-only progress keeps whatever is playing intact.
     message.set('Downloading audio to your music folder…')
-    status.set('loading')
     try {
       const result = await request('/youtube/fallback/audio', { method: 'POST', body: { url }, timeoutMs: 120000 })
       const title = safeText(result?.title, item.title || 'YouTube audio')
       if (!result?.registered || !result?.track_id) {
-        status.set('paused')
         message.set(`Saved “${title}” to your music folder. Rescan it to add the track to your library.`)
         return true
       }
       await refreshLocalLibrary()
       const local = localTracks.get().find(track => String(track.localTrackId) === String(result.track_id))
       if (local) addNext(local)
-      status.set('paused')
       message.set(`“${title}” saved to your music folder and added to your local library${local ? ' and Up Next' : ''}.`)
       return true
     } catch (error) {
-      status.set('error')
       message.set(error?.message || 'The audio fallback could not complete.')
       return false
     }

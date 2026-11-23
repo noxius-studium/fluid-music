@@ -139,6 +139,7 @@ function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotify
     if (route === '/history') return { ok: true, data: { items: [], total: 0 } }
     if (route === '/spotify/auth/status') return { ok: true, data: { auth: { logged_in: false }, setup: {}, flow: { state: 'idle', error: null } } }
     if (route === '/devices') return { ok: true, data: { devices: [] } }
+    if (route === '/youtube/embed-host') return { ok: true, data: { url: 'http://127.0.0.1:55555/token/youtube/abcdefgh001' } }
     if (route === '/settings') return { ok: true, data: { music_dir: String(options?.body?.music_dir ?? musicDir), spotify_client_id: String(options?.body?.spotify_client_id ?? spotifyClientId) } }
     if (route === '/youtube/fallback/audio') return { ok: true, data: fallback || { registered: false } }
     return { ok: true, data: {} }
@@ -276,6 +277,49 @@ test('FM-28 Spotify Client ID setting persists and is sent to the backend', asyn
     assert.equal(controller.spotifyClientId.get(), 'SavedClient123')
     assert.equal(harness.storage.get('spotifyClientId'), 'SavedClient123')
     assert.ok(harness.restCalls.some(call => call.path === '/settings' && call.method === 'PUT' && call.options.body.spotify_client_id === 'SavedClient123'))
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+
+test('FM-29 auth, settings and URL round-trips never cut or retarget playback', async () => {
+  const harness = makeHarness({ musicDir: '/tmp/FM Music' })
+  try {
+    const { controller } = harness
+    await harness.flush()
+    controller.status.set('playing')
+    const queueBefore = controller.queue.get().length
+    const indexBefore = controller.index.get()
+    const engineBefore = controller.youtube.get().engine
+    await controller.setSpotifyClientId('Client123')
+    await controller.setMusicDir('/tmp/Music')
+    await controller.searchYouTube('a query')
+    const embed = await controller.resolveYouTubeEmbedUrl({ source: 'youtube', id: 'youtube:abcdefgh001' })
+    assert.match(embed, /^http:\/\/127\.0\.0\.1:/)
+    await controller.startSpotifyAuth('Client123')
+    assert.equal(controller.status.get(), 'playing', 'shared transport state survives all of them')
+    assert.equal(controller.queue.get().length, queueBefore)
+    assert.equal(controller.index.get(), indexBefore)
+    assert.equal(controller.youtube.get().engine, engineBefore)
+    assert.equal(harness.mediaCalls().length, 0, 'no play/pause/stop/transfer command from any fetch')
+    harness.dispose()
+    await harness.flush()
+  } finally { harness.restore() }
+})
+
+test('FM-29 background audio fallback never rewrites the shared transport status', async () => {
+  const fallback = { title: 'Fixture', video_id: 'abcdefgh001', file: 'x.m4a', track_id: 't9', registered: true }
+  const tracks = [{ id: 't9', path: '/tmp/FM Music/x.m4a', title: 'Fixture', available: true, mime_type: 'audio/mp4' }]
+  const harness = makeHarness({ musicDir: '/tmp/FM Music', fallback, localTracks: tracks })
+  try {
+    const { controller } = harness
+    await harness.flush()
+    controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
+    controller.status.set('playing')
+    assert.equal(await controller.downloadYouTubeAudioFallback(), true)
+    assert.equal(controller.status.get(), 'playing', 'a download is not a transport transition')
+    assert.equal(harness.mediaCalls().length, 0)
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }
