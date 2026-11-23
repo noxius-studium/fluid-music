@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import os
 import stat
 import sys
 import threading
@@ -108,7 +109,10 @@ def test_code_exchange_stores_protected_tokens_and_binds_the_account(owned: Any)
     assert data["account"] == {"id": "owner", "display_name": "Owner", "product": ""}
     path = owned.store.credentials_path()
     assert path.is_file()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600, "credentials must be owner-only"
+    # Windows chmod cannot express POSIX 0600; owner-only ACLs are
+    # platform-specific there. POSIX runners enforce the exact mode.
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, "credentials must be owner-only"
     status = spotify.auth_status()
     assert status["logged_in"] is True
     assert status["auth_type"] == "oauth_pkce"
