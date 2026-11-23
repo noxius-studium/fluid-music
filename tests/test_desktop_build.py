@@ -19,6 +19,7 @@ def test_desktop_runtime_is_built_from_modular_sources() -> None:
     assert result.returncode == 0, result.stderr
     assert sorted(path.name for path in (ROOT / "desktop" / "src").glob("*.js")) == [
         "00-runtime.js",
+        "01-version.js",
         "10-model.js",
         "20-styles.js",
         "30-controller.js",

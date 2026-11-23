@@ -49,6 +49,9 @@ const TITLEBAR_RIGHT = SDK_OPTIONAL.titlebarRight ? SDK.TITLEBAR_AREAS.right : n
 const ID = 'fluid-music'
 const ROUTE = '/media'
 const SOURCES = { spotify: 'Spotify Connect', radio: 'Live radio', local: 'Local music', youtube: 'YouTube' }
+// Build identity for the owner-facing Diagnostics header. Kept in sync with
+// plugin.yaml by the release-package test so an installed build is identifiable.
+const FM_VERSION = '0.5.2'
 
 /* PURE_FUNCTIONS_START */
 const LOCAL_AUDIO_EXTENSIONS = /\.(?:aac|flac|m4a|mp3|oga|ogg|opus|wav|webm)$/i
@@ -5674,7 +5677,7 @@ function SettingsPage({ controller }) {
 function LogsPage({ controller }) {
   const entries = useValue(controller.logs)
   return h('section', { className: 'fluid-panel fluid-panel-pad' },
-    h('div', { className: 'fluid-section-head' }, h('div', {}, h('h2', { className: 'fluid-section-title' }, `Diagnostics · ${entries.length}`), h('p', { className: 'fluid-section-copy' }, 'Sanitized provider commands and playback transitions.')), h(WorkspaceButton, { disabled: !entries.length, onClick: () => controller.clearLogs() }, 'Clear logs')),
+    h('div', { className: 'fluid-section-head' }, h('div', {}, h('h2', { className: 'fluid-section-title' }, `Diagnostics · ${entries.length} · v${FM_VERSION}`), h('p', { className: 'fluid-section-copy' }, 'Sanitized provider commands and playback transitions.')), h(WorkspaceButton, { disabled: !entries.length, onClick: () => controller.clearLogs() }, 'Clear logs')),
     h('div', { className: 'fluid-log-list' }, entries.map(entry => h('article', { className: 'fluid-log-row', 'data-level': entry.level, key: entry.id }, h('time', { dateTime: entry.at }, new Date(entry.at).toLocaleTimeString()), h('span', { className: 'fluid-log-level' }, entry.level), h('strong', {}, entry.event), h('pre', {}, JSON.stringify(entry.detail, null, 2))))),
     !entries.length && h(Empty, { title: 'No diagnostics yet' }, 'Provider activity appears here when you use playback controls.'),
   )

@@ -93,6 +93,9 @@ def test_version_metadata_is_consistent(packaging):
     assert manifest["version"] == yaml_version
     assert f'version = "{yaml_version}"' in pyproject
     assert yaml_version.startswith("0.5."), "the 0.5.x release line owns this contract"
+    version_source = (ROOT / "desktop" / "src" / "01-version.js").read_text(encoding="utf-8")
+    assert f"FM_VERSION = '{yaml_version}'" in version_source, "bundle version matches plugin.yaml"
+    assert f"FM_VERSION = '{yaml_version}'" in (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8"), "built bundle carries the same version"
 
 
 def test_stale_instructions_are_reconciled():

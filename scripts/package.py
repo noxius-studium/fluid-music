@@ -32,6 +32,7 @@ REQUIRED_PATHS = (
     Path("dashboard/providers/spotify.py"),
     Path("desktop/plugin.js"),
     Path("desktop/src/00-runtime.js"),
+    Path("desktop/src/01-version.js"),
     Path("desktop/src/10-model.js"),
     Path("desktop/src/20-styles.js"),
     Path("desktop/src/30-controller.js"),

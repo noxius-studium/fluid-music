@@ -16,6 +16,7 @@ ENTRY = ROOT / "desktop" / "plugin.js"
 SOURCE_DIR = ROOT / "desktop" / "src"
 PARTS = (
     "00-runtime.js",
+    "01-version.js",
     "10-model.js",
     "20-styles.js",
     "30-controller.js",

@@ -2,7 +2,7 @@
   "name": "fluid-music",
   "label": "FluidMusic",
   "description": "Spotify Connect, YouTube, internet radio, and local-library controls.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "tab": {
     "hidden": true
   },
