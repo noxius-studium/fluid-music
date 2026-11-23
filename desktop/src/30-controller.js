@@ -778,7 +778,13 @@ function createController(ctx, hostCapabilities = {}) {
     return runTransition(async token => {
       if (token !== transition) return
       const previous = current()
-      await stopActive(previous)
+      // A stale/unreachable previous engine must not trap the queue on that
+      // source. Pause is best-effort; the switch to the new source still wins.
+      try {
+        await stopActive(previous)
+      } catch (error) {
+        addLog('error', 'source.stop-failed', { source: previous?.source || 'idle', error: userFacingError(error) })
+      }
       if (token !== transition) return
       await startSelected(nextIndex, token)
     })
