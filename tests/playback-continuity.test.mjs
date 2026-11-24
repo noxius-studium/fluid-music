@@ -9,7 +9,7 @@ const source = await readFile(new URL('../desktop/plugin.js', import.meta.url), 
 const arch = await readFile(new URL('../docs/architecture.md', import.meta.url), 'utf8')
 
 test('background audio fallback is not a transport transition', async () => {
-  const start = source.indexOf('async function downloadYouTubeAudioFallback()')
+  const start = source.indexOf('async function downloadYouTubeAudio(')
   const end = source.indexOf('async function assessSpotifyLocalPlayback()', start)
   assert.ok(start >= 0 && end > start, 'fallback region boundary')
   const fn = source.slice(start, end)
@@ -22,7 +22,7 @@ test('background audio fallback is not a transport transition', async () => {
 test('assessment is honest about what must stay on the backend', async () => {
   assert.match(arch, /## Desktop-only operation and playback continuity \(FM-29 assessment\)/)
   assert.match(arch, /NOT entirely/)
-  for (const text of ['127.0.0.1:43827', 'yt-dlp', 'SQLite', 'Fixtures assert this while state is `playing`', 'remain owner review']) {
+  for (const text of ['127.0.0.1:41337', 'yt-dlp', 'SQLite', 'Fixtures assert this while state is `playing`', 'remain owner review']) {
     assert.ok(arch.includes(text), `assessment covers ${text}`)
   }
   await new Promise(resolve => process.nextTick(resolve))

@@ -1,0 +1,165 @@
+name: Propose Hermes catalog update
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Published FluidMusic tag to propose (blank = latest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.HERMES_CATALOG_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require catalog pull-request token
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "Add a HERMES_CATALOG_TOKEN Actions secret with access to the Deadtrix21/hermes-agent fork and public pull requests." >&2
+            exit 1
+          fi
+
+      - name: Resolve published release
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${REQUESTED_TAG}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="$(gh release list --repo noxius-studium/fluid-music --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          gh release view "${TAG}" --repo noxius-studium/fluid-music >/dev/null
+          if [[ ! "${TAG}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Release tag ${TAG} is not v<major>.<minor>.<patch>." >&2
+            exit 1
+          fi
+          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --force
+          SHA="$(git rev-list -n 1 "${TAG}")"
+          if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve ${TAG} to a full commit SHA." >&2
+            exit 1
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"
+            echo "sha=${SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Update catalog fork and open review PR
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="catalog/fluid-music-v${VERSION}"
+          gh api --method POST repos/Deadtrix21/hermes-agent/merge-upstream -f branch=main >/dev/null
+          UPSTREAM_SHA="$(gh api repos/NousResearch/hermes-agent/git/ref/heads/main --jq '.object.sha')"
+          REF_ENDPOINT="repos/Deadtrix21/hermes-agent/git/refs/heads/${BRANCH}"
+          if gh api "${REF_ENDPOINT}" >/dev/null 2>&1; then
+            gh api --method PATCH "${REF_ENDPOINT}" -f sha="${UPSTREAM_SHA}" -F force=true >/dev/null
+          else
+            gh api --method POST repos/Deadtrix21/hermes-agent/git/refs \
+              -f ref="refs/heads/${BRANCH}" -f sha="${UPSTREAM_SHA}" >/dev/null
+          fi
+
+          ENTRY="${RUNNER_TEMP}/fluid-music.yaml"
+          CATALOG_PATH="plugin-catalog/fluid-music.yaml"
+          CATALOG_STATE="add"
+          OLD_VERSION="not listed"
+          OLD_SHA="not listed"
+
+          if gh api --method GET \
+            -H "Accept: application/vnd.github.raw+json" \
+            "repos/NousResearch/hermes-agent/contents/${CATALOG_PATH}" \
+            -f ref=main > "${ENTRY}" 2>/dev/null; then
+            CATALOG_STATE="update"
+            mapfile -t CATALOG_IDENTITY < <(python "${GITHUB_WORKSPACE}/scripts/update_hermes_catalog_entry.py" "${ENTRY}" --show-current)
+            OLD_VERSION="${CATALOG_IDENTITY[0]}"
+            OLD_SHA="${CATALOG_IDENTITY[1]}"
+            python "${GITHUB_WORKSPACE}/scripts/update_hermes_catalog_entry.py" "${ENTRY}" --version "${VERSION}" --sha "${RELEASE_SHA}"
+          else
+            cat > "${ENTRY}" <<EOF
+          name: fluid-music
+          title: "FluidMusic"
+          repo: https://github.com/noxius-studium/fluid-music
+          sha: ${RELEASE_SHA}
+          description: "Spotify Connect, YouTube, internet radio, and persistent local music in one Hermes Desktop player."
+          maintainer: Deadtrix21
+          tier: community
+          category: desktop
+          docs_url: https://github.com/noxius-studium/fluid-music/blob/${RELEASE_SHA}/README.md
+          version: "${VERSION}"
+          screenshots:
+            - https://raw.githubusercontent.com/noxius-studium/fluid-music/${RELEASE_SHA}/docs/images/fluidmusic-workspace.png
+            - https://raw.githubusercontent.com/noxius-studium/fluid-music/${RELEASE_SHA}/docs/images/fluidmusic-youtube-download.png
+            - https://raw.githubusercontent.com/noxius-studium/fluid-music/${RELEASE_SHA}/docs/images/fluidmusic-titlebar-player.png
+            - https://raw.githubusercontent.com/noxius-studium/fluid-music/${RELEASE_SHA}/docs/images/fluidmusic-mobile.png
+          readme: true
+          capabilities:
+            provides_tools: []
+            provides_hooks: []
+            provides_middleware: []
+            requires_env: []
+          EOF
+          fi
+
+          FILE_ENDPOINT="repos/Deadtrix21/hermes-agent/contents/${CATALOG_PATH}"
+          CONTENT="$(base64 -w 0 "${ENTRY}")"
+          COMMIT_ARGS=(
+            --method PUT "${FILE_ENDPOINT}"
+            -f message="chore(plugin-catalog): ${CATALOG_STATE} fluid-music ${VERSION}"
+            -f content="${CONTENT}"
+            -f branch="${BRANCH}"
+          )
+          if FILE_SHA="$(gh api --method GET "${FILE_ENDPOINT}" -f ref="${BRANCH}" --jq '.sha' 2>/dev/null)"; then
+            COMMIT_ARGS+=(-f sha="${FILE_SHA}")
+          fi
+          gh api "${COMMIT_ARGS[@]}" >/dev/null
+
+          BODY_FILE="${RUNNER_TEMP}/fluid-music-catalog-pr.md"
+          printf '%s\n' \
+            '## Summary' \
+            "- ${CATALOG_STATE} \`fluid-music\` at version ${VERSION}" \
+            "- pin the reviewed source from \`${OLD_SHA}\` to \`${RELEASE_SHA}\`" \
+            '- pin README and screenshot URLs to the same exact commit' \
+            '' \
+            '## Release evidence' \
+            "- Release: https://github.com/noxius-studium/fluid-music/releases/tag/${RELEASE_TAG}" \
+            "- Previous catalog version: ${OLD_VERSION}" \
+            "- Source: https://github.com/noxius-studium/fluid-music/tree/${RELEASE_SHA}" \
+            '' \
+            '## Disclosures' \
+            '- Connects to Spotify, YouTube, and Radio Browser when those features are used.' \
+            '- Reads only user-approved local music roots; stores its SQLite catalog and provider state under the active Hermes profile.' \
+            '- The explicit YouTube Download action invokes yt-dlp and writes audio into the selected approved local root. The README carries the personal-use and use-at-your-own-risk notice.' \
+            '- Runs loopback-only callback/embed listeners for Spotify PKCE and the YouTube player.' \
+            '' \
+            'This PR only proposes the catalog entry or pin update. Nous maintainer review and catalog CI remain the publication gate.' \
+            > "${BODY_FILE}"
+
+          EXISTING="$(gh pr list --repo NousResearch/hermes-agent --state open --head "Deadtrix21:${BRANCH}" --json url --jq '.[0].url // empty')"
+          TITLE="chore(plugin-catalog): ${CATALOG_STATE} fluid-music ${VERSION}"
+          if [[ -n "${EXISTING}" ]]; then
+            gh pr edit "${EXISTING}" --repo NousResearch/hermes-agent --title "${TITLE}" --body-file "${BODY_FILE}"
+            echo "Updated ${EXISTING}"
+          else
+            gh pr create --repo NousResearch/hermes-agent --base main --head "Deadtrix21:${BRANCH}" \
+              --title "${TITLE}" --body-file "${BODY_FILE}"
+          fi

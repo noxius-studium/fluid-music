@@ -88,10 +88,10 @@ def with_spotify_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants)
     sys.modules.pop("dashboard.plugin_api", None)
     module = importlib.import_module("dashboard.plugin_api")
-    module._resolve_spotify_integration()
     monkeypatch.setattr(module, "SpotifyClient", FakeClient)
     monkeypatch.setattr(module, "SpotifyError", FakeError)
     monkeypatch.setattr(module, "get_spotify_auth_status", lambda: {"logged_in": False})
+    module._resolve_spotify_integration()
     yield module
     sys.modules.pop("dashboard.plugin_api", None)
 

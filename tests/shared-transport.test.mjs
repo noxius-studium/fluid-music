@@ -137,9 +137,11 @@ test('all surfaces share one control vocabulary and usable volume widths', () =>
   assert.doesNotMatch(source, /fluid-mini-volume' \}/)
   // The retired notice-only toggle stub is gone from the controller.
   assert.doesNotMatch(controllerText, /YouTube transport is in the FluidMusic player pane/)
-  // Volume ranges are fluid 150px+ or a full row in narrow layouts.
+  // The compact player deliberately uses three full-width rows so transport,
+  // volume and navigation never squeeze or clip one another.
   assert.match(source, /\.fluid-volume-compact\{width:150px\}/)
-  assert.match(source, /\.fluid-mini-controls\{display:grid;grid-template-columns:auto minmax\(150px,1fr\) auto/)
-  assert.match(source, /grid-template-areas:"controls links" "volume volume"/)
+  assert.match(source, /\.fluid-mini-controls\{display:flex;flex-direction:column/)
+  assert.match(source, /\.fluid-mini-controls \.fluid-player-controls\{width:100%;justify-content:space-around/)
+  assert.match(source, /\.fluid-mini-controls>\.fluid-volume[^}]*\{width:100%;min-width:0/)
   assert.doesNotMatch(source, /\.fluid-volume-compact \.fluid-range\{width:60px/)
 })

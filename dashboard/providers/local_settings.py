@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,34 @@ def set_music_dir(value: Any) -> str:
     data["music_dir"] = folder
     save(data)
     return folder
+
+
+def fallback_root_id() -> str:
+    """Stable approved local-library root used by the YouTube audio fallback."""
+    try:
+        value = str(load().get("fallback_root_id") or "").strip()
+        return str(uuid.UUID(value)) if value else ""
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def set_fallback_root_id(value: Any) -> str:
+    """Persist an approved scan-root identity, or clear a stale selection."""
+    if not isinstance(value, str):
+        raise TypeError("fallback_root_id must be a string")
+    root_id = value.strip()
+    if root_id:
+        try:
+            root_id = str(uuid.UUID(root_id))
+        except ValueError as exc:
+            raise ValueError("fallback_root_id must be a UUID") from exc
+    data = load()
+    if root_id:
+        data["fallback_root_id"] = root_id
+    else:
+        data.pop("fallback_root_id", None)
+    save(data)
+    return root_id
 
 
 def spotify_client_id() -> str:

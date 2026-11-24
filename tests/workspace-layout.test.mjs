@@ -47,7 +47,7 @@ test('content scrolls above ONE persistent bottom bar; the overview never duplic
 
 test('colors stay live to the Hermes theme; no private palette or fixed hex returns', () => {
   assert.match(css, /--fm-night:color-mix\(in srgb,var\(--ui-bg-primary\) 92%, transparent\)/)
-  assert.match(css, /--fm-panel:color-mix\(in srgb,var\(--ui-bg-secondary\) 80%,transparent\)/)
+  assert.match(css, /--fm-panel:var\(--ui-bg-secondary\)/, 'panels stay theme-owned but opaque enough to prevent pane bleed-through')
   assert.match(css, /--fm-soft:color-mix\(in srgb,var\(--ui-accent\) 9%,transparent\)/)
   assert.match(css, /--fm-coral:var\(--ui-accent\)/)
   assert.match(css, /--fm-violet:var\(--ui-accent\)/)

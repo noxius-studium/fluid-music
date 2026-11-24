@@ -47,7 +47,7 @@ function makeAudioHarness({ analysisFails = false, events = [] } = {}) {
   return { FakeAudio, FakeAudioContext, elements }
 }
 
-function makeController({ rest, preview, audio = makeAudioHarness(), timers = [], storage = new Map(), clock = { now: 0 } } = {}) {
+function makeController({ rest, preview, openExternal = async () => true, audio = makeAudioHarness(), timers = [], storage = new Map(), clock = { now: 0 } } = {}) {
   const disposers = []
   const original = { Audio: globalThis.Audio, AudioContext: globalThis.AudioContext, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, dateNow: Date.now }
   globalThis.Audio = audio.FakeAudio
@@ -60,7 +60,7 @@ function makeController({ rest, preview, audio = makeAudioHarness(), timers = []
   const ctx = {
     storage: { get: (key, fallback) => storage.has(key) ? storage.get(key) : fallback, set: (key, value) => storage.set(key, value) },
     rest: rest || (async path => path === '/config' ? { ok: true, data: { poll_interval_open: 8, poll_interval_closed: 20 } } : path === '/local/roots' ? { ok: true, data: { roots: [] } } : path.startsWith('/local/tracks') ? { ok: true, data: { items: [], total: 0 } } : { ok: true, data: { is_playing: false } }),
-    os: { pickOpenPath: async () => null },
+    os: { pickOpenPath: async () => null, openExternal },
     preview,
     onDispose: fn => disposers.push(fn)
   }
@@ -649,11 +649,13 @@ test('stale transitions cannot win and removing current stops its provider befor
 
 test('Spotify browser auth polls status, uses transient client ID, and transfers without playback', async () => {
   const calls = []
+  const opened = []
   let statusReads = 0
-  const harness = makeController({ rest: async (path, options = {}) => {
+  const harness = makeController({ openExternal: async url => { opened.push(url); return true }, rest: async (path, options = {}) => {
     calls.push({ path, options })
     if (path === '/config') return { ok: true, data: {} }
     if (path === '/spotify/auth/status') return { ok: true, data: { authenticated: ++statusReads > 1, client_id_configured: true } }
+    if (path === '/spotify/auth/start') return { ok: true, data: { authorization_url: 'https://accounts.spotify.com/authorize?client_id=client-id-only&state=fixture' } }
     if (path === '/devices') return { ok: true, data: { devices: [{ id: 'device-1', name: 'Desk', type: 'Computer', is_active: true }] } }
     if (path === '/player') return { ok: true, data: { is_playing: false } }
     return { ok: true, data: {} }
@@ -663,6 +665,7 @@ test('Spotify browser auth polls status, uses transient client ID, and transfers
     await harness.controller.startSpotifyAuth('client-id-only')
     const start = calls.find(call => call.path === '/spotify/auth/start')
     assert.deepEqual(start.options, { method: 'POST', body: { client_id: 'client-id-only' } })
+    assert.deepEqual(opened, ['https://accounts.spotify.com/authorize?client_id=client-id-only&state=fixture'])
     assert.ok(calls.filter(call => call.path === '/spotify/auth/status').length >= 2)
     assert.equal(harness.controller.spotifyAuth.get().authenticated, true)
     await harness.controller.transferSpotifyDevice('device-1')

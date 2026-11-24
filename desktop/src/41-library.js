@@ -58,7 +58,7 @@ function SpotifyConnection({ controller }) {
       h(
         'small',
         {},
-        'Redirect URI http://127.0.0.1:43827/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
+        'Redirect URI http://127.0.0.1:41337/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
       ),
     ),
     h(
@@ -592,7 +592,8 @@ function LocalPage({ controller }) {
   const files = useRef(null)
   const sessionTracks = useValue(controller.sessionTracks)
   const tracks = useValue(controller.localTracks),
-    roots = useValue(controller.localRoots)
+    roots = useValue(controller.localRoots),
+    fallbackRootId = useValue(controller.fallbackRootId)
   const [path, setPath] = useState(''),
     [query, setQuery] = useState(''),
     [busy, setBusy] = useState(false),
@@ -622,7 +623,7 @@ function LocalPage({ controller }) {
     h(PageHead, {
       kicker: 'On your device',
       title: 'Your own collection.',
-      subtitle: 'Approve a folder once. Your tracks and saved playlists stay linked across restarts.',
+      subtitle: 'Approve a folder once. FluidMusic scans it automatically, including subfolders, and keeps playlists linked across restarts.',
       actions: h(
         WorkspaceButton,
         { disabled: busy || !roots.length, onClick: () => void run(() => controller.rescanLocalLibrary()) },
@@ -705,7 +706,7 @@ function LocalPage({ controller }) {
           h(
             'p',
             { className: 'fluid-section-copy' },
-            'Audio stays on disk. Only folders you choose are scanned.',
+            'Audio stays on disk. Chosen folders and all their subfolders are scanned automatically. The selected folder also receives YouTube fallback audio.',
           ),
         ),
         h(
@@ -751,13 +752,18 @@ function LocalPage({ controller }) {
               h(
                 'span',
                 {},
-                `${root.track_count} tracks${root.missing_count ? ` · ${root.missing_count} missing` : ''}`,
+                `${root.track_count} tracks${root.missing_count ? ` · ${root.missing_count} missing` : ''}${root.id === fallbackRootId ? ' · YouTube fallback' : ''}`,
               ),
             ),
             h(
               WorkspaceButton,
               { disabled: busy, onClick: () => void run(() => controller.rescanLocalLibrary(root.id)) },
               'Rescan',
+            ),
+            h(
+              WorkspaceButton,
+              { disabled: busy || root.id === fallbackRootId, onClick: () => void run(() => controller.setFallbackRoot(root.id)) },
+              root.id === fallbackRootId ? 'Fallback folder' : 'Use for fallback',
             ),
             h(Action, {
               compact: true,

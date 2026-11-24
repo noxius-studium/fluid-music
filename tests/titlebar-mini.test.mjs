@@ -79,8 +79,9 @@ test('mini pane adapts art/video to pane size above anchored controls; video min
   assert.match(css, /@container mini \(max-height:170px\)\{[\s\S]*?\.fluid-mini-summary \.fluid-mini-art\{display:none\}\}/, 'very short pane drops decorative art before controls')
   assert.match(css, /\.fluid-mini-body\{overflow:auto\}/, 'body scrolls rather than silently clipping')
   assert.match(css, /\.fluid-mini-controls\{[^}]*border-top:1px solid var\(--fm-line\)/, 'controls stay the anchored bottom row')
-  assert.match(css, /@container mini \(max-width:360px\)\{\.fluid-mini-controls\{[^}]*grid-template-areas:"controls links" "volume volume"/, 'narrow pane reflows volume to its own full row')
-  assert.match(css, /\.fluid-mini-controls>\.fluid-volume\{grid-area:volume;width:100%;min-width:0\}/)
+  assert.match(css, /\.fluid-mini-controls\{[^}]*display:flex;flex-direction:column/, 'controls use three full-width rows at every pane width')
+  assert.match(css, /\.fluid-mini-controls>\.fluid-volume[^}]*\{width:100%;min-width:0/, 'volume owns a full-width row')
+  assert.match(css, /\.fluid-mini-controls \.fluid-player-controls>button\{width:32px;height:32px/, 'transport buttons keep usable hit targets')
   assert.match(miniBar, /h\(VolumeControl, \{ controller, compact: true \}\)/, 'same shared VolumeControl as the main bar')
   assert.match(miniBar, /kind: 'previous'/)
   assert.match(miniBar, /kind: 'next'/)
@@ -109,7 +110,7 @@ function atom(initial) {
 
 const MEDIA_COMMAND_ROUTES = new Set(['/play', '/pause', '/next', '/previous', '/transfer', '/queue', '/seek', '/volume', '/shuffle', '/repeat'])
 
-function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotifyClientId = '', failPause = false } = {}) {
+function makeHarness({ fallbackRootId = '', fallback = null, localTracks = [], spotifyClientId = '', failPause = false } = {}) {
   const restCalls = []
   const previewCalls = []
   const timers = []
@@ -141,7 +142,7 @@ function makeHarness({ musicDir = '', fallback = null, localTracks = [], spotify
     if (route === '/spotify/auth/status') return { ok: true, data: { auth: { logged_in: false }, setup: {}, flow: { state: 'idle', error: null } } }
     if (route === '/devices') return { ok: true, data: { devices: [] } }
     if (route === '/youtube/embed-host') return { ok: true, data: { url: 'http://127.0.0.1:55555/token/youtube/abcdefgh001' } }
-    if (route === '/settings') return { ok: true, data: { music_dir: String(options?.body?.music_dir ?? musicDir), spotify_client_id: String(options?.body?.spotify_client_id ?? spotifyClientId) } }
+    if (route === '/settings') return { ok: true, data: { fallback_root_id: String(options?.body?.fallback_root_id ?? fallbackRootId), spotify_client_id: String(options?.body?.spotify_client_id ?? spotifyClientId) } }
     if (route === '/youtube/fallback/audio') return { ok: true, data: fallback || { registered: false } }
     return { ok: true, data: {} }
   }
@@ -218,15 +219,40 @@ test('FM-26 hide-video state toggles, persists and never issues a transport comm
 })
 
 
-test('FM-27 music folder setting persists and is sent to the backend', async () => {
+test('mini player defaults to persistent controls-only mode and reveals details on demand', async () => {
+  const harness = makeHarness()
+  try {
+    const { controller } = harness
+    assert.equal(controller.miniDetailsVisible.get(), false, 'details are hidden by default')
+    assert.equal(controller.toggleMiniDetails(), true)
+    assert.equal(controller.miniDetailsVisible.get(), true)
+    assert.equal(harness.storage.get('miniDetailsVisible'), true, 'the user choice persists')
+    assert.equal(harness.mediaCalls().length, 0, 'showing details never changes playback')
+    assert.equal(controller.toggleMiniDetails(false), false)
+    assert.equal(controller.miniDetailsVisible.get(), false)
+    assert.match(mini, /hidden: !detailsVisible/, 'the optional body stays mounted but leaves view')
+    assert.match(miniBar, /detailsVisible \? 'Hide player' : 'Show player'/)
+    assert.match(miniBar, /item\?\.source === 'youtube'[\s\S]*?'Download'/, 'YouTube alone gets a Download button beside Show player')
+    assert.match(css, /\.fluid-mini-controls\{[^}]*display:flex;flex-direction:column/, 'transport, volume and links use three full-width rows')
+    assert.match(css, /\.fluid-mini-controls \.fluid-player-controls\{[^}]*width:100%[^}]*justify-content:space-around/, 'transport buttons are evenly spaced and usable')
+    assert.doesNotMatch(css, /grid-template-rows:minmax\(0,1fr\) 40px/, 'the footer is never clipped into a fixed 40px track')
+  } finally {
+    harness.dispose()
+    harness.restore()
+  }
+})
+
+
+test('FM-27 approved fallback root persists and is sent to the backend', async () => {
   const harness = makeHarness()
   try {
     const { controller } = harness
     await harness.flush()
-    assert.equal(await controller.setMusicDir('  /tmp/FM Music  '), '/tmp/FM Music')
-    assert.equal(controller.musicDir.get(), '/tmp/FM Music')
-    assert.equal(harness.storage.get('musicDir'), '/tmp/FM Music')
-    assert.ok(harness.restCalls.some(call => call.path === '/settings' && call.method === 'PUT' && call.options.body.music_dir === '/tmp/FM Music'))
+    const rootId = '09a59109-077d-5eac-a6f3-c5fea90d0677'
+    assert.equal(await controller.setFallbackRoot(rootId), rootId)
+    assert.equal(controller.fallbackRootId.get(), rootId)
+    assert.equal(harness.storage.get('fallbackRootId'), rootId)
+    assert.ok(harness.restCalls.some(call => call.path === '/settings' && call.method === 'PUT' && call.options.body.fallback_root_id === rootId))
     harness.dispose()
     await harness.flush()
   } finally { harness.restore() }
@@ -239,7 +265,7 @@ test('FM-27 audio fallback needs a folder and never fakes success', async () => 
     await harness.flush()
     controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
     const before = harness.restCalls.filter(call => call.path === '/youtube/fallback/audio').length
-    assert.equal(await controller.downloadYouTubeAudioFallback(), false)
+    assert.equal(await controller.downloadYouTubeAudio(), false)
     assert.match(controller.message.get(), /music folder/)
     assert.equal(harness.restCalls.filter(call => call.path === '/youtube/fallback/audio').length, before)
     assert.equal(harness.mediaCalls().length, 0, 'no transport command from a refused fallback')
@@ -251,12 +277,12 @@ test('FM-27 audio fallback needs a folder and never fakes success', async () => 
 test('FM-27 registered fallback goes Up Next without autoplay or a new engine', async () => {
   const fallback = { title: 'Fixture Track', video_id: 'abcdefgh001', file: 'x.m4a', track_id: 't1', registered: true }
   const tracks = [{ id: 't1', path: '/tmp/FM Music/x.m4a', title: 'Fixture Track', available: true, mime_type: 'audio/mp4' }]
-  const harness = makeHarness({ musicDir: '/tmp/FM Music', fallback, localTracks: tracks })
+  const harness = makeHarness({ fallbackRootId: '09a59109-077d-5eac-a6f3-c5fea90d0677', fallback, localTracks: tracks })
   try {
     const { controller } = harness
     await harness.flush()
     controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
-    assert.equal(await controller.downloadYouTubeAudioFallback(), true)
+    assert.equal(await controller.downloadYouTubeAudio(), true)
     assert.ok(harness.restCalls.some(call => call.path === '/youtube/fallback/audio' && call.method === 'POST'))
     assert.equal(controller.queue.get()[1]?.id, 'local:t1', 'indexed track added next')
     assert.match(controller.message.get(), /local library and Up Next/)
@@ -264,6 +290,27 @@ test('FM-27 registered fallback goes Up Next without autoplay or a new engine', 
     assert.equal(harness.mediaCalls().length, 0, 'one engine: no transport command from the fallback')
     harness.dispose()
     await harness.flush()
+  } finally { harness.restore() }
+})
+
+
+test('any YouTube result can be downloaded locally without selecting or playing it', async () => {
+  const fallback = { title: 'Saved song', video_id: 'abcdefgh001', file: 'saved.m4a', track_id: 't1', registered: true }
+  const tracks = [{ id: 't1', path: '/tmp/FM Music/saved.m4a', title: 'Saved song', available: true, mime_type: 'audio/mp4' }]
+  const harness = makeHarness({ fallbackRootId: '09a59109-077d-5eac-a6f3-c5fea90d0677', fallback, localTracks: tracks })
+  try {
+    const { controller } = harness
+    await harness.flush()
+    controller.add({ source: 'radio', id: 'live', title: 'Keep playing', streamUrl: 'https://radio.example/live' })
+    controller.status.set('playing')
+    const song = { source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Save me' }
+
+    assert.equal(await controller.downloadYouTubeAudio(song), true)
+    const request = harness.restCalls.find(call => call.path === '/youtube/fallback/audio')
+    assert.equal(request.options.body.url, song.url)
+    assert.equal(controller.current().source, 'radio')
+    assert.equal(controller.status.get(), 'playing')
+    assert.equal(harness.mediaCalls().length, 0)
   } finally { harness.restore() }
 })
 
@@ -285,7 +332,7 @@ test('FM-28 Spotify Client ID setting persists and is sent to the backend', asyn
 
 
 test('FM-29 auth, settings and URL round-trips never cut or retarget playback', async () => {
-  const harness = makeHarness({ musicDir: '/tmp/FM Music' })
+  const harness = makeHarness({ fallbackRootId: '09a59109-077d-5eac-a6f3-c5fea90d0677' })
   try {
     const { controller } = harness
     await harness.flush()
@@ -294,7 +341,7 @@ test('FM-29 auth, settings and URL round-trips never cut or retarget playback', 
     const indexBefore = controller.index.get()
     const engineBefore = controller.youtube.get().engine
     await controller.setSpotifyClientId('Client123')
-    await controller.setMusicDir('/tmp/Music')
+    await controller.setFallbackRoot('09a59109-077d-5eac-a6f3-c5fea90d0677')
     await controller.searchYouTube('a query')
     const embed = await controller.resolveYouTubeEmbedUrl({ source: 'youtube', id: 'youtube:abcdefgh001' })
     assert.match(embed, /^http:\/\/127\.0\.0\.1:/)
@@ -312,13 +359,13 @@ test('FM-29 auth, settings and URL round-trips never cut or retarget playback', 
 test('FM-29 background audio fallback never rewrites the shared transport status', async () => {
   const fallback = { title: 'Fixture', video_id: 'abcdefgh001', file: 'x.m4a', track_id: 't9', registered: true }
   const tracks = [{ id: 't9', path: '/tmp/FM Music/x.m4a', title: 'Fixture', available: true, mime_type: 'audio/mp4' }]
-  const harness = makeHarness({ musicDir: '/tmp/FM Music', fallback, localTracks: tracks })
+  const harness = makeHarness({ fallbackRootId: '09a59109-077d-5eac-a6f3-c5fea90d0677', fallback, localTracks: tracks })
   try {
     const { controller } = harness
     await harness.flush()
     controller.add({ source: 'youtube', id: 'youtube:abcdefgh001', url: 'https://www.youtube.com/watch?v=abcdefgh001', title: 'Vid' })
     controller.status.set('playing')
-    assert.equal(await controller.downloadYouTubeAudioFallback(), true)
+    assert.equal(await controller.downloadYouTubeAudio(), true)
     assert.equal(controller.status.get(), 'playing', 'a download is not a transport transition')
     assert.equal(harness.mediaCalls().length, 0)
     harness.dispose()

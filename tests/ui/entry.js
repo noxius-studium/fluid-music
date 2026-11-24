@@ -27,7 +27,14 @@ const ctx = {
     },
     executeJavaScriptIn: async (handle, code) => {
       calls.push({ preview: 'executeJavaScriptIn', handle, code })
-      return { ok: true, title: 'Fixture video', playing: code.includes("action = \"toggle\""), nextAvailable: false, currentTime: 12, duration: 180 }
+      return {
+        ok: true,
+        title: 'Fixture video',
+        playing: code.includes('action = "toggle"'),
+        nextAvailable: false,
+        currentTime: 12,
+        duration: 180,
+      }
     },
   },
   rest: async (path, options) => {
@@ -133,45 +140,76 @@ window.fixture = {
     disposers.forEach((fn) => fn())
   },
   seed: () => {
-    controller.add({ source: 'radio', title: 'Chillsynth', subtitle: 'Soft focus · warm synths', streamUrl: 'https://stream.nightride.fm/chillsynth.mp3' })
-    controller.add({ source: 'spotify', title: 'Night drive', subtitle: 'Fixture artist', uri: 'spotify:track:nightdrive', durationMs: 216000 })
+    controller.add({
+      source: 'radio',
+      title: 'Chillsynth',
+      subtitle: 'Soft focus · warm synths',
+      streamUrl: 'https://stream.nightride.fm/chillsynth.mp3',
+    })
+    controller.add({
+      source: 'spotify',
+      title: 'Night drive',
+      subtitle: 'Fixture artist',
+      uri: 'spotify:track:nightdrive',
+      durationMs: 216000,
+    })
     const legacy = {
-      id: 'playlist:legacy', name: 'After hours', description: 'Preserved mixed collection.', createdAt: '', updatedAt: '', legacy: true, items: [
-      {
-        source: 'spotify',
-        title: 'Night drive',
-        subtitle: 'Fixture artist',
-        uri: 'spotify:track:nightdrive',
-        durationMs: 216000,
-      },
-      {
-        source: 'radio',
-        title: 'Chillsynth',
-        subtitle: 'Soft focus · warm synths',
-        streamUrl: 'https://stream.nightride.fm/chillsynth.mp3',
-      },
-      {
-        source: 'local',
-        title: 'A missing local track',
-        localTrackId: 'fixture-missing',
-        unavailable: true,
-      },
-      {
-        source: 'spotify',
-        title:
-          'Long title to verify ellipsis does not cover controls or push the layout out of the pane',
-        subtitle: 'Fixture artist',
-        uri: 'spotify:track:longtitle',
-        durationMs: 194000,
-      },
-      ]
+      id: 'playlist:legacy',
+      name: 'After hours',
+      description: 'Preserved mixed collection.',
+      createdAt: '',
+      updatedAt: '',
+      legacy: true,
+      items: [
+        {
+          source: 'spotify',
+          title: 'Night drive',
+          subtitle: 'Fixture artist',
+          uri: 'spotify:track:nightdrive',
+          durationMs: 216000,
+        },
+        {
+          source: 'radio',
+          title: 'Chillsynth',
+          subtitle: 'Soft focus · warm synths',
+          streamUrl: 'https://stream.nightride.fm/chillsynth.mp3',
+        },
+        {
+          source: 'local',
+          title: 'A missing local track',
+          localTrackId: 'fixture-missing',
+          unavailable: true,
+        },
+        {
+          source: 'spotify',
+          title:
+            'Long title to verify ellipsis does not cover controls or push the layout out of the pane',
+          subtitle: 'Fixture artist',
+          uri: 'spotify:track:longtitle',
+          durationMs: 194000,
+        },
+      ],
     }
     const local = controller.createPlaylist('Local focus', 'Indexed tracks only.')
     controller.playlists.set([legacy, local])
     controller.selectPlaylist(legacy.id)
     controller.setWorkspaceView('browse')
   },
-  changeChatFocus: (id) => { window.fixtureFocusedSession = id },
+  selectYouTube: () =>
+    controller.add(
+      {
+        source: 'youtube',
+        id: 'youtube:abcdefgh001',
+        url: 'https://www.youtube.com/watch?v=abcdefgh001',
+        title: 'YouTube sample',
+        subtitle: 'Sample channel',
+      },
+      true,
+      'search',
+    ),
+  changeChatFocus: (id) => {
+    window.fixtureFocusedSession = id
+  },
   playTone: async () => {
     const seconds = 45,
       sampleRate = 16000,

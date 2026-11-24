@@ -95,7 +95,7 @@ New collections accept only local catalog references. Existing v3 mixed collecti
 
 ## Spotify
 
-FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. No Hermes-core or sibling-plugin Spotify implementation is imported, and OAuth tokens never reach the renderer, logs, or exports. Older credential stores are left untouched until a separately approved migration/login. The backend provides:
+FluidMusic owns the Spotify integration: `dashboard/providers/spotify.py` implements official OAuth Authorization Code + PKCE with validated state/redirect/account binding and single-flight refresh, and `dashboard/providers/token_store.py` keeps tokens in a protected profile-local store separate from the public SQLite library. It imports no Hermes-core or sibling-plugin Spotify implementation, and OAuth tokens never reach the renderer, logs, or exports. The backend provides:
 
 - PKCE status/start routes;
 - `/me/player/devices` discovery and active-device fallback;
@@ -150,7 +150,7 @@ Spotify API results are normalized into track rows and album/artist/playlist car
 
 Owner question: "can everything run inside the DESKTOP plugin?" Honest answer: NOT entirely, and it should not. The desktop renderer already owns every part of playback continuity — one controller, one queue/index, one active engine, the audio element and the integrated YouTube frame, generation-bound commands, and storage-backed state. Those survive provider/auth latency because they never await a network round-trip mid-transition.
 
-What genuinely needs the backend (the Hermes plugin API served through the gateway): the OAuth PKCE callback listener on `127.0.0.1:43827` (it cannot live in a renderer that has no inbound socket), protected token storage, yt-dlp search/resolve/audio download, profile-local SQLite history/library, and Radio Browser lookup. Moving those into the renderer would mean exposing a listener from untrusted UI code and duplicating persistence — worse security and design, not better. So full desktop-only operation is declined on those grounds; the owner's actual pain (music cutting out during auth/URL fetches) is addressed directly instead:
+What genuinely needs the backend (the Hermes plugin API served through the gateway): the OAuth PKCE callback listener on `127.0.0.1:41337` (it cannot live in a renderer that has no inbound socket), protected token storage, yt-dlp search/resolve/audio download, profile-local SQLite history/library, and Radio Browser lookup. Moving those into the renderer would mean exposing a listener from untrusted UI code and duplicating persistence — worse security and design, not better. So full desktop-only operation is declined on those grounds; the owner's actual pain (music cutting out during auth/URL fetches) is addressed directly instead:
 
 - Auth/URL/settings fetches (`/spotify/auth/*`, `/youtube/search`, `/youtube/resolve`, `/youtube/embed-host`, `/settings`) are side-requests: they issue no play/pause/stop/transfer command, do not change status/queue/index/engine, and never remount the current frame. Fixtures assert this while state is `playing`.
 - A background audio fallback reports progress through `message` only — it is never a transport transition and never rewrites the shared status.

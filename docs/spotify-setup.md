@@ -1,14 +1,15 @@
 # Spotify setup (FluidMusic)
 
 FluidMusic owns its Spotify connection. Setup is one-time, uses official
-Authorization Code + PKCE, and needs no client secret. Premium is required for
-remote playback control through Spotify Connect.
+Authorization Code + PKCE, and needs no client secret or separate Hermes
+Spotify plugin. Premium is required for remote playback control through
+Spotify Connect.
 
 1. Open https://developer.spotify.com/dashboard and sign in with the account
    you want FluidMusic to control.
 2. Create an app. Name and description can be anything; the app is yours.
 3. Under **Redirect URIs**, add exactly:
-   `http://127.0.0.1:43827/spotify/callback`
+   `http://127.0.0.1:41337/spotify/callback`
    (loopback only — no public server, no wildcard, no trailing path).
 4. Copy the app's **Client ID** (this is public by design for PKCE; do not
    paste a client secret anywhere in FluidMusic).
@@ -23,14 +24,19 @@ remote playback control through Spotify Connect.
 ## Storage and safety
 
 - The Client ID is a non-secret, profile-local preference. Tokens live in a
-  separate 0600 credential file under `plugin-data/fluid-music`, never in
+  separate protected credential file under `plugin-data/fluid-music`, never in
   SQLite history, renderer storage, logs or exports.
-- Logout/revoke clears local tokens; old credential stores are never copied or
-  migrated without an explicit fresh sign-in.
+- If the active Hermes profile already defines `HERMES_SPOTIFY_CLIENT_ID`,
+  FluidMusic reuses that public app ID and **Connect Spotify** works without
+  pasting it again. An existing `hermes spotify` login does not authenticate
+  FluidMusic: the two integrations keep separate OAuth grants and refresh-token
+  ownership, so the one-time FluidMusic consent still has to be approved.
+- FluidMusic's disconnect action clears its own local tokens without touching
+  other plugins or provider integrations.
 - The setup value is validated (letters, digits, `_`, `-`, max 128 chars). A
   missing or invalid ID shows an honest setup state, never a fake Connected
   badge. If the browser callback cannot reach the loopback port, confirm no
-  other app owns 43827 and retry.
+  other app owns 41337 and retry.
 - Playback is owned by FluidMusic's single coordinator. OAuth and URL fetches
   do not stop the current engine (see the desktop-only assessment in
   FM-29 / `docs/limitations.md`).

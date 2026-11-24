@@ -33,8 +33,8 @@ function createController(ctx, hostCapabilities = {}) {
   const bookmarks = atom([])
   const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
   const historyRetention = atom(0)
-  // Owner-approved audio fallback folder (non-secret, profile-local).
-  const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  // Stable identity of the approved local scan root used for fallback audio.
+  const fallbackRootId = atom(safeText(ctx.storage.get('fallbackRootId', '')))
   const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
@@ -61,6 +61,9 @@ function createController(ctx, hostCapabilities = {}) {
   const spotifyLocalCapability = atom({ state: 'unverified', reasons: [], localAudio: null })
   const titlebarOpen = atom(false)
   const youtube = atom({ status: 'closed', title: 'YouTube', playing: false, nextAvailable: false, error: '' })
+  // The durable everyday player is controls-only. Details are opt-in and the
+  // user's choice survives reloads without issuing a transport command.
+  const miniDetailsVisible = atom(Boolean(ctx.storage.get('miniDetailsVisible', false)))
   // Owner-approved hide-video toggle: the frame stays MOUNTED so the single
   // active engine keeps decoding audio; only its visibility is toggled.
   const youtubeVideoHidden = atom(Boolean(ctx.storage.get('youtubeVideoHidden', false)))
@@ -591,9 +594,23 @@ function createController(ctx, hostCapabilities = {}) {
   }
   async function startSpotifyAuth(clientId = '') {
     clearAuthPoll(); authAttempts = 0
-    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Waiting for browser approval…' })
+    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Opening Spotify authorization…' })
     const value = safeText(clientId)
-    await spotifyRequest('/spotify/auth/start', { method: 'POST', body: value ? { client_id: value } : {} })
+    const data = await spotifyRequest('/spotify/auth/start', { method: 'POST', body: value ? { client_id: value } : {} })
+    const rawUrl = safeText(data?.authorization_url)
+    if (rawUrl) {
+      let authorizationUrl
+      try {
+        const parsed = new URL(rawUrl)
+        if (parsed.protocol !== 'https:' || parsed.hostname !== 'accounts.spotify.com' || parsed.pathname !== '/authorize' || parsed.username || parsed.password) throw new Error('invalid')
+        authorizationUrl = parsed.toString()
+      } catch {
+        throw new Error('Spotify returned an invalid authorization page. Retry after updating FluidMusic.')
+      }
+      const opened = await ctx.os?.openExternal?.(authorizationUrl)
+      if (!opened) throw new Error('Hermes could not open Spotify in your default browser. Retry from the Desktop app.')
+    }
+    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Waiting for browser approval…' })
     return pollSpotifyAuth()
   }
   async function transferSpotifyDevice(deviceId) {
@@ -631,6 +648,7 @@ function createController(ctx, hostCapabilities = {}) {
     const tracks = (Array.isArray(tracksData?.items) ? tracksData.items : []).map(localTrackItem).filter(Boolean)
     localRoots.set(roots)
     localTracks.set(tracks)
+    if (!fallbackRootId.get() && roots.length === 1) await setFallbackRoot(roots[0].id)
     const sessionTracks = [...localRegistry.values()].filter(item => item.objectUrl?.startsWith('blob:'))
     localRegistry.clear()
     sessionTracks.forEach(item => localRegistry.set(item.id, item))
@@ -671,13 +689,22 @@ function createController(ctx, hostCapabilities = {}) {
   async function addLocalRoot(path) {
     const folder = safeText(path)
     if (!folder) throw new Error('Choose a music folder first.')
-    await request('/local/roots', { method: 'POST', body: { path: folder }, timeoutMs: 120000 })
+    const result = await request('/local/roots', { method: 'POST', body: { path: folder }, timeoutMs: 120000 })
+    const root = result?.root
+    if (root?.id) await setFallbackRoot(root.id)
     return refreshLocalLibrary()
   }
 
   async function chooseLocalRoot() {
+    if (typeof ctx.os?.pickOpenPath !== 'function') {
+      message.set('The native folder picker is unavailable here. Enter an absolute backend folder path under Local music instead.')
+      return null
+    }
     const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose a music folder' })
-    if (!path) return null
+    if (!path) {
+      message.set('No folder selected. In browser or remote views, enter an absolute backend folder path under Local music.')
+      return null
+    }
     return addLocalRoot(path)
   }
 
@@ -690,6 +717,7 @@ function createController(ctx, hostCapabilities = {}) {
     const id = safeText(rootId)
     if (!id) return false
     await request(`/local/roots/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (fallbackRootId.get() === id) await setFallbackRoot('')
     await refreshLocalLibrary()
     return true
   }
@@ -1439,26 +1467,32 @@ function createController(ctx, hostCapabilities = {}) {
     return next
   }
 
+  function toggleMiniDetails(value) {
+    const next = typeof value === 'boolean' ? value : !miniDetailsVisible.get()
+    miniDetailsVisible.set(next)
+    ctx.storage.set('miniDetailsVisible', next)
+    return next
+  }
+
   async function loadSettings() {
     try {
       const data = await request('/settings')
-      const folder = safeText(data?.music_dir)
-      musicDir.set(folder)
-      ctx.storage.set('musicDir', folder)
+      const rootId = safeText(data?.fallback_root_id)
+      fallbackRootId.set(rootId)
+      ctx.storage.set('fallbackRootId', rootId)
       const clientId = safeText(data?.spotify_client_id)
       spotifyClientId.set(clientId)
       ctx.storage.set('spotifyClientId', clientId)
     } catch { /* Cached folder stays usable when settings cannot be read. */ }
   }
 
-  async function setMusicDir(value) {
-    const folder = safeText(value)
-    if (!folder) throw new Error('Choose a music folder first.')
-    const data = await request('/settings', { method: 'PUT', body: { music_dir: folder } })
-    const saved = safeText(data?.music_dir, folder)
-    musicDir.set(saved)
-    ctx.storage.set('musicDir', saved)
-    message.set(`Audio fallback folder saved: ${saved}`)
+  async function setFallbackRoot(value) {
+    const id = safeText(value)
+    const data = await request('/settings', { method: 'PUT', body: { fallback_root_id: id } })
+    const saved = safeText(data?.fallback_root_id)
+    fallbackRootId.set(saved)
+    ctx.storage.set('fallbackRootId', saved)
+    if (saved) message.set('Local folder selected for recursive scanning and YouTube audio fallback.')
     return saved
   }
 
@@ -1473,20 +1507,15 @@ function createController(ctx, hostCapabilities = {}) {
     return saved
   }
 
-  async function chooseMusicDir() {
-    const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose the audio fallback folder' })
-    return path ? setMusicDir(path) : null
-  }
 
-  // Real fallback: download audio-only m4a to the configured folder, register
-  // it in the local library, and place it Up Next — never silently start a new
-  // engine or fake provider playback.
-  async function downloadYouTubeAudioFallback() {
-    const item = current()
+  // User-requested local save (also used as the playback fallback): download
+  // audio-only m4a into the approved root, index it, and place it Up Next.
+  // It never selects the source item or starts/stops any playback engine.
+  async function downloadYouTubeAudio(item = current()) {
     if (!item || item.source !== 'youtube') return false
     const url = safeText(item.url)
     if (!url) { message.set('This item has no source URL to download from.'); return false }
-    if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    if (!fallbackRootId.get()) { message.set('Choose a local music folder before using the audio fallback.'); return false }
     // A background download is NOT a transport transition: never rewrite the
     // shared status. Message-only progress keeps whatever is playing intact.
     message.set('Downloading audio to your music folder…')
@@ -2137,15 +2166,15 @@ function createController(ctx, hostCapabilities = {}) {
   return {
     workspaceView, setWorkspaceView, selectedPlaylist, selectPlaylist, undoState, undoPlaylistEdit, toggleMute, titlebarOpen,
     playlistItems, enqueuePlaylist, saveQueueAsPlaylist, addManyToPlaylist, removePlaylistItems, deduplicatePlaylist, exportPlaylists, importPlaylists,
-    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, youtubeVideoHidden, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
+    queue, index, favorites, volume, status, message, logs, spotify, spotifyAuth, spotifyDevices, progress, playlists, localTracks, localRoots, history, historyTotal, shuffle, repeat, spotifyAutoplay, youtube, youtubeVideoHidden, miniDetailsVisible, spotifyFailure, spotifyLocalCapability, assessSpotifyLocalPlayback,
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, fallbackRootId, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setFallbackRoot, setSpotifyClientId, downloadYouTubeAudio,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
-    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, youtubeWatchCapability: () => watchCapability,
+    toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, toggleMiniDetails, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
     searchSpotify, searchSpotifyCatalog, loadSpotifyPlaylists, loadSpotifyPlaylist, playSpotifyPlaylistTrack, saveToPlaylist,
     createPlaylist, updatePlaylist, deletePlaylist, duplicatePlaylist, addToPlaylist, removeFromPlaylist, moveInPlaylist, playPlaylist,

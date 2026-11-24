@@ -308,7 +308,7 @@ def test_spotify_auth_status_whitelists_hermes_metadata_and_flow(api: Any, monke
         "logged_in": True,
         "auth_type": "oauth_pkce",
         "client_id": "public-client-id",
-        "redirect_uri": "http://127.0.0.1:43827/spotify/callback",
+        "redirect_uri": "http://127.0.0.1:41337/spotify/callback",
         "scope": "user-read-playback-state",
         "expires_at": "2026-09-21T12:08:33+00:00",
         "api_base_url": "https://api.spotify.com/v1",
@@ -326,7 +326,7 @@ def test_spotify_auth_status_whitelists_hermes_metadata_and_flow(api: Any, monke
                 "logged_in": True,
                 "auth_type": "oauth_pkce",
                 "client_id": "public-client-id",
-                "redirect_uri": "http://127.0.0.1:43827/spotify/callback",
+                "redirect_uri": "http://127.0.0.1:41337/spotify/callback",
                 "scope": "user-read-playback-state",
                 "expires_at": "2026-09-21T12:08:33+00:00",
                 "api_base_url": "https://api.spotify.com/v1",
@@ -334,7 +334,7 @@ def test_spotify_auth_status_whitelists_hermes_metadata_and_flow(api: Any, monke
             },
             "setup": {
                 "client_id_required": False,
-                "redirect_uri": "http://127.0.0.1:43827/spotify/callback",
+                "redirect_uri": "http://127.0.0.1:41337/spotify/callback",
                 "developer_dashboard_url": "https://developer.spotify.com/dashboard",
             },
             "flow": {"state": "idle", "error": None},
@@ -343,30 +343,38 @@ def test_spotify_auth_status_whitelists_hermes_metadata_and_flow(api: Any, monke
     assert "must-not-reach-renderer" not in response.text
 
 
-def test_spotify_auth_start_runs_one_daemon_hermes_worker(api: Any, monkeypatch: pytest.MonkeyPatch, deferred_thread: type[DeferredThread]):
-    received: list[Any] = []
-    monkeypatch.setattr(api, "login_spotify_command", received.append)
+def test_spotify_auth_start_returns_the_prepared_url_for_the_native_browser(
+    api: Any, monkeypatch: pytest.MonkeyPatch, deferred_thread: type[DeferredThread],
+):
+    session = {
+        "authorization_url": "https://accounts.spotify.com/authorize?client_id=Abc_123-client&state=fixture",
+        "client_id": "Abc_123-client",
+    }
+    completed: list[Any] = []
+    monkeypatch.setattr(api, "prepare_spotify_login", lambda client_id: session if client_id == "Abc_123-client" else None, raising=False)
+    monkeypatch.setattr(api, "complete_spotify_login", completed.append, raising=False)
     monkeypatch.setattr(api, "_configured_spotify_client_id", lambda: "")
     api._client = object()
 
     response = run(request(app_for(api), "POST", "/spotify/auth/start", json={"client_id": "Abc_123-client"}))
 
-    assert response.json() == {"ok": True, "data": {"flow": {"state": "in_progress", "error": None}}}
+    assert response.json() == {
+        "ok": True,
+        "data": {
+            "flow": {"state": "in_progress", "error": None},
+            "authorization_url": session["authorization_url"],
+        },
+    }
     assert len(deferred_thread.instances) == 1
     worker = deferred_thread.instances[0]
     assert worker.started is True
     assert worker.daemon is True
     assert worker.name == "fluid-music-spotify-auth"
+    assert worker.args == (session,)
 
     worker.complete()
 
-    assert vars(received[0]) == {
-        "client_id": "Abc_123-client",
-        "redirect_uri": None,
-        "scope": None,
-        "no_browser": False,
-        "timeout": 180,
-    }
+    assert completed == [session]
     assert api._client is None
     assert run(request(app_for(api), "GET", "/spotify/auth/status")).json()["data"]["flow"] == {
         "state": "succeeded",
@@ -374,7 +382,10 @@ def test_spotify_auth_start_runs_one_daemon_hermes_worker(api: Any, monkeypatch:
     }
 
 
-def test_spotify_auth_start_rejects_duplicate_in_progress_flow(api: Any, deferred_thread: type[DeferredThread]):
+def test_spotify_auth_start_rejects_duplicate_in_progress_flow(api: Any, monkeypatch: pytest.MonkeyPatch, deferred_thread: type[DeferredThread]):
+    session = {"authorization_url": "https://accounts.spotify.com/authorize?client_id=configured-client-id&state=fixture"}
+    monkeypatch.setattr(api, "prepare_spotify_login", lambda _client_id: session)
+    monkeypatch.setattr(api, "complete_spotify_login", lambda _session: None)
     app = app_for(api)
 
     assert run(request(app, "POST", "/spotify/auth/start")).json()["ok"] is True
@@ -382,7 +393,7 @@ def test_spotify_auth_start_rejects_duplicate_in_progress_flow(api: Any, deferre
 
     assert duplicate.json() == {"ok": False, "error": "Spotify authentication is already in progress"}
     assert len(deferred_thread.instances) == 1
-    assert deferred_thread.instances[0].args == (None,)
+    assert deferred_thread.instances[0].args == (session,)
 
 
 def test_spotify_auth_status_guides_one_time_public_client_id_setup(api: Any, monkeypatch: pytest.MonkeyPatch, deferred_thread: type[DeferredThread]):
@@ -421,7 +432,9 @@ def test_spotify_auth_worker_records_only_safe_completion_error(api: Any, monkey
     def fail_auth(_args: Any) -> None:
         raise RuntimeError("access_token=secret https://accounts.spotify.com/authorize?client_id=client-id")
 
-    monkeypatch.setattr(api, "login_spotify_command", fail_auth)
+    session = {"authorization_url": "https://accounts.spotify.com/authorize?client_id=configured-client-id&state=fixture"}
+    monkeypatch.setattr(api, "prepare_spotify_login", lambda _client_id: session)
+    monkeypatch.setattr(api, "complete_spotify_login", fail_auth)
     api._client = object()
 
     assert run(request(app_for(api), "POST", "/spotify/auth/start")).json()["ok"] is True

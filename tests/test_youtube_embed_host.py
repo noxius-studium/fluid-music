@@ -104,6 +104,9 @@ def test_embed_relay_is_origin_bound_and_schema_validated(embed_api: Any):
     assert "fluid-music" in relay
     assert "'https://www.youtube-nocookie.com'" in relay
     assert "JSON.parse" in relay
+    assert "playerLoaded" in relay
+    assert "frame.addEventListener('load'" in relay
+    assert "if(!playerLoaded)return" in relay, "commands wait until the cross-origin player has navigated"
 
 
 def test_embed_host_route_validates_video_id_before_starting_a_server(embed_api: Any):
