@@ -5201,6 +5201,19 @@ function EmbeddedYouTubeFrame({ controller, item, title, frameRef }) {
 
 function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
   const detailsVisible = useValue(controller.miniDetailsVisible)
+  const queue = useValue(controller.queue)
+  const at = useValue(controller.index)
+  const item = queue[at]
+  const [downloading, setDownloading] = useState(false)
+  const download = async () => {
+    if (downloading || item?.source !== 'youtube') return
+    setDownloading(true)
+    try {
+      await controller.downloadYouTubeAudio(item)
+    } finally {
+      setDownloading(false)
+    }
+  }
   // One shared control vocabulary for every provider: the same Transport
   // actions and the same VolumeControl as the main bottom anchor.
   return h('footer', { className: 'fluid-mini-controls', 'aria-label': 'Playback controls' },
@@ -5217,6 +5230,11 @@ function MiniControlBar({ controller, playing, onToggle, disabled = false }) {
         'aria-pressed': detailsVisible,
         'aria-label': detailsVisible ? 'Hide player details' : 'Show player details',
       }, detailsVisible ? 'Hide player' : 'Show player'),
+      item?.source === 'youtube' && h(WorkspaceButton, {
+        disabled: downloading,
+        onClick: () => void download(),
+        'aria-label': downloading ? `Downloading ${item.title}` : `Download ${item.title} locally`,
+      }, downloading ? 'Saving…' : 'Download'),
       h(WorkspaceButton, { onClick: () => host.navigate(ROUTE) }, 'Media'),
     ),
   )

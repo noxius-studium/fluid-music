@@ -232,6 +232,7 @@ test('mini player defaults to persistent controls-only mode and reveals details 
     assert.equal(controller.miniDetailsVisible.get(), false)
     assert.match(mini, /hidden: !detailsVisible/, 'the optional body stays mounted but leaves view')
     assert.match(miniBar, /detailsVisible \? 'Hide player' : 'Show player'/)
+    assert.match(miniBar, /item\?\.source === 'youtube'[\s\S]*?'Download'/, 'YouTube alone gets a Download button beside Show player')
     assert.match(css, /\.fluid-mini-controls\{[^}]*display:flex;flex-direction:column/, 'transport, volume and links use three full-width rows')
     assert.match(css, /\.fluid-mini-controls \.fluid-player-controls\{[^}]*width:100%[^}]*justify-content:space-around/, 'transport buttons are evenly spaced and usable')
     assert.doesNotMatch(css, /grid-template-rows:minmax\(0,1fr\) 40px/, 'the footer is never clipped into a fixed 40px track')

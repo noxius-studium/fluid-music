@@ -171,6 +171,13 @@ window.fixture = {
     controller.selectPlaylist(legacy.id)
     controller.setWorkspaceView('browse')
   },
+  selectYouTube: () => controller.add({
+    source: 'youtube',
+    id: 'youtube:abcdefgh001',
+    url: 'https://www.youtube.com/watch?v=abcdefgh001',
+    title: 'Fixture YouTube song',
+    subtitle: 'Fixture channel',
+  }, true, 'search'),
   changeChatFocus: (id) => { window.fixtureFocusedSession = id },
   playTone: async () => {
     const seconds = 45,
