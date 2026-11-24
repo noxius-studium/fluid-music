@@ -90,7 +90,7 @@ def test_standalone_runtime_reaches_settings_and_audio_fallback(
 
     assert settings == {
         "ok": True,
-        "data": {"music_dir": "", "spotify_client_id": ""},
+        "data": {"music_dir": "", "fallback_root_id": "", "spotify_client_id": ""},
     }
     assert spotify_status["ok"] is True
     assert spotify_status["data"]["auth"] == {"logged_in": False}
@@ -100,7 +100,7 @@ def test_standalone_runtime_reaches_settings_and_audio_fallback(
     }
     assert fallback == {
         "ok": False,
-        "error": "Set a music folder in Settings before using the audio fallback.",
+        "error": "Choose a YouTube fallback folder under Library › Local first.",
     }
 
 
@@ -114,14 +114,14 @@ def test_spotify_provider_is_self_contained(
     (foreign / "__init__.py").write_text("raise RuntimeError('must not import')\n", encoding="utf-8")
     api = load_standalone(monkeypatch, tmp_path)
 
-    client, _error, status, _login, client_id, redirect_uri, dashboard = (
+    client, _error, status, _login, _prepare, _complete, _cancel, client_id, redirect_uri, dashboard = (
         api._load_spotify_integration()
     )
 
     assert client.__module__.startswith("hermes_fluid_music_providers.")
     assert status() == {"logged_in": False}
     assert client_id() is None
-    assert redirect_uri() == "http://127.0.0.1:43827/spotify/callback"
+    assert redirect_uri() == "http://127.0.0.1:41337/spotify/callback"
     assert dashboard == "https://developer.spotify.com/dashboard"
 
 
@@ -137,6 +137,9 @@ def test_standalone_audio_fallback_reaches_the_real_factory_path(
     monkeypatch.setattr(fallback_module, "_youtube_dl_factory", lambda: FakeYoutubeDL)
 
     class Library:
+        def list_roots(self) -> list[dict[str, str]]:
+            return [{"id": "09a59109-077d-5eac-a6f3-c5fea90d0677", "path": str(music)}]
+
         def add_root(self, _folder: str) -> None:
             return None
 

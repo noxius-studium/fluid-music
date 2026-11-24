@@ -30,7 +30,7 @@ test('Spotify connection card always shows and saves the client id', async () =>
   assert.match(card, /'aria-label': 'Spotify Client ID'/)
   assert.match(card, /'Save Client ID'/)
   assert.match(card, /controller\.setSpotifyClientId\(clientId\)/)
-  assert.match(card, /http:\/\/127\.0\.0\.1:43827\/spotify\/callback/)
+  assert.match(card, /http:\/\/127\.0\.0\.1:41337\/spotify\/callback/)
   assert.match(card, /Premium required for playback control/)
   assert.doesNotMatch(card, /auth\.needsClientId &&[\s\S]{0,80}Spotify Client ID/, 'field is not hidden behind an error state')
   assert.match(card, /startSpotifyAuth\(clientId\)/)
@@ -39,7 +39,7 @@ test('Spotify connection card always shows and saves the client id', async () =>
 
 test('setup guide is lean, authoritative and secret-free', async () => {
   assert.ok(guide.length < 3500, 'guide stays lean')
-  for (const text of ['developer.spotify.com/dashboard', 'http://127.0.0.1:43827/spotify/callback', 'Client ID', 'PKCE', 'Premium', 'no client secret']) {
+  for (const text of ['developer.spotify.com/dashboard', 'http://127.0.0.1:41337/spotify/callback', 'Client ID', 'PKCE', 'Premium', 'no client secret']) {
     assert.ok(guide.includes(text), `guide mentions ${text}`)
   }
   assert.doesNotMatch(guide, /client[ _-]?secret\s*[:=]\s*\S+/i)

@@ -22,6 +22,7 @@ import importlib.util
 import ipaddress
 import logging
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -30,7 +31,6 @@ import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -86,6 +86,9 @@ def _load_spotify_integration():
         spotify.SpotifyError,
         spotify.auth_status,
         spotify.login,
+        spotify.prepare_login,
+        spotify.complete_login,
+        spotify.cancel_login,
         spotify.configured_client_id,
         spotify.redirect_uri,
         spotify.DASHBOARD_URL,
@@ -99,6 +102,9 @@ SpotifyClient: Any = None
 SpotifyError: Any = None
 get_spotify_auth_status: Any = None
 login_spotify_command: Any = None
+prepare_spotify_login: Any = None
+complete_spotify_login: Any = None
+cancel_spotify_login: Any = None
 _configured_spotify_client_id: Any = None
 _spotify_redirect_uri: Any = None
 SPOTIFY_DASHBOARD_URL: Any = None
@@ -108,6 +114,9 @@ _SPOTIFY_INTEGRATION_NAMES = (
     "SpotifyError",
     "get_spotify_auth_status",
     "login_spotify_command",
+    "prepare_spotify_login",
+    "complete_spotify_login",
+    "cancel_spotify_login",
     "_configured_spotify_client_id",
     "_spotify_redirect_uri",
     "SPOTIFY_DASHBOARD_URL",
@@ -351,18 +360,12 @@ def _spotify_setup_data(auth: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _run_spotify_auth(client_id: str | None) -> None:
+def _run_spotify_auth(session: dict[str, Any]) -> None:
     """Run Hermes' PKCE flow in a daemon so API requests never wait for callback."""
     global _client
     try:
         _resolve_spotify_integration()
-        login_spotify_command(SimpleNamespace(
-            client_id=client_id,
-            redirect_uri=None,
-            scope=None,
-            no_browser=False,
-            timeout=180,
-        ))
+        complete_spotify_login(session)
     except SpotifyIntegrationUnavailable:
         with _spotify_auth_lock:
             _spotify_auth_flow.update(state="failed", error=_SPOTIFY_UNAVAILABLE_ERROR)
@@ -543,7 +546,11 @@ async def get_settings() -> dict[str, Any]:
     """Non-secret, profile-local preferences. Never returns credentials/tokens."""
     local_settings = _load_dashboard_module("providers.local_settings")
 
-    return {"ok": True, "data": {"music_dir": local_settings.music_dir(), "spotify_client_id": local_settings.spotify_client_id()}}
+    return {"ok": True, "data": {
+        "music_dir": local_settings.music_dir(),
+        "fallback_root_id": local_settings.fallback_root_id(),
+        "spotify_client_id": local_settings.spotify_client_id(),
+    }}
 
 
 @router.put("/settings")
@@ -555,6 +562,12 @@ async def put_settings(request: Request) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if "music_dir" in payload:
             data["music_dir"] = local_settings.set_music_dir(payload.get("music_dir"))
+        if "fallback_root_id" in payload:
+            raw_root_id = str(payload.get("fallback_root_id") or "").strip()
+            root_id = str(uuid.UUID(raw_root_id)) if raw_root_id else ""
+            if root_id:
+                _local_library().get_root(root_id)
+            data["fallback_root_id"] = local_settings.set_fallback_root_id(root_id)
         if "spotify_client_id" in payload:
             data["spotify_client_id"] = local_settings.set_spotify_client_id(payload.get("spotify_client_id"))
         return {"ok": True, "data": data}
@@ -566,18 +579,34 @@ async def put_settings(request: Request) -> dict[str, Any]:
 
 @router.post("/youtube/fallback/audio")
 async def youtube_audio_fallback(request: Request) -> dict[str, Any]:
-    """Real fallback: audio-only yt-dlp download into the configured folder."""
+    """Download audio into an approved, recursively scanned local-library root."""
     local_settings = _load_dashboard_module("providers.local_settings")
     download_audio = _load_dashboard_module("youtube_audio_fallback").download_audio
 
     try:
         payload = await _payload(request)
         target = _youtube_watch_url(payload.get("url"))
-        folder = local_settings.music_dir()
-        if not folder:
-            return _error("Set a music folder in Settings before using the audio fallback.")
+        library = _local_library()
+        roots = library.list_roots()
+        selected_id = local_settings.fallback_root_id()
+        selected = next((root for root in roots if root.get("id") == selected_id), None)
+        if selected is None:
+            legacy_folder = local_settings.music_dir()
+            if legacy_folder:
+                legacy_key = os.path.normcase(os.path.normpath(legacy_folder))
+                selected = next(
+                    (root for root in roots if os.path.normcase(os.path.normpath(str(root.get("path") or ""))) == legacy_key),
+                    None,
+                )
+            if selected is None and len(roots) == 1:
+                selected = roots[0]
+            if selected is not None:
+                local_settings.set_fallback_root_id(str(selected["id"]))
+        if selected is None:
+            return _error("Choose a YouTube fallback folder under Library › Local first.")
+        folder = str(selected["path"])
         result = await anyio.to_thread.run_sync(
-            lambda: download_audio(target, folder, library=_local_library())
+            lambda: download_audio(target, folder, library=library)
         )
         return {"ok": True, "data": result}
     except ValueError as exc:
@@ -626,19 +655,35 @@ async def spotify_auth_start(request: Request) -> dict[str, Any]:
             return _error("A public Spotify Client ID is needed for one-time setup. Use the setup details, then Connect Spotify.")
         # A reconnect deliberately lets Hermes resolve its existing configured ID.
         worker_client_id = client_id if setup["client_id_required"] else None
+        try:
+            session = prepare_spotify_login(worker_client_id)
+            authorization_url = str(session.get("authorization_url") or "")
+            parsed_authorization = urlparse(authorization_url)
+            if (
+                parsed_authorization.scheme != "https"
+                or parsed_authorization.hostname != "accounts.spotify.com"
+                or parsed_authorization.path != "/authorize"
+                or parsed_authorization.username
+                or parsed_authorization.password
+            ):
+                cancel_spotify_login(session)
+                return _error(_SPOTIFY_AUTH_ERROR)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return _error(_SPOTIFY_AUTH_ERROR)
         _spotify_auth_flow.update(state="in_progress", error=None)
         worker = threading.Thread(
             target=_run_spotify_auth,
-            args=(worker_client_id,),
+            args=(session,),
             daemon=True,
             name="fluid-music-spotify-auth",
         )
         try:
             worker.start()
         except RuntimeError:
+            cancel_spotify_login(session)
             _spotify_auth_flow.update(state="failed", error=_SPOTIFY_AUTH_ERROR)
             return _error(_SPOTIFY_AUTH_ERROR)
-    return {"ok": True, "data": {"flow": _spotify_auth_flow_status()}}
+    return {"ok": True, "data": {"flow": _spotify_auth_flow_status(), "authorization_url": authorization_url}}
 
 
 @router.get("/spotify/local-capability")

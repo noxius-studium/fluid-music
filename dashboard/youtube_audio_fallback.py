@@ -2,8 +2,8 @@
 
 When the embed/watch engine fails for eligible content, this adapter downloads
 AUDIO ONLY with yt-dlp, prefers a native m4a stream (no FFmpeg/merge step), puts
-the file in the owner-configured music folder, registers that folder as a local
-library root and returns the indexed track for later use. It never downloads
+the file in an owner-approved local-library scan root, rescans that folder and
+returns the indexed track for later use. It never downloads
 video, never logs provider URLs/credentials, and is bounded (no playlist, fixed
 retries/timeout). Live provider/media effects only happen on the owner's Desktop
 with a real account; cloud fixtures use a labelled yt-dlp double.
@@ -72,7 +72,7 @@ def download_audio(
     """
     folder = str(music_dir or "").strip()
     if not folder:
-        raise ValueError("Set a music folder in Settings before using the audio fallback.")
+        raise ValueError("Choose a local music folder before using the audio fallback.")
     video_id = _video_id(str(target or ""))
     if not video_id:
         raise ValueError("A valid YouTube video is needed for the audio fallback.")

@@ -128,6 +128,21 @@ def test_extension_allowlist_root_confinement_and_root_validation(lib, tmp_path:
     assert file_root["root"]["path"] == str(music), "a file path approves its parent folder, never a broader root"
 
 
+def test_scan_recursively_indexes_supported_audio_in_nested_subdirectories(lib, tmp_path: Path):
+    music = tmp_path / "Music"
+    nested = write_track(music / "Artist" / "Album" / "Disc 2" / "Deep Cut.flac")
+    write_track(music / "Artist" / "Album" / "cover.jpg", b"fixture-image")
+    library = make_library(lib, tmp_path)
+
+    result = library.add_root(str(music))
+    rows = library.list_tracks()["items"]
+
+    assert result["scan"]["available_tracks"] == 1
+    assert len(rows) == 1
+    assert rows[0]["path"] == str(nested)
+    assert rows[0]["relative_path"] == str(Path("Artist") / "Album" / "Disc 2" / "Deep Cut.flac")
+
+
 def test_read_time_availability_without_rescan(lib, tmp_path: Path):
     music = tmp_path / "Music"
     track = write_track(music / "Gone.mp3")

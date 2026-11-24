@@ -591,7 +591,7 @@ const RADIO_PRESETS = [
 /* PURE_FUNCTIONS_END */
 
 const CSS = `
-.fluid-root,.fluid-dialog,.fluid-mini-player{--fm-panel:color-mix(in srgb,var(--ui-bg-secondary) 80%,transparent);--fm-soft:color-mix(in srgb,var(--ui-accent) 9%,transparent);--fm-line:var(--ui-stroke-secondary);color:var(--ui-text-primary);font-family:inherit;font-size:13px;line-height:1.5}
+.fluid-root,.fluid-dialog,.fluid-mini-player{--fm-panel:var(--ui-bg-secondary);--fm-soft:color-mix(in srgb,var(--ui-accent) 9%,transparent);--fm-line:var(--ui-stroke-secondary);color:var(--ui-text-primary);font-family:inherit;font-size:13px;line-height:1.5}
 .fluid-root{container:fluid / inline-size;height:100%;min-height:0;min-width:0}.fluid-app{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:transparent;overflow:hidden}.fluid-root *,.fluid-dialog *,.fluid-mini-player *{box-sizing:border-box}.fluid-root button,.fluid-root input,.fluid-root textarea,.fluid-root select,.fluid-dialog input,.fluid-dialog textarea,.fluid-dialog select{font:inherit}.fluid-root :focus-visible,.fluid-dialog :focus-visible,.fluid-mini-player :focus-visible{outline:2px solid var(--ui-accent);outline-offset:3px}
 .fluid-nav-button{display:flex;gap:10px;align-items:center;border:0;border-radius:6px;background:transparent;color:var(--ui-text-secondary);padding:10px 12px;cursor:pointer;text-align:left;min-height:38px}.fluid-nav-button:hover{background:var(--fm-soft)}.fluid-nav-button[data-active=true]{color:var(--ui-text-primary);background:var(--fm-soft);box-shadow:inset 2px 0 var(--ui-accent);font-weight:650}.fluid-provider-state{display:flex;gap:8px;align-items:center;color:var(--ui-text-secondary);font-size:11px}.fluid-state-dot,.fluid-status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ui-text-quaternary);flex:none}.fluid-state-dot[data-on=true],.fluid-status-dot[data-state=playing]{background:var(--ui-accent)}
 .fluid-content{min-width:0;overflow:auto;padding:18px clamp(14px,2cqw,28px) 28px;scrollbar-gutter:stable}.fluid-content-inner{max-width:1360px;margin:0 auto}.fluid-page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}.fluid-kicker{display:none}.fluid-page-title{font-size:clamp(19px,2cqw,25px);line-height:1.2;letter-spacing:-.03em;font-weight:650;margin:0}.fluid-page-subtitle{color:var(--ui-text-secondary);font-size:12px;max-width:680px;margin:5px 0 0;line-height:1.45}.fluid-section-title{font-size:17px;font-weight:650;letter-spacing:-.025em;margin:0}.fluid-section-copy{margin:6px 0 0;color:var(--ui-text-secondary);font-size:12px}.fluid-section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.fluid-actions,.fluid-row-actions,.fluid-tile-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.fluid-row-actions{gap:2px;flex-wrap:nowrap}.fluid-actions>button{white-space:nowrap}.fluid-muted{font-size:12px;color:var(--ui-text-secondary);line-height:1.6}.fluid-error{font-size:13px;color:var(--ui-text-primary);border-left:3px solid var(--ui-accent);padding:12px;background:var(--fm-soft)}.fluid-panel{border:1px solid var(--fm-line);border-radius:10px;min-width:0;background:var(--fm-panel)}.fluid-panel-pad{padding:22px}.fluid-empty{padding:24px 18px;border:1px dashed var(--fm-line);border-radius:9px;text-align:center;color:var(--ui-text-secondary);font-size:13px;line-height:1.7}.fluid-empty>svg{width:30px;height:30px;margin-bottom:12px;color:var(--ui-accent)}.fluid-empty strong{display:block;color:var(--ui-text-primary);font-size:18px;letter-spacing:-.025em;margin-bottom:8px}.fluid-empty .fluid-actions{justify-content:center;margin-top:20px}.fluid-notice{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:0 0 18px;background:var(--fm-soft);border-left:2px solid var(--ui-accent);font-size:12px;overflow-wrap:anywhere}.fluid-notice>span{min-width:0}
@@ -732,8 +732,8 @@ function createController(ctx, hostCapabilities = {}) {
   const bookmarks = atom([])
   const sleepTimer = atom({ mode: 'off', remainingMs: 0, label: '' })
   const historyRetention = atom(0)
-  // Owner-approved audio fallback folder (non-secret, profile-local).
-  const musicDir = atom(safeText(ctx.storage.get('musicDir', '')))
+  // Stable identity of the approved local scan root used for fallback audio.
+  const fallbackRootId = atom(safeText(ctx.storage.get('fallbackRootId', '')))
   const spotifyClientId = atom(safeText(ctx.storage.get('spotifyClientId', '')))
   const historyFilters = atom({ query: '', source: '', since: '', until: '' })
   const historyOffset = atom(0)
@@ -1293,9 +1293,23 @@ function createController(ctx, hostCapabilities = {}) {
   }
   async function startSpotifyAuth(clientId = '') {
     clearAuthPoll(); authAttempts = 0
-    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Waiting for browser approval…' })
+    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Opening Spotify authorization…' })
     const value = safeText(clientId)
-    await spotifyRequest('/spotify/auth/start', { method: 'POST', body: value ? { client_id: value } : {} })
+    const data = await spotifyRequest('/spotify/auth/start', { method: 'POST', body: value ? { client_id: value } : {} })
+    const rawUrl = safeText(data?.authorization_url)
+    if (rawUrl) {
+      let authorizationUrl
+      try {
+        const parsed = new URL(rawUrl)
+        if (parsed.protocol !== 'https:' || parsed.hostname !== 'accounts.spotify.com' || parsed.pathname !== '/authorize' || parsed.username || parsed.password) throw new Error('invalid')
+        authorizationUrl = parsed.toString()
+      } catch {
+        throw new Error('Spotify returned an invalid authorization page. Retry after updating FluidMusic.')
+      }
+      const opened = await ctx.os?.openExternal?.(authorizationUrl)
+      if (!opened) throw new Error('Hermes could not open Spotify in your default browser. Retry from the Desktop app.')
+    }
+    spotifyAuth.set({ ...spotifyAuth.get(), state: 'connecting', detail: 'Waiting for browser approval…' })
     return pollSpotifyAuth()
   }
   async function transferSpotifyDevice(deviceId) {
@@ -1333,6 +1347,7 @@ function createController(ctx, hostCapabilities = {}) {
     const tracks = (Array.isArray(tracksData?.items) ? tracksData.items : []).map(localTrackItem).filter(Boolean)
     localRoots.set(roots)
     localTracks.set(tracks)
+    if (!fallbackRootId.get() && roots.length === 1) await setFallbackRoot(roots[0].id)
     const sessionTracks = [...localRegistry.values()].filter(item => item.objectUrl?.startsWith('blob:'))
     localRegistry.clear()
     sessionTracks.forEach(item => localRegistry.set(item.id, item))
@@ -1373,13 +1388,22 @@ function createController(ctx, hostCapabilities = {}) {
   async function addLocalRoot(path) {
     const folder = safeText(path)
     if (!folder) throw new Error('Choose a music folder first.')
-    await request('/local/roots', { method: 'POST', body: { path: folder }, timeoutMs: 120000 })
+    const result = await request('/local/roots', { method: 'POST', body: { path: folder }, timeoutMs: 120000 })
+    const root = result?.root
+    if (root?.id) await setFallbackRoot(root.id)
     return refreshLocalLibrary()
   }
 
   async function chooseLocalRoot() {
+    if (typeof ctx.os?.pickOpenPath !== 'function') {
+      message.set('The native folder picker is unavailable here. Enter an absolute backend folder path under Local music instead.')
+      return null
+    }
     const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose a music folder' })
-    if (!path) return null
+    if (!path) {
+      message.set('No folder selected. In browser or remote views, enter an absolute backend folder path under Local music.')
+      return null
+    }
     return addLocalRoot(path)
   }
 
@@ -1392,6 +1416,7 @@ function createController(ctx, hostCapabilities = {}) {
     const id = safeText(rootId)
     if (!id) return false
     await request(`/local/roots/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (fallbackRootId.get() === id) await setFallbackRoot('')
     await refreshLocalLibrary()
     return true
   }
@@ -2151,23 +2176,22 @@ function createController(ctx, hostCapabilities = {}) {
   async function loadSettings() {
     try {
       const data = await request('/settings')
-      const folder = safeText(data?.music_dir)
-      musicDir.set(folder)
-      ctx.storage.set('musicDir', folder)
+      const rootId = safeText(data?.fallback_root_id)
+      fallbackRootId.set(rootId)
+      ctx.storage.set('fallbackRootId', rootId)
       const clientId = safeText(data?.spotify_client_id)
       spotifyClientId.set(clientId)
       ctx.storage.set('spotifyClientId', clientId)
     } catch { /* Cached folder stays usable when settings cannot be read. */ }
   }
 
-  async function setMusicDir(value) {
-    const folder = safeText(value)
-    if (!folder) throw new Error('Choose a music folder first.')
-    const data = await request('/settings', { method: 'PUT', body: { music_dir: folder } })
-    const saved = safeText(data?.music_dir, folder)
-    musicDir.set(saved)
-    ctx.storage.set('musicDir', saved)
-    message.set(`Audio fallback folder saved: ${saved}`)
+  async function setFallbackRoot(value) {
+    const id = safeText(value)
+    const data = await request('/settings', { method: 'PUT', body: { fallback_root_id: id } })
+    const saved = safeText(data?.fallback_root_id)
+    fallbackRootId.set(saved)
+    ctx.storage.set('fallbackRootId', saved)
+    if (saved) message.set('Local folder selected for recursive scanning and YouTube audio fallback.')
     return saved
   }
 
@@ -2182,10 +2206,6 @@ function createController(ctx, hostCapabilities = {}) {
     return saved
   }
 
-  async function chooseMusicDir() {
-    const path = await ctx.os?.pickOpenPath?.({ directories: true, multiple: false, title: 'Choose the audio fallback folder' })
-    return path ? setMusicDir(path) : null
-  }
 
   // Real fallback: download audio-only m4a to the configured folder, register
   // it in the local library, and place it Up Next — never silently start a new
@@ -2195,7 +2215,7 @@ function createController(ctx, hostCapabilities = {}) {
     if (!item || item.source !== 'youtube') return false
     const url = safeText(item.url)
     if (!url) { message.set('This item has no source URL to download from.'); return false }
-    if (!musicDir.get()) { message.set('Set a music folder in Settings › Playback before using the audio fallback.'); return false }
+    if (!fallbackRootId.get()) { message.set('Choose a local music folder before using the audio fallback.'); return false }
     // A background download is NOT a transport transition: never rewrite the
     // shared status. Message-only progress keeps whatever is playing intact.
     message.set('Downloading audio to your music folder…')
@@ -2850,9 +2870,9 @@ function createController(ctx, hostCapabilities = {}) {
     current, add, remove, move, clearQueue, resetSavedRadio, next, previous, playAt, toggle, seekTo, setVolume, setShuffle, setRepeat, setSpotifyAutoplay,
     queueUndo, addNext, removeQueueItems, moveQueueItems, clearUpcoming, undoQueueEdit,
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
-    resumeOffer, bookmarks, sleepTimer, historyRetention, musicDir, spotifyClientId, historyFilters, historyOffset,
+    resumeOffer, bookmarks, sleepTimer, historyRetention, fallbackRootId, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setMusicDir, chooseMusicDir, setSpotifyClientId, downloadYouTubeAudioFallback,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setFallbackRoot, setSpotifyClientId, downloadYouTubeAudioFallback,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, toggleMiniDetails, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
@@ -3642,7 +3662,7 @@ function SpotifyConnection({ controller }) {
       h(
         'small',
         {},
-        'Redirect URI http://127.0.0.1:43827/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
+        'Redirect URI http://127.0.0.1:41337/spotify/callback · PKCE, no secret · Premium required for playback control. Setup guide: docs/spotify-setup.md',
       ),
     ),
     h(
@@ -4176,7 +4196,8 @@ function LocalPage({ controller }) {
   const files = useRef(null)
   const sessionTracks = useValue(controller.sessionTracks)
   const tracks = useValue(controller.localTracks),
-    roots = useValue(controller.localRoots)
+    roots = useValue(controller.localRoots),
+    fallbackRootId = useValue(controller.fallbackRootId)
   const [path, setPath] = useState(''),
     [query, setQuery] = useState(''),
     [busy, setBusy] = useState(false),
@@ -4206,7 +4227,7 @@ function LocalPage({ controller }) {
     h(PageHead, {
       kicker: 'On your device',
       title: 'Your own collection.',
-      subtitle: 'Approve a folder once. Your tracks and saved playlists stay linked across restarts.',
+      subtitle: 'Approve a folder once. FluidMusic scans it automatically, including subfolders, and keeps playlists linked across restarts.',
       actions: h(
         WorkspaceButton,
         { disabled: busy || !roots.length, onClick: () => void run(() => controller.rescanLocalLibrary()) },
@@ -4289,7 +4310,7 @@ function LocalPage({ controller }) {
           h(
             'p',
             { className: 'fluid-section-copy' },
-            'Audio stays on disk. Only folders you choose are scanned.',
+            'Audio stays on disk. Chosen folders and all their subfolders are scanned automatically. The selected folder also receives YouTube fallback audio.',
           ),
         ),
         h(
@@ -4335,13 +4356,18 @@ function LocalPage({ controller }) {
               h(
                 'span',
                 {},
-                `${root.track_count} tracks${root.missing_count ? ` · ${root.missing_count} missing` : ''}`,
+                `${root.track_count} tracks${root.missing_count ? ` · ${root.missing_count} missing` : ''}${root.id === fallbackRootId ? ' · YouTube fallback' : ''}`,
               ),
             ),
             h(
               WorkspaceButton,
               { disabled: busy, onClick: () => void run(() => controller.rescanLocalLibrary(root.id)) },
               'Rescan',
+            ),
+            h(
+              WorkspaceButton,
+              { disabled: busy || root.id === fallbackRootId, onClick: () => void run(() => controller.setFallbackRoot(root.id)) },
+              root.id === fallbackRootId ? 'Fallback folder' : 'Use for fallback',
             ),
             h(Action, {
               compact: true,
@@ -5644,36 +5670,12 @@ function RecoveryPage({ controller, onOpenDiagnostics }) {
   )
 }
 
-function MusicFolderSetting({ controller }) {
-  const saved = useValue(controller.musicDir)
-  const [draft, setDraft] = useState(saved)
-  const [busy, setBusy] = useState(false)
-  useEffect(() => { setDraft(saved) }, [saved])
-  const browse = async () => {
-    setBusy(true)
-    try { const folder = await controller.chooseMusicDir(); if (folder) setDraft(folder) } finally { setBusy(false) }
-  }
-  const save = async () => {
-    setBusy(true)
-    try { await controller.setMusicDir(draft) } finally { setBusy(false) }
-  }
-  return h('div', { className: 'fluid-setting-block' },
-    h('h3', { className: 'fluid-section-title' }, 'Audio fallback folder'),
-    h('p', { className: 'fluid-section-copy' }, 'When a YouTube video cannot play here, FluidMusic can save its audio as m4a in this folder and add it to your local library. Personal use; respect the provider terms.'),
-    h('div', { className: 'fluid-inline-field' },
-      h('input', { type: 'text', value: draft, placeholder: 'Choose a music folder', 'aria-label': 'Audio fallback music folder', onChange: event => setDraft(event.target.value) }),
-      h(WorkspaceButton, { disabled: busy, onClick: () => void browse() }, 'Browse'),
-      h(WorkspaceButton, { primary: true, disabled: busy || !draft.trim(), onClick: () => void save() }, 'Save'),
-    ),
-  )
-}
-
 function SettingsPage({ controller }) {
   const [tab, setTab] = useState('providers')
   const autoplay = useValue(controller.spotifyAutoplay)
   return h('div', {}, h(PageHead, { title: 'Settings', subtitle: 'Connections, playback behavior, and diagnostics.' }), h(SecondaryTabs, { label: 'Settings sections', value: tab, onChange: setTab, items: [['providers', 'Providers'], ['playback', 'Playback'], ['recovery', 'Recovery'], ['diagnostics', 'Diagnostics']] }),
     tab === 'providers' ? h('div', { className: 'fluid-settings-grid' }, h(SpotifyConnection, { controller }), h(YouTubeControls, { controller })) :
-    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(MusicFolderSetting, { controller }), h(HistoryRetention, { controller })) :
+    tab === 'playback' ? h('section', { className: 'fluid-panel fluid-panel-pad' }, h('h2', { className: 'fluid-section-title' }, 'Playback'), h(VolumeControl, { controller }), h('label', { className: 'fluid-switch-row' }, h('input', { type: 'checkbox', checked: autoplay, onChange: event => controller.setSpotifyAutoplay(event.target.checked) }), h('span', {}, h('strong', {}, 'Let Spotify continue after a track'), h('small', {}, 'Otherwise FluidMusic advances its temporary Up Next queue.'))), h(HistoryRetention, { controller })) :
     tab === 'recovery' ? h(RecoveryPage, { controller, onOpenDiagnostics: () => setTab('diagnostics') }) : h(LogsPage, { controller }))
 }
 

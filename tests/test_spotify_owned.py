@@ -79,7 +79,7 @@ def test_pkce_verifier_challenge_and_authorize_url_follow_the_official_contract(
     params = parse_qs(parsed.query)
     assert params["client_id"] == ["cid"]
     assert params["response_type"] == ["code"]
-    assert params["redirect_uri"] == ["http://127.0.0.1:43827/spotify/callback"]
+    assert params["redirect_uri"] == ["http://127.0.0.1:41337/spotify/callback"]
     assert params["state"] == ["state-123"]
     assert params["code_challenge_method"] == ["S256"]
     assert params["code_challenge"] == [challenge]
@@ -98,7 +98,7 @@ def test_code_exchange_stores_protected_tokens_and_binds_the_account(owned: Any)
             assert body["grant_type"] == ["authorization_code"]
             assert body["code"] == ["auth-code"]
             assert body["code_verifier"] == ["verifier"]
-            assert body["redirect_uri"] == ["http://127.0.0.1:43827/spotify/callback"]
+            assert body["redirect_uri"] == ["http://127.0.0.1:41337/spotify/callback"]
             return httpx.Response(200, json=token_payload())
         if request.url.path == "/v1/me":
             assert request.headers["Authorization"] == "Bearer access-1"

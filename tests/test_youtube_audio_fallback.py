@@ -99,7 +99,7 @@ def test_settings_and_fallback_routes(api: Any, tmp_path: Path) -> None:
     def get_json(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         return run(request(app, method, path, **kwargs)).json()
 
-    assert get_json("GET", "/settings") == {"ok": True, "data": {"music_dir": "", "spotify_client_id": ""}}
+    assert get_json("GET", "/settings") == {"ok": True, "data": {"music_dir": "", "fallback_root_id": "", "spotify_client_id": ""}}
     assert get_json("PUT", "/settings", json={"music_dir": "x" * 5000})["ok"] is False
     assert get_json("PUT", "/settings", json={"music_dir": "/tmp/FM Music"})["data"]["music_dir"] == "/tmp/FM Music"
     assert get_json("GET", "/settings")["data"]["music_dir"] == "/tmp/FM Music"
@@ -117,7 +117,40 @@ def test_settings_and_fallback_routes(api: Any, tmp_path: Path) -> None:
     fallback.download_audio = fake_download  # type: ignore[assignment]
     try:
         result = get_json("POST", "/youtube/fallback/audio", json={"url": WATCH_URL})
-        assert result["ok"] is True and result["data"]["track_id"] == "t1"
-        assert calls == [{"target": WATCH_URL, "folder": "/tmp/FM Music"}]
+        assert result["ok"] is False
+        assert "Library" in result["error"]
+        assert calls == []
+    finally:
+        fallback.download_audio = original  # type: ignore[assignment]
+
+
+def test_fallback_uses_an_approved_recursive_scan_root(api: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dashboard.local_library import LocalLibrary
+
+    folder = tmp_path / "Music"
+    nested = folder / "Artist" / "Album"
+    nested.mkdir(parents=True)
+    library = LocalLibrary(tmp_path / "fallback-route.sqlite3")
+    root = library.add_root(str(folder))["root"]
+    monkeypatch.setattr(api, "_local_library", lambda: library)
+    app = app_for(api)
+
+    saved = run(request(app, "PUT", "/settings", json={"fallback_root_id": root["id"]})).json()
+    assert saved["ok"] is True
+    assert saved["data"]["fallback_root_id"] == root["id"]
+
+    fallback = api._load_dashboard_module("youtube_audio_fallback")
+    calls: list[str] = []
+
+    def fake_download(target: str, destination: str, *, library: Any) -> dict[str, Any]:
+        calls.append(destination)
+        return {"title": "Fixture Track", "video_id": "abcdefgh001", "file": "x.m4a", "track_id": "t1", "registered": True}
+
+    original = fallback.download_audio
+    fallback.download_audio = fake_download  # type: ignore[assignment]
+    try:
+        result = run(request(app, "POST", "/youtube/fallback/audio", json={"url": WATCH_URL})).json()
+        assert result["ok"] is True
+        assert calls == [str(folder)]
     finally:
         fallback.download_audio = original  # type: ignore[assignment]

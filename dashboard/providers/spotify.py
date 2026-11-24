@@ -36,7 +36,7 @@ TOKEN_URL = "https://accounts.spotify.com/api/token"
 REVOKE_URL = "https://accounts.spotify.com/api/token"
 API_BASE_URL = "https://api.spotify.com/v1"
 DASHBOARD_URL = "https://developer.spotify.com/dashboard"
-REDIRECT_PORT = 43827
+REDIRECT_PORT = 41337
 REDIRECT_PATH = "/spotify/callback"
 SCOPES = (
     "user-read-playback-state user-modify-playback-state user-read-currently-playing "
@@ -67,7 +67,22 @@ def configured_client_id() -> str | None:
     # non-secret identifier; token-store credentials still own the tokens.
     from . import local_settings
 
-    return local_settings.spotify_client_id() or None
+    saved = local_settings.spotify_client_id()
+    if saved:
+        return saved
+    # Reuse only the PUBLIC app identifier already configured for the active
+    # Hermes profile. FluidMusic still owns a separate PKCE grant and never
+    # reads, copies, refreshes or revokes the official plugin's OAuth tokens.
+    try:
+        from hermes_cli.config import get_env_value
+
+        for name in ("HERMES_SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_ID"):
+            candidate = str(get_env_value(name) or "").strip()
+            if local_settings.SPOTIFY_CLIENT_ID_RE.fullmatch(candidate):
+                return candidate
+    except (ImportError, RuntimeError):
+        pass
+    return None
 
 
 def auth_status() -> dict[str, Any]:
@@ -187,17 +202,11 @@ def _consume_callback(result: dict[str, Any], expected_state: str) -> str:
     return code
 
 
-def login(args: Any) -> None:
-    """Run the official PKCE flow; the API request thread never waits on it.
-
-    The genuine provider page opens in the user's browser (official OAuth
-    consent); the callback listener is loopback-only and single-use. No
-    password is ever captured by FluidMusic.
-    """
-    client_id = str(getattr(args, "client_id", None) or configured_client_id() or "").strip()
+def prepare_login(client_id: str | None = None) -> dict[str, Any]:
+    """Bind the callback first, then return the genuine provider URL to open."""
+    client_id = str(client_id or configured_client_id() or "").strip()
     if not client_id:
         raise SpotifyError("A Spotify Client ID is needed for one-time setup before connecting.", code="spotify_client_id_missing")
-    timeout = float(getattr(args, "timeout", 180) or 180)
     verifier, challenge = _new_pkce()
     state = secrets.token_urlsafe(32)
     result: dict[str, Any] = {}
@@ -229,16 +238,48 @@ def login(args: Any) -> None:
     except OSError as exc:
         raise SpotifyError("Spotify could not start its local callback. Check the redirect URI and retry.", code="spotify_callback_bind_failed") from exc
     server.timeout = 1.0
+    return {
+        "authorization_url": _authorize_url(client_id, state, challenge),
+        "client_id": client_id,
+        "verifier": verifier,
+        "state": state,
+        "result": result,
+        "server": server,
+    }
+
+
+def cancel_login(session: dict[str, Any]) -> None:
+    """Close a prepared callback listener when its worker could not start."""
     try:
-        if not getattr(args, "no_browser", False):
-            webbrowser.open(_authorize_url(client_id, state, challenge))
-        deadline = time.monotonic() + timeout
+        session["server"].server_close()
+    except (AttributeError, KeyError, OSError, TypeError):
+        pass
+
+
+def complete_login(session: dict[str, Any], timeout: float = 180.0) -> None:
+    """Wait for the prepared callback and exchange its code."""
+    server = session["server"]
+    result = session["result"]
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    try:
         while time.monotonic() < deadline and "code" not in result and "error" not in result:
             server.handle_request()
     finally:
         server.server_close()
-    code = _consume_callback(result, state)
-    _exchange_code(client_id, code, verifier)
+    code = _consume_callback(result, str(session["state"]))
+    _exchange_code(str(session["client_id"]), code, str(session["verifier"]))
+
+
+def login(args: Any) -> None:
+    """CLI-compatible PKCE flow; Desktop opens the prepared URL through its native shell."""
+    session = prepare_login(getattr(args, "client_id", None))
+    try:
+        if not getattr(args, "no_browser", False) and not webbrowser.open(str(session["authorization_url"])):
+            raise SpotifyError("Spotify could not open the authorization page in your browser.", code="spotify_browser_open_failed")
+        complete_login(session, float(getattr(args, "timeout", 180) or 180))
+    except BaseException:
+        cancel_login(session)
+        raise
 
 
 class SpotifyClient:
