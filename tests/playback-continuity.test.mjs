@@ -9,7 +9,7 @@ const source = await readFile(new URL('../desktop/plugin.js', import.meta.url), 
 const arch = await readFile(new URL('../docs/architecture.md', import.meta.url), 'utf8')
 
 test('background audio fallback is not a transport transition', async () => {
-  const start = source.indexOf('async function downloadYouTubeAudioFallback()')
+  const start = source.indexOf('async function downloadYouTubeAudio(')
   const end = source.indexOf('async function assessSpotifyLocalPlayback()', start)
   assert.ok(start >= 0 && end > start, 'fallback region boundary')
   const fn = source.slice(start, end)

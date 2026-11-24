@@ -2207,11 +2207,10 @@ function createController(ctx, hostCapabilities = {}) {
   }
 
 
-  // Real fallback: download audio-only m4a to the configured folder, register
-  // it in the local library, and place it Up Next — never silently start a new
-  // engine or fake provider playback.
-  async function downloadYouTubeAudioFallback() {
-    const item = current()
+  // User-requested local save (also used as the playback fallback): download
+  // audio-only m4a into the approved root, index it, and place it Up Next.
+  // It never selects the source item or starts/stops any playback engine.
+  async function downloadYouTubeAudio(item = current()) {
     if (!item || item.source !== 'youtube') return false
     const url = safeText(item.url)
     if (!url) { message.set('This item has no source URL to download from.'); return false }
@@ -2872,7 +2871,7 @@ function createController(ctx, hostCapabilities = {}) {
     listeningSessions, saveListeningSession, listeningSessionPreview, restoreListeningSession, deleteListeningSession,
     resumeOffer, bookmarks, sleepTimer, historyRetention, fallbackRootId, spotifyClientId, historyFilters, historyOffset,
     resumeHere, startOver, addBookmark, editBookmark, deleteBookmark, jumpToBookmark, refreshBookmarks,
-    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setFallbackRoot, setSpotifyClientId, downloadYouTubeAudioFallback,
+    armSleepTimer, cancelSleepTimer, removeHistoryEntry, loadHistoryRetention, setHistoryRetention, loadSettings, setFallbackRoot, setSpotifyClientId, downloadYouTubeAudio,
     sourceHealth, retryState, retryRadio, retrySpotify, copyDiagnostics,
     toggleFavorite, refreshSpotify, refreshSpotifyAuth, refreshSpotifyDevices, startSpotifyAuth, transferSpotifyDevice, addYouTubeUrl, addYouTubeItem, searchYouTube, resolveYouTubeEmbedUrl, reportYouTubeState, setYouTubeCommandSink, retryYouTube, attemptYouTubeWatchFallback, toggleYouTubeVideo, toggleMiniDetails, youtubeWatchCapability: () => watchCapability,
     sessionTracks, openLocalFiles, refreshLocalLibrary, addLocalRoot, chooseLocalRoot, rescanLocalLibrary, removeLocalRoot,
@@ -3219,6 +3218,16 @@ function TrackRow({
   hideSave = false,
   origin = '',
 }) {
+  const [downloading, setDownloading] = useState(false)
+  const download = async () => {
+    if (downloading) return
+    setDownloading(true)
+    try {
+      await controller.downloadYouTubeAudio(item)
+    } finally {
+      setDownloading(false)
+    }
+  }
   return h(
     'div',
     { className: 'fluid-track-row', 'data-missing': Boolean(item.unavailable) },
@@ -3272,6 +3281,13 @@ function TrackRow({
         label: `Play ${item.title} next`,
         disabled: item.unavailable,
         onClick: () => controller.addNext(item, origin),
+      }),
+      item.source === 'youtube' && h(Action, {
+        compact: true,
+        kind: 'download',
+        label: downloading ? `Downloading ${item.title}` : `Download ${item.title} locally`,
+        disabled: downloading || item.unavailable,
+        onClick: () => void download(),
       }),
       !hideSave && h(AddToPlaylist, { controller, item }),
       extraActions,
@@ -5319,7 +5335,7 @@ function MiniPlayer({ controller }) {
         youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
         youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
           youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
-          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
+          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudio(item) }, 'Download audio'),
           youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
           h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
       ),

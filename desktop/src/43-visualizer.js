@@ -175,7 +175,7 @@ function MiniPlayer({ controller }) {
         youtubeState.status === 'error' && youtubeState.error && h('p', { className: 'fluid-error', role: 'alert' }, youtubeState.error),
         youtubeState.status === 'error' && h('div', { className: 'fluid-actions' },
           youtubeState.retryable && h(WorkspaceButton, { onClick: () => void controller.retryYouTube() }, 'Retry'),
-          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudioFallback() }, 'Download audio'),
+          youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => void controller.downloadYouTubeAudio(item) }, 'Download audio'),
           youtubeState.fallbackEligible && h(WorkspaceButton, { onClick: () => controller.attemptYouTubeWatchFallback() }, 'Try watch fallback'),
           h(WorkspaceButton, { onClick: () => void controller.next() }, 'Skip')),
       ),

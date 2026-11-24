@@ -335,6 +335,16 @@ function TrackRow({
   hideSave = false,
   origin = '',
 }) {
+  const [downloading, setDownloading] = useState(false)
+  const download = async () => {
+    if (downloading) return
+    setDownloading(true)
+    try {
+      await controller.downloadYouTubeAudio(item)
+    } finally {
+      setDownloading(false)
+    }
+  }
   return h(
     'div',
     { className: 'fluid-track-row', 'data-missing': Boolean(item.unavailable) },
@@ -388,6 +398,13 @@ function TrackRow({
         label: `Play ${item.title} next`,
         disabled: item.unavailable,
         onClick: () => controller.addNext(item, origin),
+      }),
+      item.source === 'youtube' && h(Action, {
+        compact: true,
+        kind: 'download',
+        label: downloading ? `Downloading ${item.title}` : `Download ${item.title} locally`,
+        disabled: downloading || item.unavailable,
+        onClick: () => void download(),
       }),
       !hideSave && h(AddToPlaylist, { controller, item }),
       extraActions,
