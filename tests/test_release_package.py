@@ -43,6 +43,12 @@ def test_release_content_contract(packaging, tmp_path: Path):
     for required in packaging.REQUIRED_PATHS:
         assert required.as_posix() in names, f"required runtime file {required} is in the release"
     assert "docs/architecture.md" in names and "docs/limitations.md" in names
+    assert {
+        "docs/images/fluidmusic-workspace.png",
+        "docs/images/fluidmusic-youtube-download.png",
+        "docs/images/fluidmusic-titlebar-player.png",
+        "docs/images/fluidmusic-mobile.png",
+    } <= names, "production README screenshots ship with the archive"
     assert "docs/handoffs/agent-plan/COMPATIBILITY.md" in names
     assert any(name.startswith("docs/handoffs/agent-plan/receipts/") for name in names), "execution receipts ship as review evidence"
     assert any(name.startswith("docs/release-") for name in names), "release notes ship"
@@ -59,7 +65,14 @@ def test_release_content_contract(packaging, tmp_path: Path):
 def test_forbidden_path_guard(packaging):
     for bad in (".env", "oauth-token.json", "secrets.json", "credentials.json", "plugin-data/fluid-music/library.sqlite3", "cache/cover.png", "media/song.mp3", "node_modules/x/index.js", "dist/old.zip"):
         assert packaging.is_forbidden_release_path(Path(bad)), bad
-    for good in ("dashboard/providers/token_store.py", "dashboard/manifest.json", "desktop/plugin.js", "docs/architecture.md", "BUILD-INFO.json"):
+    for good in (
+        "dashboard/providers/token_store.py",
+        "dashboard/manifest.json",
+        "desktop/plugin.js",
+        "docs/architecture.md",
+        "docs/images/fluidmusic-workspace.png",
+        "BUILD-INFO.json",
+    ):
         assert not packaging.is_forbidden_release_path(Path(good)), good
 
 
@@ -105,7 +118,7 @@ def test_stale_instructions_are_reconciled():
         assert "patched Hermes" not in text, "no private host patch instruction"
     assert "Hermes-managed Spotify PKCE" not in readme and "bundled `SpotifyClient`" not in architecture
     assert "navy" not in architecture and "coral" not in architecture, "private palette description superseded"
-    assert "ships and owns this PKCE integration" in readme
+    assert "FluidMusic owns a separate Spotify PKCE connection" in readme
     assert "imports no Hermes-core or sibling-plugin Spotify implementation" in architecture
     assert "capability-protected" in readme and "embed host" in architecture
     assert "playwright install" not in readme and "npm ci" not in readme, "heavy verification steps replaced by the serial suite"

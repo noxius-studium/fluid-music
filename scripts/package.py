@@ -53,6 +53,12 @@ DOCS_ALLOWLIST = (
     "docs/spotify-setup.md",
     "docs/handoffs/agent-plan/COMPATIBILITY.md",
 )
+DOCS_IMAGE_ALLOWLIST = (
+    "docs/images/fluidmusic-workspace.png",
+    "docs/images/fluidmusic-youtube-download.png",
+    "docs/images/fluidmusic-titlebar-player.png",
+    "docs/images/fluidmusic-mobile.png",
+)
 FORBIDDEN_PARTS = (".env", ".sqlite", ".db", ".pem", ".key", ".p12", ".pfx", "__pycache__", "node_modules", ".git", "plugin-data")
 FORBIDDEN_SUFFIXES = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".webm", ".png", ".jpg", ".jpeg", ".zip")
 SECRET_JSON = re.compile(r"(^|/)(oauth-)?token[^/]*\.json$|(^|/)credentials?[^/]*\.json$|(^|/)secrets?[^/]*\.json$")
@@ -74,6 +80,8 @@ def is_forbidden_release_path(path: Path) -> bool:
     remain required release content.
     """
     lowered = path.as_posix().lower()
+    if lowered in DOCS_IMAGE_ALLOWLIST:
+        return False
     if any(part in lowered for part in FORBIDDEN_PARTS):
         return True
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
@@ -99,6 +107,11 @@ def release_files(root: Path) -> list[Path]:
         candidate = root / relative
         if candidate.is_file():
             files.append(Path(relative))
+    for relative in DOCS_IMAGE_ALLOWLIST:
+        candidate = root / relative
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Required README image missing: {relative}")
+        files.append(Path(relative))
     receipts = docs / "handoffs" / "agent-plan" / "receipts"
     if receipts.is_dir():
         files.extend(path.relative_to(root) for path in sorted(receipts.glob("*.md")) if path.is_file())
